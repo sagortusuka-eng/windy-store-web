@@ -1,6 +1,6 @@
 # ============================================================
 #  KC & Windy Smart Stock Tracker & Budget Control
-#  Warm Orange / Peach SaaS Edition
+#  Warm Orange / Peach SaaS Edition  (v2: top navigation + blue-white entry form)
 # ============================================================
 import calendar
 import difflib
@@ -158,8 +158,81 @@ section[data-testid="stSidebar"] div[data-baseweb="select"] > div {{ background:
     background: rgba(255,255,255,.16); border-radius: 10px; padding: 8px 12px; margin: 5px 0;
     font-size: 13px; font-weight: 600; color: #fff !important;
 }}
-</style>
-""", unsafe_allow_html=True)
+
+/* ---------- Sidebar login: crystal-clear labels ---------- */
+section[data-testid="stSidebar"] label p,
+section[data-testid="stSidebar"] div[data-testid="stWidgetLabel"] p {{
+    color: #FFFFFF !important; font-weight: 700 !important; font-size: 13px !important; letter-spacing: .2px;
+}}
+section[data-testid="stSidebar"] div[data-baseweb="input"] input {{
+    padding: 10px 12px !important; font-size: 14px !important; color: {INK} !important;
+    -webkit-text-fill-color: {INK} !important; background: #fff !important;
+}}
+section[data-testid="stSidebar"] .stButton > button,
+section[data-testid="stSidebar"] div[data-testid="stForm"] button {{
+    padding: 10px 14px !important; font-size: 14px !important; min-height: 42px;
+}}
+section[data-testid="stSidebar"] .stButton > button p,
+section[data-testid="stSidebar"] div[data-testid="stForm"] button p {{ color: #C2410C !important; font-weight: 800 !important; }}
+.user-card {{
+    background: #ffffff; border-radius: 12px; padding: 12px 14px; margin: 6px 0 10px 0;
+    box-shadow: 0 6px 16px rgba(124,45,18,.22);
+}}
+.user-card .u-lbl {{ font-size: 10.5px; font-weight: 800; color: #94A3B8 !important; text-transform: uppercase; letter-spacing: .6px; }}
+.user-card .u-name {{ font-size: 15px; font-weight: 800; color: #1E293B !important; margin-bottom: 6px; }}
+.user-card .u-role {{
+    display: inline-block; font-size: 11.5px; font-weight: 800; color: #C2410C !important;
+    background: #FFF4E6; border: 1px solid #FDE7CF; border-radius: 999px; padding: 3px 12px;
+}}
+.brand-card {{
+    background: rgba(255,255,255,.18); border: 1px solid rgba(255,255,255,.35); border-radius: 12px;
+    padding: 10px 14px; margin-bottom: 10px;
+}}
+.brand-card .b-t {{ font-size: 14px; font-weight: 800; color: #fff !important; line-height: 1.3; }}
+.brand-card .b-s {{ font-size: 11px; color: #FFF7ED !important; margin-top: 2px; }}
+
+/* ---------- Slim strip shown at the top of each tab ---------- */
+.strip {{
+    display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;
+    background: #fff; border: 1px solid #FDE7CF; border-radius: 12px; padding: 8px 14px; margin-bottom: 12px;
+    box-shadow: 0 4px 6px -1px rgba(0,0,0,.05); font-size: 12.5px; color: #475569; font-weight: 600;
+}}
+.strip b {{ color: {INK}; }}
+
+/* ---------- NEW TRANSACTION: compact blue-white entry card ---------- */
+.st-key-tx_form_box {{
+    background: linear-gradient(180deg, #FFFFFF 0%, #EFF6FF 100%) !important;
+    border: 1.5px solid #BFDBFE !important; border-radius: 14px !important;
+    box-shadow: 0 8px 22px rgba(37,99,235,.12) !important; padding: 10px 14px 12px 14px !important;
+}}
+.st-key-tx_form_box div[data-testid="stVerticalBlock"] {{ gap: .4rem !important; }}
+.st-key-tx_form_box .section-title {{ border-left-color: #2563EB; color: #1E3A8A; margin: 0 0 4px 0; }}
+.st-key-tx_form_box label p, .st-key-tx_form_box div[data-testid="stWidgetLabel"] p {{
+    color: #1E3A8A !important; font-weight: 700 !important; font-size: 12px !important; margin-bottom: 0 !important;
+}}
+.st-key-tx_form_box div[data-testid="stWidgetLabel"] {{ min-height: 0 !important; margin-bottom: -2px; }}
+.st-key-tx_form_box div[data-baseweb="input"], .st-key-tx_form_box div[data-baseweb="base-input"] {{
+    background: #ffffff !important; border: 1.5px solid #BFDBFE !important; border-radius: 10px !important;
+}}
+.st-key-tx_form_box div[data-baseweb="input"]:focus-within {{
+    border-color: #2563EB !important; box-shadow: 0 0 0 3px rgba(37,99,235,.18) !important;
+}}
+.st-key-tx_form_box div[data-baseweb="input"] input {{ padding: 6px 10px !important; font-size: 13.5px !important; }}
+.st-key-tx_form_box div[data-baseweb="select"] > div {{ border: 1.5px solid #BFDBFE !important; min-height: 36px !important; border-radius: 10px !important; }}
+.st-key-tx_form_box div[data-testid="stNumberInput"] button {{ background: #EFF6FF; }}
+.st-key-tx_form_box div[data-testid="stAlert"] {{ padding: 6px 10px !important; font-size: 12.5px; }}
+.st-key-tx_form_box .stCheckbox label p {{ font-size: 12px !important; }}
+.st-key-tx_form_box .stButton > button[kind="primary"] {{
+    background: linear-gradient(120deg, #2563EB, #38BDF8) !important; border: none; color: #fff !important;
+    box-shadow: 0 6px 16px rgba(37,99,235,.35) !important; padding: 8px 16px !important; font-size: 14px !important;
+}}
+.st-key-tx_form_box .stButton > button[kind="primary"] p {{ color: #fff !important; }}
+.st-key-tx_form_box .stButton > button[kind="primary"]:hover {{ box-shadow: 0 8px 22px rgba(37,99,235,.5) !important; }}
+.officer-pill {{
+    display: inline-block; background: #DBEAFE; color: #1E40AF; border: 1px solid #BFDBFE; border-radius: 999px;
+    padding: 3px 12px; font-size: 12px; font-weight: 700;
+}}
+</style>""", unsafe_allow_html=True)
 
 # ============================================================
 #  CONSTANTS
@@ -443,7 +516,10 @@ def done(msg):
 def show_flash():
     msg = st.session_state.pop("flash", None)
     if msg:
-        st.success(msg)
+        try:
+            st.toast(msg, icon="✅")
+        except Exception:
+            st.success(msg)
 
 
 def mgr_check(key):
@@ -456,9 +532,17 @@ def mgr_check(key):
 
 def sidebar_login():
     with st.sidebar:
+        st.markdown(
+            '<div class="brand-card"><div class="b-t">📦 KC &amp; Windy Smart Stock Tracker</div>'
+            '<div class="b-s">Budget Control · Designed by MD. Sagor Ali</div></div>', unsafe_allow_html=True)
         st.markdown("### 🔐 Secure Login")
         if st.session_state.get("user"):
-            st.success(f"Logged in: **{st.session_state['user']}**\n\nRole: {st.session_state.get('role', '-')}")
+            st.markdown(
+                f'<div class="user-card"><div class="u-lbl">Logged in as</div>'
+                f'<div class="u-name">{html_lib.escape(str(st.session_state["user"]))}</div>'
+                f'<div class="u-lbl">Role</div>'
+                f'<span class="u-role">{html_lib.escape(str(st.session_state.get("role", "-")))}</span></div>',
+                unsafe_allow_html=True)
             if st.button("🚪 Logout", use_container_width=True, key="logout_btn"):
                 log_event("LOGOUT", f"User {st.session_state['user']} logged out.")
                 st.session_state.pop("user", None)
@@ -466,9 +550,9 @@ def sidebar_login():
                 done("Logged out successfully.")
         else:
             with st.form("login_form", clear_on_submit=False):
-                u = st.text_input("Username", placeholder="Username likhun", key="login_user")
-                p = st.text_input("Password", type="password", placeholder="Password likhun", key="login_pass")
-                submitted = st.form_submit_button("Sign in")
+                u = st.text_input("Username", placeholder="Enter your username", key="login_user")
+                p = st.text_input("Password", type="password", placeholder="Enter your password", key="login_pass")
+                submitted = st.form_submit_button("🔓 Sign in", use_container_width=True)
             if submitted:
                 if not u.strip() or not p:
                     st.error("Username ar password dui-i din.")
@@ -1013,42 +1097,31 @@ def inventory_count():
 #  HEADER (factory, live date/time, user)
 # ============================================================
 def render_header():
+    """Slim one-line strip shown at the top of every tab (tabs themselves sit above everything)."""
     user_txt = (f"{st.session_state['user']} · {st.session_state.get('role', '')}"
                 if st.session_state.get("user") else "Guest (view only)")
-    c1, c2 = st.columns([3, 2], gap="medium")
-    with c1:
-        st.markdown(f"""
-        <div class="top-bar">
-            <div>
-                <div class="title">📦 KC &amp; Windy Smart Stock Tracker &amp; Budget Control</div>
-                <div class="sub">Designed &amp; Created By: MD. Sagor Ali</div>
-            </div>
-            <div>
-                <span class="chip">🏭 {html_lib.escape(FAC)}</span>
-            </div>
-        </div>""", unsafe_allow_html=True)
-    with c2:
-        components.html(f"""
-        <div style="font-family:Inter,sans-serif;background:#fff;border:1px solid #FDE7CF;border-radius:12px;
-                    box-shadow:0 4px 6px -1px rgba(0,0,0,.05);padding:10px 16px;display:flex;justify-content:space-between;align-items:center;">
-          <div>
-            <div id="clk" style="font-size:15px;font-weight:800;color:#1E293B;">--:--:--</div>
-            <div id="dt" style="font-size:11.5px;color:#64748B;margin-top:2px;">--</div>
-          </div>
-          <div style="text-align:right;">
-            <div style="font-size:12px;font-weight:700;color:#C2410C;">👤 {html_lib.escape(user_txt)}</div>
-            <div style="font-size:11px;color:#64748B;margin-top:2px;">Asia/Dhaka</div>
-          </div>
+    st.markdown(
+        f'<div class="strip"><span>🏭 <b>{html_lib.escape(FAC)}</b></span>'
+        f'<span>👤 {html_lib.escape(user_txt)}</span></div>', unsafe_allow_html=True)
+
+
+def sidebar_clock():
+    with st.sidebar:
+        components.html("""
+        <div style="font-family:Inter,sans-serif;background:#fff;border-radius:12px;box-shadow:0 4px 10px rgba(124,45,18,.2);
+                    padding:8px 14px;">
+          <div id="clk" style="font-size:16px;font-weight:800;color:#1E293B;">--:--:--</div>
+          <div id="dt" style="font-size:11.5px;color:#64748B;margin-top:2px;">--</div>
+          <div style="font-size:10.5px;color:#C2410C;font-weight:700;margin-top:2px;">Asia/Dhaka</div>
         </div>
         <script>
-          function tick(){{
-            const n = new Date();
-            const tz = {{timeZone:'Asia/Dhaka'}};
-            document.getElementById('clk').innerText = n.toLocaleTimeString('en-GB', Object.assign({{hour12:false}}, tz));
-            document.getElementById('dt').innerText = n.toLocaleDateString('en-GB', Object.assign({{weekday:'short',day:'2-digit',month:'short',year:'numeric'}}, tz));
-          }}
+          function tick(){
+            const n = new Date(); const tz = {timeZone:'Asia/Dhaka'};
+            document.getElementById('clk').innerText = n.toLocaleTimeString('en-GB', Object.assign({hour12:false}, tz));
+            document.getElementById('dt').innerText = n.toLocaleDateString('en-GB', Object.assign({weekday:'short',day:'2-digit',month:'short',year:'numeric'}, tz));
+          }
           tick(); setInterval(tick, 1000);
-        </script>""", height=78)
+        </script>""", height=82)
 
 
 # ============================================================
@@ -1189,11 +1262,16 @@ def tab_transactions():
     fac, fsql, fp = FAC, FSQL, FP
     if inventory_count() == 0 and not is_cons_view:
         st.info("📦 Ei factory-r inventory khali. [2] INVENTORY → ➕ Add / Import theke opening stock upload korun.")
-    left, right = st.columns([1, 2], gap="large")
+    left, right = st.columns([1.05, 2], gap="large")
     with left:
-        with st.container(border=True):
+        try:
+            form_box = st.container(border=True, key="tx_form_box")
+        except TypeError:   # very old Streamlit without container(key=...)
+            form_box = st.container(border=True)
+        with form_box:
             st.markdown('<div class="section-title">New Transaction</div>', unsafe_allow_html=True)
-            st.text_input("Authenticated Officer", value=st.session_state.get("user", "-"), disabled=True)
+            st.markdown(f'<span class="officer-pill">👤 Officer: {html_lib.escape(str(st.session_state.get("user", "-")))}</span>',
+                        unsafe_allow_html=True)
             if is_cons_view:
                 st.warning("CONSOLIDATED view-te entry hoy na. Sidebar theke factory select korun.")
             search = st.text_input("🔍 Search (Name / Size / ERP / SL)", key="tx_search", placeholder="Naam, SL, ERP code...")
@@ -1214,10 +1292,11 @@ def tab_transactions():
 
             type_label = st.selectbox("Transaction Type", list(TRANS_CODES), key="tx_type")
             ttype = TRANS_CODES[type_label]
-            qty = st.number_input("Quantity", min_value=0.0, step=1.0, key="tx_qty")
-            tx_date = st.date_input("Date", value=date.today(), max_value=date.today(), key="tx_date")
+            qc, dc = st.columns(2)
+            qty = qc.number_input("Quantity", min_value=0.0, step=1.0, key="tx_qty")
+            tx_date = dc.date_input("Date", value=date.today(), max_value=date.today(), key="tx_date")
             verified = st.checkbox("Physically Verified (3-Day cooldown check)", key="tx_ver")
-            notes = st.text_area("Remarks", key="tx_notes")
+            notes = st.text_input("Remarks", key="tx_notes", placeholder="Optional note")
 
             if item is not None:
                 st.info(f"**{item['item_name']}** [{item['size'] or '-'}]  ·  SL {item['sl_no']}  ·  ERP {item['prod_id']}  ·  "
@@ -2570,22 +2649,17 @@ def tab_budget():
                       WHERE t.trans_type IN ('Issued','Internal Issue'){fw(FAC, 't.')[0]}
                       GROUP BY t.factory_name, i.category""", FP)
     cost = {(r["factory_name"], r["category"]): float(r["cost"] or 0) for r in cost_rows}
+    # Executive Overview & Budget Control lives here (not on the daily-entry home screen)
+    try:
+        tab_dashboard()
+    except Exception as e:
+        st.warning(f"Overview load kora jacche na: {e}")
     if bud.empty:
         st.info("Budget nei.")
         return
     bud["actual_cost"] = [cost.get((f, c), 0.0) for f, c in zip(bud.factory_name, bud.category_name)]
     bud["remaining"] = bud.allocated_budget - bud.actual_cost
     bud["status"] = bud.remaining.apply(lambda v: "SAFE" if v >= 0 else "OVER BUDGET")
-
-    tot_b, tot_c = float(bud.allocated_budget.sum()), float(bud.actual_cost.sum())
-    tot_r, tot_p = tot_b - tot_c, (tot_c / tot_b * 100 if tot_b > 0 else 0.0)
-    c = st.columns(4)
-    c[0].metric("Total Monthly Budget", f"৳ {tot_b:,.0f}")
-    c[1].metric("Total Consumption Cost", f"৳ {tot_c:,.0f}")
-    c[2].metric("Expense Percentage", f"{tot_p:.1f}%")
-    c[3].metric("Remaining Balance", f"৳ {tot_r:,.0f}")
-    st.markdown('<div class="fin-card">' + budget_bar_html(tot_p, "Overall budget consumption") + '</div>',
-                unsafe_allow_html=True)
 
     st.markdown('<div class="section-title">Category Budget Cards</div>', unsafe_allow_html=True)
     cols = st.columns(3, gap="medium")
@@ -2756,18 +2830,14 @@ with st.sidebar:
     st.markdown("### 🧭 Modules")
     for icon, name in MODULE_NAV:
         st.markdown(f'<div class="nav-item">{icon}&nbsp;&nbsp;{name}</div>', unsafe_allow_html=True)
+    st.markdown("---")
+    sidebar_clock()
 
 FSQL, FP = fw(FAC)
 is_cons_view = "CONSOLIDATED" in FAC
 autoset_uom_once()
 
-render_header()
-
-try:
-    tab_dashboard()
-except Exception as e:
-    st.warning(f"Overview load kora jacche na: {e}")
-
+# Top-level navigation: the very first element of the main page. [1] TRANSACTIONS is the default tab.
 TAB_NAMES = ["📝 [1] TRANSACTIONS", "📦 [2] INVENTORY", "🔍 [3] ERP AUDIT", "📜 [4] ISSUE LEDGER",
              "🔁 [5] TRANSFER HISTORY", "📑 [6] REQUISITION", "🛠 [7] REPAIR", "📒 [8] LEDGER",
              "📈 [9] FORECAST", "💵 [10] BUDGET", "🗓 [11] DAILY WORK SHEET"]
@@ -2776,4 +2846,5 @@ RENDERERS = [tab_transactions, tab_inventory, tab_erp_audit, tab_issue_ledger, t
 tabs = st.tabs(TAB_NAMES)
 for t, fn in zip(tabs, RENDERERS):
     with t:
+        render_header()
         fn()
