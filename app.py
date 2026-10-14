@@ -315,6 +315,37 @@ section[data-testid="stSidebar"] div[data-testid="stCaptionContainer"] * {{ colo
     content: ""; position: absolute; left: 24%; right: 24%; bottom: 4px; height: 3px; border-radius: 3px; background: rgba(255,255,255,.85);
 }}
 
+/* ---------- v5 Transactions page: matching panels (New Transaction = peach/orange, Recent Transactions = soft sky blue) ---------- */
+.st-key-tx_form_box {{
+    background: linear-gradient(180deg, #FFFFFF 0%, #FFF1E0 100%) !important; border: 1.5px solid #FDBA74 !important;
+    box-shadow: 0 8px 22px rgba(234,88,12,.16) !important;
+}}
+.st-key-tx_form_box .section-title {{ border-left-color: {ORANGE}; color: #9A3412; }}
+.st-key-tx_form_box label p, .st-key-tx_form_box div[data-testid="stWidgetLabel"] p {{ color: #9A3412 !important; }}
+.st-key-tx_form_box div[data-baseweb="input"], .st-key-tx_form_box div[data-baseweb="base-input"] {{ border: 1.5px solid #FDBA74 !important; }}
+.st-key-tx_form_box div[data-baseweb="input"]:focus-within {{ border-color: #EA580C !important; box-shadow: 0 0 0 3px rgba(234,88,12,.20) !important; }}
+.st-key-tx_form_box div[data-baseweb="select"] > div {{ border: 1.5px solid #FDBA74 !important; }}
+.st-key-tx_form_box div[data-baseweb="select"] > div:focus-within {{ border-color: #EA580C !important; box-shadow: 0 0 0 3px rgba(234,88,12,.20) !important; }}
+.st-key-tx_form_box div[data-testid="stNumberInput"] button {{ background: #FFF1E0; }}
+.st-key-tx_form_box .stButton > button[kind="primary"] {{
+    background: linear-gradient(120deg, #F97316, {ORANGE}) !important; box-shadow: 0 6px 16px rgba(234,88,12,.35) !important;
+}}
+.st-key-tx_form_box .stButton > button[kind="primary"]:hover {{ box-shadow: 0 8px 22px rgba(234,88,12,.5) !important; }}
+.st-key-tx_form_box .officer-pill {{ background: #FFE8CC; color: #9A3412; border-color: #FDBA74; }}
+
+div[data-testid="stColumn"]:has(.st-key-tx_recent_search), div[data-testid="column"]:has(.st-key-tx_recent_search) {{
+    background: linear-gradient(180deg, #FFFFFF 0%, #EAF3FF 100%); border: 1.5px solid #BFDBFE; border-radius: 14px;
+    padding: 10px 14px 14px 14px; box-shadow: 0 8px 22px rgba(37,99,235,.12);
+}}
+.st-key-tx_recent_search div[data-baseweb="input"], .st-key-tx_recent_search div[data-baseweb="base-input"] {{
+    background: #ffffff !important; border: 1.5px solid #BFDBFE !important; border-radius: 10px !important;
+}}
+.st-key-tx_recent_search div[data-baseweb="input"]:focus-within {{ border-color: #2563EB !important; box-shadow: 0 0 0 3px rgba(37,99,235,.18) !important; }}
+div[data-testid="stColumn"]:has(.st-key-tx_recent_search) .section-title, div[data-testid="column"]:has(.st-key-tx_recent_search) .section-title {{
+    border-left-color: #2563EB; color: #1E3A8A; margin-top: 0;
+}}
+.st-key-tx_recent_search label p, .st-key-tx_recent_search div[data-testid="stWidgetLabel"] p {{ color: #1E3A8A !important; }}
+
 /* ---------- ERP PO Pending summary card (clickable) ---------- */
 .st-key-po_card_btn button {{
     height: auto; min-height: 96px; text-align: left; justify-content: flex-start; padding: 12px 18px;
@@ -1658,8 +1689,9 @@ def update_tx_meta(tid, date_s, notes):
 
 
 def zebra_styles(row):
-    bg = "#FFF7ED" if row.name % 2 else "#FFFFFF"
-    return [f"background-color:{bg}"] * len(row)
+    # row stripes + alternating column bands (st.dataframe cannot draw cell borders, so columns are separated by tint)
+    shades = (("#FFFFFF", "#F1F7FF"), ("#EAF3FF", "#DCEBFF"))[row.name % 2]
+    return [f"background-color:{shades[j % 2]}" for j in range(len(row))]
 
 
 def tx_manager_panel(df, kp, title="🔐 Manager: Delete / Edit a transaction"):
