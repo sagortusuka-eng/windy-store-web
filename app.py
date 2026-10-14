@@ -1,6 +1,6 @@
 # ============================================================
 #  KC & Windy Smart Stock Tracker & Budget Control
-#  Executive Streamlit Edition
+#  Warm Orange / Peach SaaS Edition
 # ============================================================
 import calendar
 import difflib
@@ -17,85 +17,147 @@ from datetime import date, datetime
 import pandas as pd
 import psycopg2
 import streamlit as st
+import streamlit.components.v1 as components
 
-st.set_page_config(page_title="KC & Windy Stock Tracker", page_icon="📦", layout="wide")
+st.set_page_config(page_title="KC & Windy Stock Tracker", page_icon="📦", layout="wide",
+                   initial_sidebar_state="expanded")
 
 # ============================================================
-#  STYLING (Inter font, cards, shadows, sidebar login)
+#  THEME (warm orange / peach, Inter, soft cards)
 # ============================================================
-st.markdown("""
+ORANGE, PEACH, BG, INK = "#FF8C00", "#FFB347", "#F8FAFC", "#1E293B"
+
+st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-html, body, [class*="css"], .stApp { font-family: 'Inter', sans-serif !important; }
-.stApp { background: #f1f5f9; }
-.block-container { padding-top: 1.4rem; padding-bottom: 2rem; max-width: 1400px; }
+html, body, [class*="css"], .stApp, button, input, textarea, select {{ font-family: 'Inter', sans-serif !important; }}
+.stApp {{ background: {BG}; color: {INK}; }}
+.block-container {{ padding-top: 1rem; padding-bottom: 2.5rem; max-width: 1480px; }}
+#MainMenu, footer {{ visibility: hidden; }}
 
-.app-header {
-    background: linear-gradient(135deg, #0f2a5c 0%, #1e4fa3 100%);
-    border-radius: 16px; padding: 22px 28px; color: #fff; margin-bottom: 18px;
-    box-shadow: 0 10px 30px rgba(15, 42, 92, .25);
+/* ---------- Top header bar ---------- */
+.top-bar {{
+    background: #ffffff; border: 1px solid #FDE7CF; border-radius: 12px;
+    box-shadow: 0 4px 6px -1px rgba(0,0,0,.05); padding: 14px 20px; margin-bottom: 14px;
     display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;
-}
-.app-header h1 { color: #fff; font-size: 22px; font-weight: 800; margin: 0; letter-spacing: .3px; }
-.app-header p { color: #bfdbfe; font-size: 12.5px; margin: 4px 0 0 0; }
-.badge {
-    background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.25);
-    padding: 6px 14px; border-radius: 999px; font-size: 12px; font-weight: 600; color: #fff;
-}
-.section-title {
-    font-size: 13px; font-weight: 700; color: #0f172a; text-transform: uppercase;
-    letter-spacing: .6px; margin: 6px 0 10px 0;
-}
-.card {
-    background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 18px 20px;
-    box-shadow: 0 4px 18px rgba(15, 23, 42, .06); margin-bottom: 16px;
-}
-div[data-testid="stMetric"] {
-    background: #fff; border: 1px solid #e2e8f0; border-top: 4px solid #1e4fa3; border-radius: 14px;
-    padding: 16px 18px; box-shadow: 0 4px 18px rgba(15, 23, 42, .06);
-}
-div[data-testid="stMetricLabel"] p { color: #475569 !important; font-weight: 600; font-size: 12.5px; }
-div[data-testid="stMetricValue"] { color: #0f172a; font-weight: 800; }
-.bar-wrap { background: #e2e8f0; border-radius: 999px; height: 18px; overflow: hidden; margin: 6px 0 4px 0; }
-.bar-fill { height: 100%; border-radius: 999px; transition: width .6s ease; }
-.bar-label { font-size: 13px; color: #334155; font-weight: 600; display: flex; justify-content: space-between; }
+}}
+.top-bar .title {{ font-size: 18px; font-weight: 800; color: {INK}; letter-spacing: .2px; }}
+.top-bar .sub {{ font-size: 12px; color: #64748B; margin-top: 3px; }}
+.chip {{
+    display: inline-block; padding: 6px 14px; border-radius: 999px; font-size: 12px; font-weight: 700;
+    background: linear-gradient(120deg, {ORANGE}, {PEACH}); color: #fff;
+    box-shadow: 0 4px 10px rgba(255,140,0,.30); margin-right: 6px;
+}}
+.chip-soft {{ background: #FFF4E6; color: #C2410C; box-shadow: none; border: 1px solid #FDE7CF; }}
 
-.stTabs [data-baseweb="tab-list"] { gap: 4px; background: #e2e8f0; padding: 4px; border-radius: 12px; }
-.stTabs [data-baseweb="tab"] { font-weight: 600; font-size: 12.5px; padding: 8px 12px; border-radius: 9px; color: #334155; }
-.stTabs [aria-selected="true"] { background: #1e4fa3 !important; color: #fff !important; }
-.stTabs [data-baseweb="tab-highlight"] { display: none; }
-.stDataFrame { border-radius: 12px; overflow: hidden; box-shadow: 0 2px 10px rgba(15, 23, 42, .05); }
-.stButton > button { border-radius: 9px; font-weight: 600; border: 1px solid #cbd5e1; }
-.stButton > button[kind="primary"] { background: #1e4fa3; border-color: #1e4fa3; color: #fff; }
+.section-title {{
+    font-size: 12px; font-weight: 800; color: {INK}; text-transform: uppercase; letter-spacing: .8px;
+    margin: 6px 0 12px 0; padding-left: 10px; border-left: 4px solid {ORANGE};
+}}
 
-section[data-testid="stSidebar"] { background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%); }
+/* ---------- Cards / metrics ---------- */
+div[data-testid="stMetric"] {{
+    background: #ffffff; border: 1px solid #F1F5F9; border-radius: 12px; padding: 16px 18px;
+    box-shadow: 0 4px 6px -1px rgba(0,0,0,.05); border-top: 4px solid {ORANGE};
+}}
+div[data-testid="stMetricLabel"] p {{ color: #64748B !important; font-weight: 700; font-size: 11.5px; text-transform: uppercase; letter-spacing: .4px; }}
+div[data-testid="stMetricValue"] {{ color: {INK}; font-weight: 800; }}
+div[data-testid="stVerticalBlockBorderWrapper"] {{ border-radius: 12px !important; box-shadow: 0 4px 6px -1px rgba(0,0,0,.05); background: #fff; }}
+
+.fin-card {{
+    background: #ffffff; border: 1px solid #F1F5F9; border-radius: 12px; padding: 18px 20px;
+    box-shadow: 0 4px 6px -1px rgba(0,0,0,.05); margin-bottom: 14px;
+}}
+.fin-card .cat-factory {{ font-size: 10.5px; font-weight: 700; color: {ORANGE}; text-transform: uppercase; letter-spacing: .6px; }}
+.fin-card .cat-name {{ font-size: 15px; font-weight: 800; color: {INK}; margin: 4px 0 10px 0; }}
+.fin-card .cat-nums {{ display: flex; justify-content: space-between; font-size: 12.5px; color: #334155; font-weight: 600; }}
+.fin-card .cat-foot {{ font-size: 12px; color: #64748B; margin-top: 8px; font-weight: 600; }}
+
+.bar-label {{ font-size: 12.5px; color: #334155; font-weight: 700; display: flex; justify-content: space-between; margin-top: 6px; }}
+.bar-wrap {{ background: #FFEFD9; border-radius: 999px; height: 14px; overflow: hidden; margin: 6px 0 2px 0; }}
+.bar-fill {{ height: 100%; border-radius: 999px; transition: width .6s ease; }}
+
+.status-badge {{ display:inline-block; padding:2px 10px; border-radius:999px; font-size:11px; font-weight:700; }}
+
+/* ---------- Pill tabs ---------- */
+.stTabs [data-baseweb="tab-list"] {{ gap: 8px; background: transparent; border-bottom: none; padding: 2px 0 14px 0; overflow-x: auto; flex-wrap: nowrap; }}
+.stTabs [data-baseweb="tab"] {{
+    background: #ffffff; border: 1px solid #FDE7CF; border-radius: 999px; padding: 8px 16px;
+    font-weight: 600; font-size: 12.5px; color: #7C2D12; box-shadow: 0 2px 6px rgba(0,0,0,.04);
+    white-space: nowrap; height: auto; transition: all .2s ease;
+}}
+.stTabs [data-baseweb="tab"]:hover {{ border-color: {ORANGE}; transform: translateY(-1px); }}
+.stTabs [aria-selected="true"] {{
+    background: linear-gradient(120deg, {ORANGE}, {PEACH}) !important; color: #fff !important;
+    border-color: transparent !important; box-shadow: 0 6px 16px rgba(255,140,0,.35);
+}}
+.stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] {{ display: none !important; }}
+
+/* ---------- Inputs ---------- */
+div[data-baseweb="input"], div[data-baseweb="base-input"], div[data-baseweb="textarea"] {{
+    background: #ffffff !important; border: 1.5px solid #E2E8F0 !important; border-radius: 12px !important;
+    transition: border-color .2s ease, box-shadow .2s ease;
+}}
+div[data-baseweb="input"]:focus-within, div[data-baseweb="textarea"]:focus-within {{
+    border-color: {ORANGE} !important; box-shadow: 0 0 0 3px rgba(255,140,0,.20) !important;
+}}
+div[data-baseweb="input"] input, div[data-baseweb="textarea"] textarea {{
+    color: {INK} !important; padding: 9px 12px !important; font-size: 14px !important;
+}}
+div[data-baseweb="select"] > div {{
+    border-radius: 12px !important; border: 1.5px solid #E2E8F0 !important; background: #fff !important; min-height: 42px;
+}}
+div[data-baseweb="select"] span, div[data-baseweb="select"] div {{ color: {INK}; }}
+
+/* ---------- Buttons ---------- */
+.stButton > button, .stDownloadButton > button {{
+    border-radius: 12px; font-weight: 700; border: 1.5px solid #E2E8F0; padding: 8px 18px;
+    transition: all .18s ease; color: {INK}; background: #fff;
+}}
+.stButton > button:hover, .stDownloadButton > button:hover {{ border-color: {ORANGE}; color: #C2410C; transform: translateY(-1px); }}
+.stButton > button[kind="primary"] {{
+    background: linear-gradient(120deg, {ORANGE}, {PEACH}); border: none; color: #fff;
+    box-shadow: 0 0 18px rgba(255,140,0,.45); padding: 12px 18px; font-size: 15px; letter-spacing: .2px;
+}}
+.stButton > button[kind="primary"]:hover {{ color: #fff; box-shadow: 0 0 26px rgba(255,140,0,.65); transform: translateY(-2px); }}
+.stButton > button:disabled {{ opacity: .5; }}
+
+/* ---------- Tables / alerts / expanders ---------- */
+div[data-testid="stDataFrame"] {{
+    border: 1px solid #F1F5F9; border-radius: 12px; overflow: hidden;
+    box-shadow: 0 4px 6px -1px rgba(0,0,0,.05); background: #fff;
+}}
+div[data-testid="stAlert"] {{ border-radius: 12px; }}
+div[data-testid="stExpander"] {{ border: 1px solid #FDE7CF !important; border-radius: 12px !important; background: #fff; box-shadow: 0 4px 6px -1px rgba(0,0,0,.05); }}
+div[data-testid="stForm"] {{ border: 1px solid #F1F5F9; border-radius: 12px; background: #fff; padding: 14px; }}
+
+/* ---------- Sidebar: warm gradient ---------- */
+section[data-testid="stSidebar"] {{ background: linear-gradient(180deg, #E8590C 0%, {ORANGE} 55%, {PEACH} 100%); }}
 section[data-testid="stSidebar"] label,
 section[data-testid="stSidebar"] p,
-section[data-testid="stSidebar"] h3 { color: #e2e8f0 !important; }
-section[data-testid="stSidebar"] div[data-baseweb="input"],
-section[data-testid="stSidebar"] div[data-baseweb="base-input"] {
-    background: #ffffff !important; border: 1px solid #cbd5e1 !important; border-radius: 10px !important;
-}
-section[data-testid="stSidebar"] div[data-baseweb="input"]:focus-within {
-    border-color: #3b82f6 !important; box-shadow: 0 0 0 3px rgba(59, 130, 246, .35) !important;
-}
-section[data-testid="stSidebar"] input {
-    color: #0f172a !important; padding: 9px 12px !important; font-size: 14px !important;
-    -webkit-text-security: none;
-}
-section[data-testid="stSidebar"] input::placeholder { color: #94a3b8 !important; }
-section[data-testid="stSidebar"] div[data-baseweb="select"] > div {
-    background: #fff !important; border-radius: 10px !important;
-}
-section[data-testid="stSidebar"] div[data-baseweb="select"] span { color: #0f172a !important; }
-section[data-testid="stSidebar"] form {
-    background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.12);
-    border-radius: 14px; padding: 14px;
-}
-section[data-testid="stSidebar"] form button {
-    background: #3b82f6; color: #fff; border: none; border-radius: 10px; font-weight: 700; width: 100%;
-}
-section[data-testid="stSidebar"] form button:hover { background: #2563eb; }
+section[data-testid="stSidebar"] h3,
+section[data-testid="stSidebar"] span,
+section[data-testid="stSidebar"] small {{ color: #FFFFFF !important; }}
+section[data-testid="stSidebar"] div[data-testid="stForm"] {{
+    background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.35); border-radius: 12px; padding: 16px;
+    box-shadow: 0 8px 20px rgba(124,45,18,.18);
+}}
+section[data-testid="stSidebar"] div[data-testid="stForm"] button,
+section[data-testid="stSidebar"] .stButton > button {{
+    background: #ffffff; color: #C2410C; border: none; width: 100%; font-weight: 800;
+    box-shadow: 0 4px 12px rgba(124,45,18,.25);
+}}
+section[data-testid="stSidebar"] div[data-testid="stForm"] button:hover,
+section[data-testid="stSidebar"] .stButton > button:hover {{ background: #FFF7ED; color: #9A3412; }}
+section[data-testid="stSidebar"] div[data-baseweb="input"] {{ background: #ffffff !important; border: 1.5px solid #FFFFFF !important; }}
+section[data-testid="stSidebar"] div[data-baseweb="input"] input,
+section[data-testid="stSidebar"] div[data-baseweb="select"] div {{ color: {INK} !important; }}
+section[data-testid="stSidebar"] div[data-baseweb="input"] input::placeholder {{ color: #9CA3AF !important; }}
+section[data-testid="stSidebar"] div[data-baseweb="select"] > div {{ background: #fff !important; border: none !important; }}
+.nav-item {{
+    background: rgba(255,255,255,.16); border-radius: 10px; padding: 8px 12px; margin: 5px 0;
+    font-size: 13px; font-weight: 600; color: #fff !important;
+}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -144,6 +206,9 @@ REQ_KEYS = {
 }
 VERDICT = {"FOUND": "✔ FOUND", "SIZE_MISSING": "⚠ SIZE NOT IN LIST", "CODE_MATCH": "⚠ CODE MATCH (name differs)",
            "SIMILAR": "≈ SIMILAR NAME ONLY", "NOT_FOUND": "✘ NOT FOUND - NEW ITEM"}
+MODULE_NAV = [("📝", "Transactions"), ("📦", "Inventory Master"), ("🔍", "ERP Audit"), ("📜", "Issue Ledger"),
+              ("🔁", "Transfer History"), ("📑", "Requisition"), ("🛠", "Repair & Returns"), ("📒", "Ledger"),
+              ("📈", "Forecast"), ("💵", "Budget"), ("🗓", "Daily Work Sheet")]
 
 
 # ============================================================
@@ -394,7 +459,7 @@ def sidebar_login():
         st.markdown("### 🔐 Secure Login")
         if st.session_state.get("user"):
             st.success(f"Logged in: **{st.session_state['user']}**\n\nRole: {st.session_state.get('role', '-')}")
-            if st.button("🚪 Logout", use_container_width=True):
+            if st.button("🚪 Logout", use_container_width=True, key="logout_btn"):
                 log_event("LOGOUT", f"User {st.session_state['user']} logged out.")
                 st.session_state.pop("user", None)
                 st.session_state.pop("role", None)
@@ -554,7 +619,7 @@ def to_pdf(df, title):
     for r in df.values.tolist():
         data.append(["" if (v is None or (isinstance(v, float) and math.isnan(v))) else str(v) for v in r])
     t = Table(data, repeatRows=1)
-    t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1b3b6f")),
+    t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8590C")),
                            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                            ("FONTSIZE", (0, 0), (-1, -1), 7), ("GRID", (0, 0), (-1, -1), 0.3, colors.grey)]))
     doc.build([Paragraph(title, getSampleStyleSheet()["Title"]), t])
@@ -577,11 +642,25 @@ def backup_zip():
     return buf.getvalue()
 
 
-def budget_bar_html(pct):
+def budget_bar_html(pct, label="Budget consumption"):
+    """Dynamic bar: green below 70%, amber 70-85%, red above the alert limit."""
     width = min(max(pct, 0), 100)
-    color = "#16a34a" if pct < 70 else ("#f59e0b" if pct <= BUDGET_ALERT_PCT else "#dc2626")
-    return (f'<div class="bar-label"><span>Budget consumption</span><span>{pct:.1f}%</span></div>'
+    color = "#16A34A" if pct < 70 else ("#F59E0B" if pct <= BUDGET_ALERT_PCT else "#DC2626")
+    return (f'<div class="bar-label"><span>{html_lib.escape(label)}</span><span>{pct:.1f}%</span></div>'
             f'<div class="bar-wrap"><div class="bar-fill" style="width:{width:.1f}%;background:{color};"></div></div>')
+
+
+def status_badge(text):
+    t = str(text or "")
+    if t.startswith("Physically"):
+        bg, fg, lab = "#DCFCE7", "#166534", "✔ Physically Verified"
+    elif t == "Verified":
+        bg, fg, lab = "#DBEAFE", "#1E40AF", "✔ Verified"
+    elif t == "Not Required" or t == "N/A" or not t:
+        bg, fg, lab = "#F1F5F9", "#475569", "• Normal"
+    else:
+        bg, fg, lab = "#FFF4E6", "#C2410C", t
+    return f'<span class="status-badge" style="background:{bg};color:{fg}">{html_lib.escape(lab)}</span>'
 
 
 # ============================================================
@@ -926,17 +1005,61 @@ def guard(write=True):
     return True
 
 
+def inventory_count():
+    return int(q(f"SELECT COUNT(*) AS n FROM inventory WHERE 1=1{FSQL}", FP)[0]["n"] or 0)
+
+
 # ============================================================
-#  HOME - EXECUTIVE DASHBOARD & BUDGET
+#  HEADER (factory, live date/time, user)
 # ============================================================
-def tab_dashboard():
-    cur_label = datetime.now().strftime("%b-%Y")
+def render_header():
+    user_txt = (f"{st.session_state['user']} · {st.session_state.get('role', '')}"
+                if st.session_state.get("user") else "Guest (view only)")
+    c1, c2 = st.columns([3, 2], gap="medium")
+    with c1:
+        st.markdown(f"""
+        <div class="top-bar">
+            <div>
+                <div class="title">📦 KC &amp; Windy Smart Stock Tracker &amp; Budget Control</div>
+                <div class="sub">Designed &amp; Created By: MD. Sagor Ali</div>
+            </div>
+            <div>
+                <span class="chip">🏭 {html_lib.escape(FAC)}</span>
+            </div>
+        </div>""", unsafe_allow_html=True)
+    with c2:
+        components.html(f"""
+        <div style="font-family:Inter,sans-serif;background:#fff;border:1px solid #FDE7CF;border-radius:12px;
+                    box-shadow:0 4px 6px -1px rgba(0,0,0,.05);padding:10px 16px;display:flex;justify-content:space-between;align-items:center;">
+          <div>
+            <div id="clk" style="font-size:15px;font-weight:800;color:#1E293B;">--:--:--</div>
+            <div id="dt" style="font-size:11.5px;color:#64748B;margin-top:2px;">--</div>
+          </div>
+          <div style="text-align:right;">
+            <div style="font-size:12px;font-weight:700;color:#C2410C;">👤 {html_lib.escape(user_txt)}</div>
+            <div style="font-size:11px;color:#64748B;margin-top:2px;">Asia/Dhaka</div>
+          </div>
+        </div>
+        <script>
+          function tick(){{
+            const n = new Date();
+            const tz = {{timeZone:'Asia/Dhaka'}};
+            document.getElementById('clk').innerText = n.toLocaleTimeString('en-GB', Object.assign({{hour12:false}}, tz));
+            document.getElementById('dt').innerText = n.toLocaleDateString('en-GB', Object.assign({{weekday:'short',day:'2-digit',month:'short',year:'numeric'}}, tz));
+          }}
+          tick(); setInterval(tick, 1000);
+        </script>""", height=78)
+
+
+# ============================================================
+#  HOME - EXECUTIVE OVERVIEW (budget metrics)
+# ============================================================
+def load_budget_data():
     cons = qdf(f"""SELECT t.factory_name, t.date, t.qty, COALESCE(i.unit_price,0) AS price,
                    COALESCE(i.category,'') AS category
                    FROM transactions t JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
                    WHERE t.trans_type IN ('Issued','Internal Issue'){fw(FAC, 't.')[0]}""", FP)
     bud = qdf(f"SELECT factory_name, category_name, allocated_budget FROM category_budgets WHERE 1=1{FSQL}", FP)
-
     if not cons.empty:
         cons["qty"] = cons["qty"].astype(float)
         cons["price"] = cons["price"].astype(float)
@@ -944,15 +1067,21 @@ def tab_dashboard():
         cons["month"] = cons["date"].apply(lambda s: parse_date(s).strftime("%b-%Y") if parse_date(s) else "")
     else:
         cons = pd.DataFrame(columns=["factory_name", "date", "qty", "price", "category", "cost", "month"])
+    return cons, bud
 
+
+def tab_dashboard():
+    cur_label = datetime.now().strftime("%b-%Y")
+    cons, bud = load_budget_data()
     months = {m for m in cons["month"] if m}
     options = ["All time"] + sorted(months | {cur_label}, key=lambda s: datetime.strptime(s, "%b-%Y"), reverse=True)
 
-    top_l, top_r = st.columns([3, 1])
-    with top_l:
-        st.markdown('<div class="section-title">Executive Dashboard · Budget Control</div>', unsafe_allow_html=True)
-    with top_r:
-        period = st.selectbox("Period", options, index=options.index(cur_label), key="dash_period", label_visibility="collapsed")
+    t_l, t_r = st.columns([3, 1])
+    with t_l:
+        st.markdown('<div class="section-title">Executive Overview · Budget Control</div>', unsafe_allow_html=True)
+    with t_r:
+        period = st.selectbox("Period", options, index=options.index(cur_label), key="dash_period",
+                              label_visibility="collapsed")
 
     view = cons if period == "All time" else cons[cons["month"] == period]
     total_budget = float(bud["allocated_budget"].astype(float).sum()) if not bud.empty else 0.0
@@ -966,48 +1095,21 @@ def tab_dashboard():
     c3.metric("Expense % of Budget", f"{pct:.1f}%")
     c4.metric("Remaining Balance", f"৳ {remaining:,.0f}")
 
-    st.markdown('<div class="card">' + budget_bar_html(pct) + '</div>', unsafe_allow_html=True)
+    st.markdown('<div class="fin-card">' + budget_bar_html(pct) + '</div>', unsafe_allow_html=True)
 
     if total_budget <= 0:
-        st.info("Budget set kora nei. Budget module-e allocation dhukan.")
+        st.info("Budget set kora nei. [10] BUDGET tab-e allocation dekhun.")
     elif pct > 100:
-        st.error(f"🚨 BUDGET EXCEEDED: Consumption {pct:.1f}% - budget ৳ {abs(remaining):,.0f} beshi kharc hoyeche. "
-                 "Turant review korun.")
+        st.error(f"🚨 BUDGET EXCEEDED: Consumption {pct:.1f}% - budget ৳ {abs(remaining):,.0f} beshi kharc hoyeche.")
     elif pct > BUDGET_ALERT_PCT:
-        st.warning(f"⚠️ OPERATIONAL ALERT: Budget consumption {pct:.1f}% (সীমা {BUDGET_ALERT_PCT}%). "
-                   "Baki budget ৳ {:,.0f}. Issue-er agey approval nin.".format(max(remaining, 0)))
+        st.warning(f"⚠️ OPERATIONAL ALERT: Budget consumption {pct:.1f}% (limit {BUDGET_ALERT_PCT}%). "
+                   f"Baki budget ৳ {max(remaining, 0):,.0f}. Issue-er agey approval nin.")
     else:
         st.success(f"✅ Budget safe: consumption {pct:.1f}% (alert limit {BUDGET_ALERT_PCT}%).")
 
-    if period == "All time":
-        st.caption("All time view: budget monthly, kintu consumption shob mash-er. Ei percentage shudhu tulona-er jonno.")
-
-    # Category-wise budget vs consumption
-    bud_g = (bud.groupby(["factory_name", "category_name"], as_index=False)["allocated_budget"].sum()
-             if not bud.empty else pd.DataFrame(columns=["factory_name", "category_name", "allocated_budget"]))
-    bud_g.columns = ["Factory", "Category", "Budget"]
-    cons_g = (view.groupby(["factory_name", "category"], as_index=False)["cost"].sum()
-              if not view.empty else pd.DataFrame(columns=["factory_name", "category", "cost"]))
-    cons_g.columns = ["Factory", "Category", "Consumption"]
-    cat = bud_g.merge(cons_g, on=["Factory", "Category"], how="outer")
-    cat[["Budget", "Consumption"]] = cat[["Budget", "Consumption"]].fillna(0).astype(float)
-    cat["Remaining"] = cat["Budget"] - cat["Consumption"]
-    if not cat.empty:
-        cat["Used %"] = cat.apply(lambda r: (r["Consumption"] / r["Budget"] * 100) if r["Budget"] > 0
-                                  else (100.0 if r["Consumption"] > 0 else 0.0), axis=1)
-        cat = cat.sort_values("Consumption", ascending=False)
-
-    st.markdown('<div class="section-title">Category-wise Budget vs Consumption</div>', unsafe_allow_html=True)
-    st.dataframe(cat, hide_index=True, use_container_width=True, column_config={
-        "Budget": st.column_config.NumberColumn("Budget (৳)", format="%.0f"),
-        "Consumption": st.column_config.NumberColumn("Consumption (৳)", format="%.0f"),
-        "Remaining": st.column_config.NumberColumn("Remaining (৳)", format="%.0f"),
-        "Used %": st.column_config.ProgressColumn("Used %", format="%.1f%%", min_value=0, max_value=100),
-    })
-
 
 # ============================================================
-#  TAB 1 - TRANSACTIONS
+#  TAB 1 - TRANSACTIONS (daily entry, top priority)
 # ============================================================
 @tx
 def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok):
@@ -1078,70 +1180,78 @@ def update_tx_meta(tid, date_s, notes):
     return True
 
 
+def zebra_styles(row):
+    bg = "#FFF7ED" if row.name % 2 else "#FFFFFF"
+    return [f"background-color:{bg}"] * len(row)
+
+
 def tab_transactions():
     fac, fsql, fp = FAC, FSQL, FP
-    left, right = st.columns([1, 2])
+    if inventory_count() == 0 and not is_cons_view:
+        st.info("📦 Ei factory-r inventory khali. [2] INVENTORY → ➕ Add / Import theke opening stock upload korun.")
+    left, right = st.columns([1, 2], gap="large")
     with left:
-        st.markdown('<div class="section-title">New Transaction</div>', unsafe_allow_html=True)
-        st.text_input("Authenticated Officer", value=st.session_state.get("user", "-"), disabled=True)
-        if is_cons_view:
-            st.warning("CONSOLIDATED view-te entry hoy na. Sidebar theke factory select korun.")
-        search = st.text_input("🔍 Search (Name / Size / ERP / SL)", key="tx_search")
-        item, blocked, need_xfer, xfer_ok = None, False, False, False
-        if search.strip():
-            cands = search_items(fac, search.strip())
-            if cands:
-                opts = {item_label(c): c for c in cands}
-                item = opts[st.selectbox("Pick item", list(opts), key="tx_pick")]
+        with st.container(border=True):
+            st.markdown('<div class="section-title">New Transaction</div>', unsafe_allow_html=True)
+            st.text_input("Authenticated Officer", value=st.session_state.get("user", "-"), disabled=True)
+            if is_cons_view:
+                st.warning("CONSOLIDATED view-te entry hoy na. Sidebar theke factory select korun.")
+            search = st.text_input("🔍 Search (Name / Size / ERP / SL)", key="tx_search", placeholder="Naam, SL, ERP code...")
+            item, blocked, need_xfer, xfer_ok = None, False, False, False
+            if search.strip():
+                cands = search_items(fac, search.strip())
+                if cands:
+                    opts = {item_label(c): c for c in cands}
+                    item = opts[st.selectbox("Pick item", list(opts), key="tx_pick")]
+                else:
+                    st.warning("Kichu paoa jay nai.")
             else:
-                st.warning("Kichu paoa jay nai.")
-        else:
-            key = st.text_input("SL No / ERP Code", key="tx_key")
-            if key.strip():
-                item, cands = resolve_item(fac, key.strip())
-                if item is None:
-                    st.error("Item paoa jay nai" if not cands else f"{len(cands)} ta item match kore - exact SL No likhun")
+                key = st.text_input("SL No / ERP Code", key="tx_key", placeholder="SL ba ERP code")
+                if key.strip():
+                    item, cands = resolve_item(fac, key.strip())
+                    if item is None:
+                        st.error("Item paoa jay nai" if not cands else f"{len(cands)} ta item match kore - exact SL No likhun")
 
-        type_label = st.selectbox("Transaction Type", list(TRANS_CODES), key="tx_type")
-        ttype = TRANS_CODES[type_label]
-        qty = st.number_input("Quantity", min_value=0.0, step=1.0, key="tx_qty")
-        tx_date = st.date_input("Date", value=date.today(), max_value=date.today(), key="tx_date")
-        verified = st.checkbox("Physically Verified (3-Day cooldown check)", key="tx_ver")
-        notes = st.text_area("Remarks", key="tx_notes")
+            type_label = st.selectbox("Transaction Type", list(TRANS_CODES), key="tx_type")
+            ttype = TRANS_CODES[type_label]
+            qty = st.number_input("Quantity", min_value=0.0, step=1.0, key="tx_qty")
+            tx_date = st.date_input("Date", value=date.today(), max_value=date.today(), key="tx_date")
+            verified = st.checkbox("Physically Verified (3-Day cooldown check)", key="tx_ver")
+            notes = st.text_area("Remarks", key="tx_notes")
 
-        if item is not None:
-            st.info(f"**{item['item_name']}** [{item['size'] or '-'}] | SL {item['sl_no']} | ERP {item['prod_id']} | "
-                    f"Stock **{float(item['stock']):g}** | Short: {max(float(item['erp']) - float(item['stock']), 0):g}")
-            if qty > 0:
-                if ttype in ISSUE_TYPES:
-                    rec = recent_issue(fac, item["sl_no"], datetime.combine(tx_date, datetime.now().time()))
-                    if rec and not verified:
-                        st.warning(f"Cooldown: {rec[0]:%d-%b-%Y %I:%M %p} te issue hoyeche (Qty {rec[1]:g}, {rec[2]}). "
-                                   "Physical verify tick korun.")
+            if item is not None:
+                st.info(f"**{item['item_name']}** [{item['size'] or '-'}]  ·  SL {item['sl_no']}  ·  ERP {item['prod_id']}  ·  "
+                        f"Stock **{float(item['stock']):g}**  ·  Short: {max(float(item['erp']) - float(item['stock']), 0):g}")
+                if qty > 0:
+                    if ttype in ISSUE_TYPES:
+                        rec = recent_issue(fac, item["sl_no"], datetime.combine(tx_date, datetime.now().time()))
+                        if rec and not verified:
+                            st.warning(f"Cooldown: {rec[0]:%d-%b-%Y %I:%M %p} te issue hoyeche (Qty {rec[1]:g}, {rec[2]}). "
+                                       "Physical verify tick korun.")
+                            blocked = True
+                    if qty > float(item["stock"]) and ttype in ISSUE_TYPES:
+                        shortage = qty - float(item["stock"])
+                        other = find_same_in_other(item["prod_id"], item["item_name"], other_factory(fac), item["size"])
+                        if other and float(other["stock"] or 0) >= shortage:
+                            need_xfer = True
+                            st.warning(f"⚠️ Stock short {shortage:g}. {other['factory_name']} theke auto-transfer hobe "
+                                       f"({other['item_name']} [{other['prod_id']}], stock {float(other['stock']):g}, "
+                                       f"match: {other['level']}).")
+                            xfer_ok = st.checkbox("Transfer confirm kore issue korun", key="tx_xfer")
+                        else:
+                            st.error(f"Shortage {shortage:g} - other unit-e enough stock/same item nei.")
+                            blocked = True
+                    elif qty > float(item["stock"]) and ttype not in RECEIPT_TYPES:
+                        st.error("Stock kom ache.")
                         blocked = True
-                if qty > float(item["stock"]) and ttype in ISSUE_TYPES:
-                    shortage = qty - float(item["stock"])
-                    other = find_same_in_other(item["prod_id"], item["item_name"], other_factory(fac), item["size"])
-                    if other and float(other["stock"] or 0) >= shortage:
-                        need_xfer = True
-                        st.warning(f"⚠️ Stock short {shortage:g}. {other['factory_name']} theke auto-transfer hobe "
-                                   f"({other['item_name']} [{other['prod_id']}], stock {float(other['stock']):g}, "
-                                   f"match: {other['level']}).")
-                        xfer_ok = st.checkbox("Transfer confirm kore issue korun", key="tx_xfer")
-                    else:
-                        st.error(f"Shortage {shortage:g} - other unit-e enough stock/same item nei.")
-                        blocked = True
-                elif qty > float(item["stock"]) and ttype not in RECEIPT_TYPES:
-                    st.error("Stock kom ache.")
-                    blocked = True
 
-        can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor" and not is_cons_view
-        disabled = item is None or blocked or (need_xfer and not xfer_ok) or not can_write
-        if not can_write:
-            st.caption("Save korte login + specific factory + non-Auditor role lage.")
-        if st.button("💾 Save & Update Stock", type="primary", disabled=disabled, use_container_width=True):
-            if guard() and save_transaction(fac, item, qty, ttype, tx_date, notes, verified, xfer_ok):
-                done("✅ Transaction saved, stock updated.")
+            can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor" and not is_cons_view
+            disabled = item is None or blocked or (need_xfer and not xfer_ok) or not can_write
+            if not can_write:
+                st.caption("Save korte login + specific factory + non-Auditor role lage.")
+            if st.button("💾 Save & Update Stock", type="primary", disabled=disabled, use_container_width=True, key="tx_save"):
+                if guard() and save_transaction(fac, item, qty, ttype, tx_date, notes, verified, xfer_ok):
+                    done("✅ Transaction saved, stock updated.")
 
     with right:
         st.markdown('<div class="section-title">Recent Transactions</div>', unsafe_allow_html=True)
@@ -1149,10 +1259,15 @@ def tab_transactions():
                       verification_status, notes, date, time FROM transactions WHERE 1=1{fsql}
                       ORDER BY id DESC LIMIT 300""", fp)
         if not tdf.empty:
-            tdf["trans_type"] = tdf["trans_type"].map(lambda c: TRANS_LABELS.get(c, c))
             tdf["date_time"] = tdf[["date", "time"]].fillna("").agg(" ".join, axis=1)
-            tdf = tdf.drop(columns=["date", "time"])
-        st.dataframe(tdf, hide_index=True, use_container_width=True)
+            tdf["type"] = tdf["trans_type"].map(lambda c: TRANS_LABELS.get(c, c))
+            tdf["status"] = tdf["verification_status"].fillna("N/A")
+            show = tdf[["id", "factory_name", "officer_name", "sl_no", "prod_id", "item_name", "qty", "type",
+                        "status", "notes", "date_time"]]
+            st.dataframe(show.style.apply(zebra_styles, axis=1), hide_index=True,
+                         use_container_width=True, height=340)
+        else:
+            st.dataframe(tdf, hide_index=True, use_container_width=True, height=340)
         export_buttons(tdf, "transactions")
 
         with st.expander("🔐 Manager: Delete / Edit a transaction"):
@@ -1251,7 +1366,7 @@ def inv_master_view():
                   COALESCE(unit_price,0) AS unit_price, erp_status FROM inventory WHERE 1=1{FSQL}
                   ORDER BY factory_name, sl_no""", FP)
     if inv.empty:
-        st.info("Kono item nei.")
+        st.info("Kono item nei. ➕ Add / Import tab theke item add ba import korun.")
         return
     inv["variance"] = inv.current_stock - inv.erp_stock
     inv["erp_value"] = inv.erp_stock * inv.unit_price
@@ -1278,55 +1393,57 @@ def inv_master_view():
             lambda col: col.str.contains(term, case=False, regex=False)).any(axis=1)
         view = view[m]
     st.caption(f"Showing {len(view)} items")
-    st.dataframe(view, hide_index=True, use_container_width=True)
+    st.dataframe(view, hide_index=True, use_container_width=True, height=420)
     export_buttons(view, "inventory")
 
 
 def inv_add_import_view():
-    st.markdown('<div class="section-title">Add New Item</div>', unsafe_allow_html=True)
-    with st.form("add_item_form", clear_on_submit=False):
-        c1, c2, c3 = st.columns(3)
-        code = c1.text_input("ERP Code (blank = temporary)")
-        name = c2.text_input("Item Name*")
-        size = c3.text_input("Size*")
-        dept = c1.selectbox("Department", DEPARTMENTS)
-        cat = c2.selectbox("Category", CATEGORIES)
-        stock = c3.number_input("Initial Stock", min_value=0.0, step=1.0)
-        price = c1.number_input("Unit Price (BDT)", min_value=0.0, step=1.0)
-        submitted = st.form_submit_button("Save Item")
-    if submitted and guard():
-        if not name.strip() or not size.strip():
-            st.error("Item Name ar Size mandatory.")
-        else:
-            res = add_item(FAC, code, name.strip(), size.strip(), dept, cat, stock, price)
-            if res:
-                done("Stock added to existing item (no duplicate)." if res[0] == "exists" else "New item added.")
+    with st.container(border=True):
+        st.markdown('<div class="section-title">Add New Item</div>', unsafe_allow_html=True)
+        with st.form("add_item_form", clear_on_submit=False):
+            c1, c2, c3 = st.columns(3)
+            code = c1.text_input("ERP Code (blank = temporary)")
+            name = c2.text_input("Item Name*")
+            size = c3.text_input("Size*")
+            dept = c1.selectbox("Department", DEPARTMENTS)
+            cat = c2.selectbox("Category", CATEGORIES)
+            stock = c3.number_input("Initial Stock", min_value=0.0, step=1.0)
+            price = c1.number_input("Unit Price (BDT)", min_value=0.0, step=1.0)
+            submitted = st.form_submit_button("Save Item")
+        if submitted and guard():
+            if not name.strip() or not size.strip():
+                st.error("Item Name ar Size mandatory.")
+            else:
+                res = add_item(FAC, code, name.strip(), size.strip(), dept, cat, stock, price)
+                if res:
+                    done("Stock added to existing item (no duplicate)." if res[0] == "exists" else "New item added.")
 
-    st.markdown('<div class="section-title">Import Opening Physical Stock</div>', unsafe_allow_html=True)
-    st.download_button("📄 Download import format (CSV)",
-                       pd.DataFrame([{"SL No": 1, "ERP Code": "ERP-0001", "Item Name": "Example Item", "Size": "XL",
-                                      "Department": "Maintenance", "Category": "Maintenance Spare Parts",
-                                      "Opening Physical Stock": 10, "ERP Stock": 10, "Unit Price": 150, "Unit": "Pcs"}]
-                                    ).to_csv(index=False).encode("utf-8-sig"),
-                       "Opening_Physical_Stock_Format.csv", "text/csv")
-    up = st.file_uploader("Excel / CSV", type=["xlsx", "xls", "csv"], key="open_file")
-    if up and guard():
-        raw = read_any(up)
-        cols = detect_import_cols(raw)
-        if cols is None:
-            st.error("'Opening Physical Stock' column ba ERP Code/Item Name column paoa jay nai.")
-            st.write("Columns found:", list(raw.columns))
-            return
-        rows, skipped = build_import_rows(raw, cols)
-        st.caption(f"File rows: {len(raw)} | Valid: {len(rows)} | Skipped: {skipped} | Zero balance items are saved too.")
-        st.dataframe(pd.DataFrame(rows).head(200), hide_index=True, use_container_width=True)
-        st.download_button("💾 Download backup (all tables, CSV zip) before import", backup_zip(),
-                           "windy_backup.zip", "application/zip")
-        if st.button("✅ Import now", type="primary", key="do_open_import"):
-            st_ = do_import_opening(FAC, rows)
-            if st_:
-                done(f"Import done: NEW {st_['added']} (zero {st_['added_zero']}), updated {st_['updated']}, "
-                     f"mirrored to other unit {st_['mirrored']}, size missing {st_['no_size']}.")
+    with st.container(border=True):
+        st.markdown('<div class="section-title">Import Opening Physical Stock</div>', unsafe_allow_html=True)
+        st.download_button("📄 Download import format (CSV)",
+                           pd.DataFrame([{"SL No": 1, "ERP Code": "ERP-0001", "Item Name": "Example Item", "Size": "XL",
+                                          "Department": "Maintenance", "Category": "Maintenance Spare Parts",
+                                          "Opening Physical Stock": 10, "ERP Stock": 10, "Unit Price": 150, "Unit": "Pcs"}]
+                                        ).to_csv(index=False).encode("utf-8-sig"),
+                           "Opening_Physical_Stock_Format.csv", "text/csv")
+        up = st.file_uploader("Excel / CSV", type=["xlsx", "xls", "csv"], key="open_file")
+        if up and guard():
+            raw = read_any(up)
+            cols = detect_import_cols(raw)
+            if cols is None:
+                st.error("'Opening Physical Stock' column ba ERP Code/Item Name column paoa jay nai.")
+                st.write("Columns found:", list(raw.columns))
+                return
+            rows, skipped = build_import_rows(raw, cols)
+            st.caption(f"File rows: {len(raw)} | Valid: {len(rows)} | Skipped: {skipped} | Zero balance items are saved too.")
+            st.dataframe(pd.DataFrame(rows).head(200), hide_index=True, use_container_width=True)
+            st.download_button("💾 Download backup (all tables, CSV zip) before import", backup_zip(),
+                               "windy_backup.zip", "application/zip")
+            if st.button("✅ Import now", type="primary", key="do_open_import"):
+                st_ = do_import_opening(FAC, rows)
+                if st_:
+                    done(f"Import done: NEW {st_['added']} (zero {st_['added_zero']}), updated {st_['updated']}, "
+                         f"mirrored to other unit {st_['mirrored']}, size missing {st_['no_size']}.")
 
 
 def inv_edit_view():
@@ -1630,76 +1747,84 @@ def tab_erp_audit():
             "unit_price", "short_value", "excess_value", "erp_status", "variance_type"]
     with t_act:
         if guard():
-            st.markdown("**📥 Import ERP Balance** (Excel/CSV: ERP Code, Item Name, Size, ERP Balance)")
-            up = st.file_uploader("ERP balance file", type=["xlsx", "xls", "csv"], key="erp_bal_file")
-            if up and st.button("Import ERP balance", key="erp_bal_btn"):
-                df = read_any(up)
-                cc = find_col(df, ["erp code", "erp_code", "prod_id", "code"])
-                cn = find_col(df, ["item name", "item_name", "description", "item"])
-                cs = find_col(df, ["size"])
-                cb = find_col(df, ["erp balance", "erp_balance", "erp stock", "balance", "qty", "stock"])
-                if not cb or (not cc and not cn):
-                    st.error("'ERP Balance' ar ERP Code/Item Name column lagbe.")
-                else:
-                    rows, skipped = [], 0
-                    for _, r in df.iterrows():
-                        code = txt(r[cc]) if cc else ""
-                        name = txt(r[cn]) if cn else ""
-                        bal = num(r[cb]) if txt(r[cb]) != "" else 0.0
-                        if (is_blank_code(code) and not name) or bal is None:
-                            skipped += 1
-                            continue
-                        rows.append({"code": code, "name": name, "size": txt(r[cs]) if cs else "", "bal": bal})
-                    res = import_erp_rows(FAC, rows)
-                    if res is not None:
-                        done(f"ERP import: matched {res['matched']}, unmatch queue-e {res['queued']}, "
-                             f"already queued {res['dup']}, skipped {skipped}.")
+            with st.container(border=True):
+                st.markdown("**📥 Import ERP Balance** (Excel/CSV: ERP Code, Item Name, Size, ERP Balance)")
+                up = st.file_uploader("ERP balance file", type=["xlsx", "xls", "csv"], key="erp_bal_file")
+                if up and st.button("Import ERP balance", key="erp_bal_btn"):
+                    df = read_any(up)
+                    cc = find_col(df, ["erp code", "erp_code", "prod_id", "code"])
+                    cn = find_col(df, ["item name", "item_name", "description", "item"])
+                    cs = find_col(df, ["size"])
+                    cb = find_col(df, ["erp balance", "erp_balance", "erp stock", "balance", "qty", "stock"])
+                    if not cb or (not cc and not cn):
+                        st.error("'ERP Balance' ar ERP Code/Item Name column lagbe.")
+                    else:
+                        rows, skipped = [], 0
+                        for _, r in df.iterrows():
+                            code = txt(r[cc]) if cc else ""
+                            name = txt(r[cn]) if cn else ""
+                            bal = num(r[cb]) if txt(r[cb]) != "" else 0.0
+                            if (is_blank_code(code) and not name) or bal is None:
+                                skipped += 1
+                                continue
+                            rows.append({"code": code, "name": name, "size": txt(r[cs]) if cs else "", "bal": bal})
+                        res = import_erp_rows(FAC, rows)
+                        if res is not None:
+                            done(f"ERP import: matched {res['matched']}, unmatch queue-e {res['queued']}, "
+                                 f"already queued {res['dup']}, skipped {skipped}.")
 
-            st.markdown("---")
-            st.markdown("**⚖️ Adjust variance to ERP** (Manager)")
             vt = aud[aud.variance != 0] if not aud.empty else aud
-            if vt.empty:
-                st.success("Sob item ERP-er sathe matched.")
-            else:
-                labels = {f"{r['item_name']} [{r['size'] or '-'}] | {r['factory_name']} | Var {r['variance']:g}": r
-                          for r in vt.to_dict("records")}
-                row = labels[st.selectbox("Item", list(labels), key="adj_sel")]
-                limit = abs(float(row["variance"]))
-                aq = st.number_input("Adjust qty", min_value=0.0, max_value=limit, value=limit, key="adj_qty")
-                pw = mgr_check("adj_pw")
-                if st.button("⚖️ Adjust", key="adj_btn"):
-                    if not pw:
-                        st.error("Manager password thik nei.")
-                    elif aq <= 0:
-                        st.error("Qty 0 er beshi hote hobe.")
-                    elif adjust_variance(row, aq):
-                        done("Variance adjusted.")
+            c_left, c_right = st.columns(2, gap="large")
+            with c_left:
+                with st.container(border=True):
+                    st.markdown("**⚖️ Adjust variance to ERP** (Manager)")
+                    if vt.empty:
+                        st.success("Sob item ERP-er sathe matched.")
+                    else:
+                        labels = {f"{r['item_name']} [{r['size'] or '-'}] | {r['factory_name']} | Var {r['variance']:g}": r
+                                  for r in vt.to_dict("records")}
+                        row = labels[st.selectbox("Item", list(labels), key="adj_sel")]
+                        limit = abs(float(row["variance"]))
+                        aq = st.number_input("Adjust qty", min_value=0.0, max_value=limit, value=limit, key="adj_qty")
+                        pw = mgr_check("adj_pw")
+                        if st.button("⚖️ Adjust", key="adj_btn"):
+                            if not pw:
+                                st.error("Manager password thik nei.")
+                            elif aq <= 0:
+                                st.error("Qty 0 er beshi hote hobe.")
+                            elif adjust_variance(row, aq):
+                                done("Variance adjusted.")
+            with c_right:
+                with st.container(border=True):
+                    st.markdown("**📋 Assign correction task**")
+                    if vt.empty:
+                        st.caption("Variance item nei.")
+                    else:
+                        labels2 = {f"{r['item_name']} [{r['prod_id']}] | {r['factory_name']}": r for r in vt.to_dict("records")}
+                        row2 = labels2[st.selectbox("Item for task", list(labels2), key="task_item")]
+                        c1, c2, c3 = st.columns(3)
+                        officer = c1.selectbox("Officer", ["Officer_Sagor", "Officer_Rahim", "Manager Admin"], key="task_off")
+                        days = c2.selectbox("Deadline", [1, 2, 3, 7, 15], index=1, format_func=lambda d: f"{d} day(s)", key="task_days")
+                        prio = c3.selectbox("Priority", ["Critical", "High", "Medium", "Low"], index=1, key="task_prio")
+                        rem = st.text_input("Root cause / remarks", "Physical recount and verification required", key="task_rem")
+                        if st.button("Assign task", key="task_btn"):
+                            if assign_task(row2["factory_name"], row2, officer, days, prio, rem):
+                                done("Correction task assigned.")
 
-                st.markdown("---")
-                st.markdown("**📋 Assign correction task**")
-                labels2 = {f"{r['item_name']} [{r['prod_id']}] | {r['factory_name']}": r for r in vt.to_dict("records")}
-                row2 = labels2[st.selectbox("Item for task", list(labels2), key="task_item")]
-                c1, c2, c3 = st.columns(3)
-                officer = c1.selectbox("Officer", ["Officer_Sagor", "Officer_Rahim", "Manager Admin"], key="task_off")
-                days = c2.selectbox("Deadline", [1, 2, 3, 7, 15], index=1, format_func=lambda d: f"{d} day(s)", key="task_days")
-                prio = c3.selectbox("Priority", ["Critical", "High", "Medium", "Low"], index=1, key="task_prio")
-                rem = st.text_input("Root cause / remarks", "Physical recount and verification required", key="task_rem")
-                if st.button("Assign task", key="task_btn"):
-                    if assign_task(row2["factory_name"], row2, officer, days, prio, rem):
-                        done("Correction task assigned.")
-
-                st.markdown("---")
+            with st.container(border=True):
                 st.markdown("**✔️ Mark ERP status Done** (ERP Pending item)")
-                ep = aud[aud.erp_status == "ERP Pending"]
+                ep = aud[aud.erp_status == "ERP Pending"] if not aud.empty else aud
                 if not ep.empty:
                     labels3 = {f"{r['item_name']} [{r['size'] or '-'}] | {r['factory_name']}": r for r in ep.to_dict("records")}
                     row3 = labels3[st.selectbox("Item", list(labels3), key="grn_item")]
                     if st.button("Mark ERP GRN Done", key="grn_btn"):
                         if set_grn_done_inv(row3["factory_name"], row3["sl_no"]):
                             done("ERP status updated.")
+                else:
+                    st.caption("ERP Pending item nei.")
 
     with t_all:
-        st.dataframe(aud[cols] if not aud.empty else aud, hide_index=True, use_container_width=True)
+        st.dataframe(aud[cols] if not aud.empty else aud, hide_index=True, use_container_width=True, height=420)
         export_buttons(aud, "erp_audit_all")
     with t_short:
         st.dataframe(short[cols] if not short.empty else short, hide_index=True, use_container_width=True)
@@ -1761,7 +1886,7 @@ def tab_issue_ledger():
         iss["type"] = iss.trans_type.map(lambda c: TRANS_LABELS.get(c, c))
         iss["erp_status"] = iss.notes.fillna("").apply(lambda n: "ERP PO Pending" if "Pending" in n else "ERP GRN Completed")
     st.markdown('<div class="section-title">All Issues</div>', unsafe_allow_html=True)
-    st.dataframe(iss, hide_index=True, use_container_width=True)
+    st.dataframe(iss, hide_index=True, use_container_width=True, height=380)
     export_buttons(iss, "issue_ledger")
 
     st.markdown('<div class="section-title">Item-wise Monthly Issue Search</div>', unsafe_allow_html=True)
@@ -1846,7 +1971,7 @@ def tab_transfer_history():
     view = tf
     if term and not tf.empty:
         view = tf[tf.astype(str).apply(lambda c: c.str.contains(term, case=False, regex=False)).any(axis=1)]
-    st.dataframe(view, hide_index=True, use_container_width=True)
+    st.dataframe(view, hide_index=True, use_container_width=True, height=380)
     export_buttons(view, "transfer_history")
     with st.expander("🔐 Manager: Delete / Edit transfer"):
         if view.empty:
@@ -2141,12 +2266,12 @@ def tab_requisition():
 
     def hl(row):
         late = (row["PO Date"] == "Pending PO") and row["Delay (days)"] > PO_ALERT_DAYS and row["Audit Approved"] > 0
-        color = ("#e8f5e9" if row["Status"] == "Fully Received" else
-                 "#fff8e1" if row["Status"] == "Partially Received" else
-                 "#fde8e8" if late else "")
+        color = ("#DCFCE7" if row["Status"] == "Fully Received" else
+                 "#FFF4E6" if row["Status"] == "Partially Received" else
+                 "#FEE2E2" if late else "")
         return [f"background-color:{color}" if color else "" for _ in row]
 
-    st.dataframe(df.style.apply(hl, axis=1), hide_index=True, use_container_width=True)
+    st.dataframe(df.style.apply(hl, axis=1), hide_index=True, use_container_width=True, height=380)
     export_buttons(df, "requisition_tracking")
 
     labels = {f"ID {r['id']} | {r['req_no']} | {r['item_name']}": r for r in rows}
@@ -2250,7 +2375,7 @@ def tab_repair():
         rp = rp[m]
     if not rp.empty:
         rp["aging_days"] = rp.apply(lambda r: age_days(r["sent_date"], r["return_date"]), axis=1)
-    st.dataframe(rp, hide_index=True, use_container_width=True)
+    st.dataframe(rp, hide_index=True, use_container_width=True, height=380)
     export_buttons(rp, "repair_returns")
 
     if not guard():
@@ -2321,7 +2446,7 @@ def tab_ledger():
         led["date_time"] = led[["date", "time"]].fillna("").agg(" ".join, axis=1)
         led = led[["factory_name", "officer_name", "sl_no", "prod_id", "item_name", "qty", "type",
                    "total_price", "notes", "date_time"]]
-    st.dataframe(led, hide_index=True, use_container_width=True)
+    st.dataframe(led, hide_index=True, use_container_width=True, height=440)
     export_buttons(led, "ledger")
 
 
@@ -2397,21 +2522,22 @@ def tab_forecast():
     if FAC and "CONSOLIDATED" not in FAC:
         cp = plans.get((FAC, mi["cur_key"]), {})
         npn = plans.get((FAC, mi["next_key"]), {})
-        c1, c2, c3 = st.columns([1, 1, 2])
-        cur_q = c1.number_input("Current month plan (pcs)", min_value=0.0, step=100.0,
-                                value=float(cp.get("plan_qty") or 0), key="fc_cur")
-        next_q = c2.number_input("Next month plan (pcs)", min_value=0.0, step=100.0,
-                                 value=float(npn.get("plan_qty") or 0), key="fc_next")
-        note = c3.text_input("Plan remarks (e.g. Denim Pant)", (npn.get("plan_note") or cp.get("plan_note") or ""), key="fc_note")
-        if cur_q > 0 and next_q > 0:
-            f = next_q / cur_q
-            st.info(f"Production Factor = {next_q:,.0f} ÷ {cur_q:,.0f} = **{f:.2f}x**  "
-                    f"({'higher' if f > 1 else 'lower' if f < 1 else 'same'} consumption expected)")
-        else:
-            st.info("Production Factor = 1.00x (current ar next dui month-er plan dile factor apply hobe).")
-        if st.button("💾 Save plan & recalculate", key="fc_save") and guard():
-            if save_plans(FAC, cur_q, next_q, note, mi):
-                done("Production plan saved.")
+        with st.container(border=True):
+            c1, c2, c3 = st.columns([1, 1, 2])
+            cur_q = c1.number_input("Current month plan (pcs)", min_value=0.0, step=100.0,
+                                    value=float(cp.get("plan_qty") or 0), key="fc_cur")
+            next_q = c2.number_input("Next month plan (pcs)", min_value=0.0, step=100.0,
+                                     value=float(npn.get("plan_qty") or 0), key="fc_next")
+            note = c3.text_input("Plan remarks (e.g. Denim Pant)", (npn.get("plan_note") or cp.get("plan_note") or ""), key="fc_note")
+            if cur_q > 0 and next_q > 0:
+                f = next_q / cur_q
+                st.info(f"Production Factor = {next_q:,.0f} ÷ {cur_q:,.0f} = **{f:.2f}x**  "
+                        f"({'higher' if f > 1 else 'lower' if f < 1 else 'same'} consumption expected)")
+            else:
+                st.info("Production Factor = 1.00x (current ar next dui month-er plan dile factor apply hobe).")
+            if st.button("💾 Save plan & recalculate", key="fc_save") and guard():
+                if save_plans(FAC, cur_q, next_q, note, mi):
+                    done("Production plan saved.")
     else:
         st.info("Consolidated view-te read-only. Plan edit korte specific factory select korun.")
 
@@ -2428,14 +2554,14 @@ def tab_forecast():
         fc = fc.sort_values("Est. Cost", ascending=False)
         st.caption(f"Items: {len(fc)} | Need requisition: {int((fc['Net Requisition'] > 0).sum())} | "
                    f"Total net qty: {fc['Net Requisition'].sum():,.0f} | Est. cost: {fc['Est. Cost'].sum():,.2f} BDT")
-    st.dataframe(fc, hide_index=True, use_container_width=True)
+    st.dataframe(fc, hide_index=True, use_container_width=True, height=420)
     export_buttons(fc, "forecast")
     st.caption("Formula: Avg Daily = Last 3M consumption ÷ days  |  Projected = Avg Daily × days in next month × Factor  |  "
                "Net Requisition = Projected − Stock (rounded up)  |  Est. Cost = Net × Unit Price")
 
 
 # ============================================================
-#  TAB 10 - BUDGET (detailed)
+#  TAB 10 - BUDGET (metric cards + category cards)
 # ============================================================
 def tab_budget():
     bud = qdf(f"SELECT factory_name, department_name, category_name, allocated_budget FROM category_budgets WHERE 1=1{FSQL}", FP)
@@ -2450,6 +2576,35 @@ def tab_budget():
     bud["actual_cost"] = [cost.get((f, c), 0.0) for f, c in zip(bud.factory_name, bud.category_name)]
     bud["remaining"] = bud.allocated_budget - bud.actual_cost
     bud["status"] = bud.remaining.apply(lambda v: "SAFE" if v >= 0 else "OVER BUDGET")
+
+    tot_b, tot_c = float(bud.allocated_budget.sum()), float(bud.actual_cost.sum())
+    tot_r, tot_p = tot_b - tot_c, (tot_c / tot_b * 100 if tot_b > 0 else 0.0)
+    c = st.columns(4)
+    c[0].metric("Total Monthly Budget", f"৳ {tot_b:,.0f}")
+    c[1].metric("Total Consumption Cost", f"৳ {tot_c:,.0f}")
+    c[2].metric("Expense Percentage", f"{tot_p:.1f}%")
+    c[3].metric("Remaining Balance", f"৳ {tot_r:,.0f}")
+    st.markdown('<div class="fin-card">' + budget_bar_html(tot_p, "Overall budget consumption") + '</div>',
+                unsafe_allow_html=True)
+
+    st.markdown('<div class="section-title">Category Budget Cards</div>', unsafe_allow_html=True)
+    cols = st.columns(3, gap="medium")
+    for i, r in enumerate(bud.to_dict("records")):
+        b, c_ = float(r["allocated_budget"] or 0), float(r["actual_cost"] or 0)
+        pct = (c_ / b * 100) if b > 0 else (100.0 if c_ > 0 else 0.0)
+        rem = b - c_
+        status_color = "#16A34A" if rem >= 0 else "#DC2626"
+        card = (f'<div class="fin-card">'
+                f'<div class="cat-factory">{html_lib.escape(str(r["factory_name"]))} · {html_lib.escape(str(r["department_name"]))}</div>'
+                f'<div class="cat-name">{html_lib.escape(str(r["category_name"]))}</div>'
+                f'<div class="cat-nums"><span>Budget ৳ {b:,.0f}</span><span>Used ৳ {c_:,.0f}</span></div>'
+                f'{budget_bar_html(pct, "Consumption")}'
+                f'<div class="cat-foot">Remaining ৳ {rem:,.0f} · <span style="color:{status_color};font-weight:800">'
+                f'{"SAFE" if rem >= 0 else "OVER BUDGET"}</span></div></div>')
+        with cols[i % 3]:
+            st.markdown(card, unsafe_allow_html=True)
+
+    st.markdown('<div class="section-title">Budget Detail Table</div>', unsafe_allow_html=True)
     st.dataframe(bud, hide_index=True, use_container_width=True, column_config={
         "allocated_budget": st.column_config.NumberColumn("Allocated (৳)", format="%.0f"),
         "actual_cost": st.column_config.NumberColumn("Actual Cost (৳)", format="%.0f"),
@@ -2535,9 +2690,9 @@ def sheet_html(d, fac, df, auto):
                  f"<td>{r['Short Qty']:g}</td><td>{r['Excess Qty']:g}</td></tr>")
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Daily Work Sheet</title>
 <style>@page {{ size: A4 portrait; margin: 10mm; }} body {{ font-family: Arial; font-size: 11px; }}
-h2 {{ text-align:center; color:#1b3b6f; margin:0; }} p {{ text-align:center; margin:4px 0 10px; }}
+h2 {{ text-align:center; color:#C2410C; margin:0; }} p {{ text-align:center; margin:4px 0 10px; }}
 table {{ width:100%; border-collapse:collapse; }}
-th {{ background:#1b3b6f; color:#fff; padding:4px; border:1px solid #333; }}
+th {{ background:#E8590C; color:#fff; padding:4px; border:1px solid #333; }}
 td {{ border:1px solid #333; padding:3px 4px; text-align:center; }}
 tr.short td {{ background:#fde8e8; }} tr.excess td {{ background:#fff3e0; }}</style></head><body>
 <h2>Daily Issue Status For Month: {d.strftime('%B-%Y')}</h2>
@@ -2549,11 +2704,12 @@ tr.short td {{ background:#fde8e8; }} tr.excess td {{ background:#fff3e0; }}</st
 
 
 def tab_daily_sheet():
-    c1, c2, c3, c4 = st.columns([1, 2, 1, 1])
-    d = c1.date_input("Date", value=date.today(), key="ds_date")
-    fac = c2.selectbox("Factory", FACTORIES, index=FACTORIES.index(FAC) if FAC in FACTORIES else 0, key="ds_fac")
-    show_all = c3.checkbox("Include zero-stock", key="ds_all")
-    auto = c4.checkbox("Auto-fill issue/received", key="ds_auto")
+    with st.container(border=True):
+        c1, c2, c3, c4 = st.columns([1, 2, 1, 1])
+        d = c1.date_input("Date", value=date.today(), key="ds_date")
+        fac = c2.selectbox("Factory", FACTORIES, index=FACTORIES.index(FAC) if FAC in FACTORIES else 0, key="ds_fac")
+        show_all = c3.checkbox("Include zero-stock", key="ds_all")
+        auto = c4.checkbox("Auto-fill issue/received", key="ds_auto")
     df = daily_rows(d, fac, show_all)
     st.markdown(f'<div class="section-title">Daily Issue Status For Month: {d.strftime("%B-%Y")}</div>',
                 unsafe_allow_html=True)
@@ -2565,7 +2721,7 @@ def tab_daily_sheet():
     if not auto and not view.empty:
         view["Daily Issue"] = None
         view["Daily Received"] = None
-    st.dataframe(view, hide_index=True, use_container_width=True)
+    st.dataframe(view, hide_index=True, use_container_width=True, height=420)
     st.download_button("🖨️ Download print sheet (HTML → open & Print)", sheet_html(d, fac, df, auto),
                        f"Daily_Work_Sheet_{d:%Y%m%d}.html", "text/html")
     with st.expander("✏️ Edit UOM"):
@@ -2596,31 +2752,25 @@ with st.sidebar:
     st.markdown("### 🏭 Active Factory")
     FAC = st.selectbox("Active factory", FACTORIES + [ALL_VIEW], key="factory", label_visibility="collapsed")
     st.caption("📌 CONSOLIDATED view shudhu dekhar jonno. Entry-r jonno specific factory bachun.")
+    st.markdown("---")
+    st.markdown("### 🧭 Modules")
+    for icon, name in MODULE_NAV:
+        st.markdown(f'<div class="nav-item">{icon}&nbsp;&nbsp;{name}</div>', unsafe_allow_html=True)
 
 FSQL, FP = fw(FAC)
 is_cons_view = "CONSOLIDATED" in FAC
 autoset_uom_once()
 
-user_badge = (f"👤 {st.session_state['user']} · {st.session_state.get('role', '')}"
-              if st.session_state.get("user") else "🔒 Guest (view only)")
-st.markdown(f"""
-<div class="app-header">
-    <div>
-        <h1>KC &amp; WINDY SMART STOCK TRACKER &amp; BUDGET CONTROL</h1>
-        <p>Designed &amp; Created By: MD. Sagor Ali · Active View: {html_lib.escape(FAC)}</p>
-    </div>
-    <span class="badge">{html_lib.escape(user_badge)}</span>
-</div>
-""", unsafe_allow_html=True)
+render_header()
 
 try:
     tab_dashboard()
 except Exception as e:
-    st.warning(f"Dashboard load kora jacche na: {e}")
+    st.warning(f"Overview load kora jacche na: {e}")
 
-st.markdown("<br>", unsafe_allow_html=True)
-TAB_NAMES = ["[1] TRANSACTIONS", "[2] INVENTORY", "[3] ERP AUDIT", "[4] ISSUE LEDGER", "[5] TRANSFER HISTORY",
-             "[6] REQUISITION", "[7] REPAIR", "[8] LEDGER", "[9] FORECAST", "[10] BUDGET", "[11] DAILY WORK SHEET"]
+TAB_NAMES = ["📝 [1] TRANSACTIONS", "📦 [2] INVENTORY", "🔍 [3] ERP AUDIT", "📜 [4] ISSUE LEDGER",
+             "🔁 [5] TRANSFER HISTORY", "📑 [6] REQUISITION", "🛠 [7] REPAIR", "📒 [8] LEDGER",
+             "📈 [9] FORECAST", "💵 [10] BUDGET", "🗓 [11] DAILY WORK SHEET"]
 RENDERERS = [tab_transactions, tab_inventory, tab_erp_audit, tab_issue_ledger, tab_transfer_history,
              tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet]
 tabs = st.tabs(TAB_NAMES)
