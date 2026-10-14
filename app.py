@@ -284,6 +284,37 @@ section[data-testid="stSidebar"] div[data-testid="stCaptionContainer"] * {{ colo
 }}
 .st-key-aud_view label[data-baseweb="radio"]:has(input:checked) p {{ color: #fff !important; }}
 
+/* ---------- v4 main navigation: polished orange/peach tab bar (main_nav only; ERP view selector untouched) ---------- */
+.st-key-main_nav {{
+    background: linear-gradient(180deg, #FFF7ED 0%, #FFEBD6 100%); border: 1px solid #FDD9B0; border-bottom: 3px solid {ORANGE};
+    border-radius: 14px 14px 10px 10px; padding: 10px 12px 6px 12px; margin-bottom: 14px;
+    box-shadow: 0 6px 16px rgba(234,88,12,.10), inset 0 1px 0 rgba(255,255,255,.9);
+}}
+.st-key-main_nav div[role="radiogroup"] {{ gap: 8px !important; flex-wrap: wrap; padding: 0 0 6px 0 !important; }}
+.st-key-main_nav div[role="radiogroup"] label {{
+    position: relative; background: #ffffff !important; border: 1.5px solid #FDD9B0 !important; border-radius: 999px !important;
+    padding: 7px 16px !important; margin: 0 !important; min-height: 38px; cursor: pointer; align-items: center;
+    box-shadow: 0 1px 3px rgba(124,45,18,.10) !important; transition: transform .15s ease, box-shadow .15s ease, background .15s ease, border-color .15s ease;
+}}
+/* hide the native radio dot (covers both older and newer Streamlit markup) */
+.st-key-main_nav div[role="radiogroup"] label > div:first-child:not(:has(p)),
+.st-key-main_nav div[role="radiogroup"] label > span:first-child {{ display: none !important; }}
+.st-key-main_nav div[role="radiogroup"] label p {{
+    margin: 0 !important; font-size: 12.5px !important; font-weight: 700 !important; color: #9A3412 !important; white-space: nowrap; letter-spacing: .2px;
+}}
+.st-key-main_nav div[role="radiogroup"] label:hover {{
+    background: #FFF1E0 !important; border-color: {ORANGE} !important; transform: translateY(-2px);
+    box-shadow: 0 6px 14px rgba(234,88,12,.22) !important;
+}}
+.st-key-main_nav div[role="radiogroup"] label:has(input:checked) {{
+    background: linear-gradient(135deg, #FF9A1F 0%, #EA580C 100%) !important; border-color: #C2410C !important;
+    transform: translateY(-2px); box-shadow: 0 8px 18px rgba(234,88,12,.42), inset 0 1px 0 rgba(255,255,255,.35) !important;
+}}
+.st-key-main_nav div[role="radiogroup"] label:has(input:checked) p {{ color: #ffffff !important; font-weight: 800 !important; }}
+.st-key-main_nav div[role="radiogroup"] label:has(input:checked)::after {{
+    content: ""; position: absolute; left: 24%; right: 24%; bottom: 4px; height: 3px; border-radius: 3px; background: rgba(255,255,255,.85);
+}}
+
 /* ---------- ERP PO Pending summary card (clickable) ---------- */
 .st-key-po_card_btn button {{
     height: auto; min-height: 96px; text-align: left; justify-content: flex-start; padding: 12px 18px;
@@ -1662,12 +1693,6 @@ def tab_transactions():
     g = st.session_state.get("tx_gen", 0)   # bumps after every successful save -> all entry widgets start fresh
     if inventory_count() == 0 and not is_cons_view:
         st.info("📦 Ei factory-r inventory khali. [2] INVENTORY → ➕ Add / Import theke opening stock upload korun.")
-    po_n = po_pending_counts()
-    po_c1, _po_c2 = st.columns([1.3, 2.7])
-    with po_c1:
-        st.button(f"ERP PO Pending\n\n{po_n['total']}", key="po_card_btn", on_click=go_erp_po_pending,
-                  use_container_width=True)
-        st.caption(f"Issue {po_n['issue']} · Received {po_n['recv']}  —  click to open ERP Audit → ERP PO Pending")
     left, right = st.columns([1.05, 2], gap="large")
     with left:
         try:
@@ -1723,7 +1748,8 @@ def tab_transactions():
                 need_verif, v_streak = verification_needed(fac, item["sl_no"], tx_date)
                 if need_verif:
                     st.warning(f"Physical verification required: ei product porpor {v_streak} din issue hoyeche (4th consecutive day).")
-                    verified = st.checkbox("Physically Verified (required today)", key=f"tx_ver_{g}")
+            verified = st.checkbox("✅ Physically Verified (required today)" if need_verif else "✅ Verified",
+                                   key=f"tx_ver_{g}")
             notes = st.text_input("Remarks", key=f"tx_notes_{g}", placeholder="Optional note")
 
             if item is not None:
