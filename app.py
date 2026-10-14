@@ -32,7 +32,8 @@ st.markdown(f"""
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 html, body, [class*="css"], .stApp, button, input, textarea, select {{ font-family: 'Inter', sans-serif !important; }}
 .stApp {{ background: {BG}; color: {INK}; }}
-.block-container {{ padding-top: 1rem; padding-bottom: 2.5rem; max-width: 1480px; }}
+.block-container {{ padding-top: 4.2rem !important; padding-bottom: 2.5rem; max-width: 1480px; }}
+header[data-testid="stHeader"] {{ background: rgba(248,250,252,.92) !important; z-index: 90; }}
 #MainMenu, footer {{ visibility: hidden; }}
 
 /* ---------- Top header bar ---------- */
@@ -80,7 +81,9 @@ div[data-testid="stVerticalBlockBorderWrapper"] {{ border-radius: 12px !importan
 .status-badge {{ display:inline-block; padding:2px 10px; border-radius:999px; font-size:11px; font-weight:700; }}
 
 /* ---------- Pill tabs ---------- */
-.stTabs [data-baseweb="tab-list"] {{ gap: 8px; background: transparent; border-bottom: none; padding: 2px 0 14px 0; overflow-x: auto; flex-wrap: nowrap; }}
+.stTabs [data-baseweb="tab-list"] {{ gap: 8px; background: transparent; border-bottom: none; padding: 2px 0 14px 0; overflow: visible !important; flex-wrap: wrap !important; }}
+.stTabs button[data-testid="stTabScrollButton"] {{ display: none !important; }}
+div[data-baseweb="tab-highlight"], div[data-baseweb="tab-border"] {{ display: none !important; height: 0 !important; }}
 .stTabs [data-baseweb="tab"] {{
     background: #ffffff; border: 1px solid #FDE7CF; border-radius: 999px; padding: 8px 16px;
     font-weight: 600; font-size: 12.5px; color: #7C2D12; box-shadow: 0 2px 6px rgba(0,0,0,.04);
