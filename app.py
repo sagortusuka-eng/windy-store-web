@@ -80,19 +80,26 @@ div[data-testid="stVerticalBlockBorderWrapper"] {{ border-radius: 12px !importan
 
 .status-badge {{ display:inline-block; padding:2px 10px; border-radius:999px; font-size:11px; font-weight:700; }}
 
-/* ---------- Pill tabs ---------- */
-.stTabs [data-baseweb="tab-list"] {{ gap: 8px; background: transparent; border-bottom: none; padding: 2px 0 14px 0; overflow: visible !important; flex-wrap: wrap !important; }}
+/* ---------- Navigation tabs (compact, bordered) ---------- */
+.stTabs [data-baseweb="tab-list"], .stTabs [data-baseweb="tab-list"] > div {{ overflow: visible !important; flex-wrap: wrap !important; height: auto !important; }}
+.stTabs [data-baseweb="tab-list"] {{ gap: 6px; background: transparent; border-bottom: none; padding: 2px 0 12px 0; }}
 .stTabs button[data-testid="stTabScrollButton"] {{ display: none !important; }}
 div[data-baseweb="tab-highlight"], div[data-baseweb="tab-border"] {{ display: none !important; height: 0 !important; }}
 .stTabs [data-baseweb="tab"] {{
-    background: #ffffff; border: 1px solid #FDE7CF; border-radius: 999px; padding: 8px 16px;
-    font-weight: 600; font-size: 12.5px; color: #7C2D12; box-shadow: 0 2px 6px rgba(0,0,0,.04);
-    white-space: nowrap; height: auto; transition: all .2s ease;
+    background: #ffffff; border: 1.5px solid #E2E8F0; border-radius: 10px; padding: 7px 14px;
+    font-weight: 700; font-size: 12.5px; color: #334155; box-shadow: 0 1px 3px rgba(15,23,42,.08);
+    white-space: nowrap; height: auto; min-height: 36px; transition: all .15s ease;
 }}
-.stTabs [data-baseweb="tab"]:hover {{ border-color: {ORANGE}; transform: translateY(-1px); }}
+.stTabs [data-baseweb="tab"]:hover {{ border-color: {ORANGE}; color: #C2410C; }}
 .stTabs [aria-selected="true"] {{
-    background: linear-gradient(120deg, {ORANGE}, {PEACH}) !important; color: #fff !important;
-    border-color: transparent !important; box-shadow: 0 6px 16px rgba(255,140,0,.35);
+    background: linear-gradient(120deg, #F97316, {ORANGE}) !important; color: #fff !important;
+    border-color: #EA580C !important; box-shadow: 0 3px 10px rgba(234,88,12,.30);
+}}
+.stTabs [aria-selected="true"] p {{ color: #fff !important; }}
+/* nested tabs act like compact filter chips */
+.stTabs .stTabs [data-baseweb="tab"] {{ border-radius: 8px; padding: 5px 12px; font-size: 12px; min-height: 32px; background: #F8FAFC; }}
+.stTabs .stTabs [aria-selected="true"] {{
+    background: #1E293B !important; border-color: #1E293B !important; box-shadow: 0 2px 6px rgba(30,41,59,.25);
 }}
 .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] {{ display: none !important; }}
 
@@ -119,15 +126,15 @@ div[data-baseweb="select"] span, div[data-baseweb="select"] div {{ color: {INK};
 }}
 .stButton > button:hover, .stDownloadButton > button:hover {{ border-color: {ORANGE}; color: #C2410C; transform: translateY(-1px); }}
 .stButton > button[kind="primary"] {{
-    background: linear-gradient(120deg, {ORANGE}, {PEACH}); border: none; color: #fff;
-    box-shadow: 0 0 18px rgba(255,140,0,.45); padding: 12px 18px; font-size: 15px; letter-spacing: .2px;
+    background: linear-gradient(120deg, #F97316, {ORANGE}); border: none; color: #fff;
+    box-shadow: 0 4px 12px rgba(234,88,12,.28); padding: 9px 16px; font-size: 14px; letter-spacing: .2px;
 }}
-.stButton > button[kind="primary"]:hover {{ color: #fff; box-shadow: 0 0 26px rgba(255,140,0,.65); transform: translateY(-2px); }}
+.stButton > button[kind="primary"]:hover {{ color: #fff; box-shadow: 0 6px 16px rgba(234,88,12,.40); transform: translateY(-1px); }}
 .stButton > button:disabled {{ opacity: .5; }}
 
 /* ---------- Tables / alerts / expanders ---------- */
 div[data-testid="stDataFrame"] {{
-    border: 1px solid #F1F5F9; border-radius: 12px; overflow: hidden;
+    border: 1.5px solid #CBD5E1; border-radius: 12px; overflow: hidden;
     box-shadow: 0 4px 6px -1px rgba(0,0,0,.05); background: #fff;
 }}
 div[data-testid="stAlert"] {{ border-radius: 12px; }}
@@ -235,6 +242,24 @@ section[data-testid="stSidebar"] div[data-testid="stForm"] button p {{ color: #C
     display: inline-block; background: #DBEAFE; color: #1E40AF; border: 1px solid #BFDBFE; border-radius: 999px;
     padding: 3px 12px; font-size: 12px; font-weight: 700;
 }}
+
+/* ---------- v3 polish ---------- */
+div[data-testid="stMetricValue"] > div {{
+    font-size: 1.65rem !important; white-space: normal !important; overflow: visible !important;
+    text-overflow: clip !important; line-height: 1.2;
+}}
+div[data-testid="stWidgetLabel"] p {{ font-weight: 700; color: #334155; font-size: 13px; }}
+.stButton > button, .stDownloadButton > button {{ min-height: 38px; }}
+div[data-testid="stCheckbox"] label p {{ font-weight: 600; }}
+section[data-testid="stSidebar"] div[data-testid="stExpander"] {{
+    background: rgba(255,255,255,.14) !important; border: 1px solid rgba(255,255,255,.35) !important;
+    box-shadow: none !important; margin-top: 8px;
+}}
+section[data-testid="stSidebar"] div[data-testid="stExpander"] summary p {{ font-weight: 800 !important; color: #fff !important; }}
+section[data-testid="stSidebar"] div[data-testid="stExpander"] div[data-testid="stForm"] {{
+    border: none !important; padding: 4px !important; background: transparent !important; box-shadow: none !important;
+}}
+section[data-testid="stSidebar"] div[data-testid="stCaptionContainer"] * {{ color: #FFF7ED !important; }}
 </style>""", unsafe_allow_html=True)
 
 # ============================================================
@@ -255,7 +280,7 @@ CATEGORIES = ["Maintenance Spare Parts", "Electrical Accessories", "Utilities Sp
               "Medicine & Others", "Plumbing and Sanitary Goods", "Office Maintenance", "Laboratory Accessories",
               "Uncategorized (Edit Later)"]
 UOM = ["Pcs", "Kg"]
-INV_COLS = ("sl_no, prod_id, factory_name, item_name, COALESCE(size,'') AS size, "
+INV_COLS = ("sl_no, prod_id, factory_name, item_name, COALESCE(size,'') AS size, COALESCE(serial_no,'') AS serial, "
             "COALESCE(current_stock,0) AS stock, COALESCE(erp_stock,0) AS erp, COALESCE(unit_price,0) AS price")
 TRANS_LABELS = {
     "Supplier. Rec": "📥 Supplier Receipt",
@@ -418,6 +443,12 @@ def init_db():
         "ALTER TABLE repair_returns ADD COLUMN IF NOT EXISTS return_type TEXT",
         "ALTER TABLE repair_returns ADD COLUMN IF NOT EXISTS officer_name TEXT",
         "ALTER TABLE import_queue ADD COLUMN IF NOT EXISTS size TEXT DEFAULT ''",
+        "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS serial_no TEXT DEFAULT ''",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Active'",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TEXT",
+        """CREATE TABLE IF NOT EXISTS password_resets (
+            id SERIAL PRIMARY KEY, username TEXT, requested_at TEXT, status TEXT DEFAULT 'Pending',
+            handled_by TEXT, handled_at TEXT)""",
     ]
     try:
         with conn.cursor() as cur:
@@ -465,6 +496,12 @@ def init_db():
     except Exception:
         conn.rollback()
         raise
+    try:  # fast serial-number lookup (plain index, no data change)
+        with conn.cursor() as cur:
+            cur.execute("CREATE INDEX IF NOT EXISTS ix_inventory_serial ON inventory(factory_name, lower(COALESCE(serial_no,'')))")
+        conn.commit()
+    except Exception:
+        conn.rollback()
     try:  # same name + size can not be saved twice in one factory
         with conn.cursor() as cur:
             cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS ux_inventory_name_size
@@ -533,6 +570,102 @@ def mgr_check(key):
     return ok
 
 
+def confirm_box(key, text="⚠️ Ami confirm korchi - ei record permanently delete hobe."):
+    """Explicit tick required before any destructive action."""
+    return st.checkbox(text, key=key)
+
+
+USERNAME_RE = re.compile(r"[A-Za-z0-9_.\-]{3,30}")
+
+
+@tx
+def register_user(username, full_name, pw):
+    """New accounts are always 'Store Officer' and stay Pending until the Store Manager approves them."""
+    if q("SELECT 1 AS x FROM users WHERE LOWER(username)=LOWER(%s)", (username,)):
+        st.error("Ei username already ache. Onno username din.")
+        return False
+    run("INSERT INTO users (username, password, role, full_name, status, created_at) VALUES (%s,%s,'Store Officer',%s,'Pending',%s)",
+        (username, hash_password(pw), full_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    audit("REGISTER_REQUEST", f"Registration request: {username} ({full_name})")
+    return True
+
+
+@tx
+def request_password_reset(username):
+    """Queues a reset request for the Store Manager. Nothing is revealed about whether the user exists."""
+    r = q("SELECT username FROM users WHERE LOWER(username)=LOWER(%s) AND COALESCE(status,'Active')='Active'", (username,))
+    if r:
+        uname = r[0]["username"]
+        if not q("SELECT 1 AS x FROM password_resets WHERE username=%s AND status='Pending'", (uname,)):
+            run("INSERT INTO password_resets (username, requested_at, status) VALUES (%s,%s,'Pending')",
+                (uname, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            audit("PASSWORD_RESET_REQUEST", f"Reset requested for {uname}")
+    return True
+
+
+@tx
+def approve_user(uid, role, uname):
+    run("UPDATE users SET status='Active', role=%s WHERE id=%s AND COALESCE(status,'Active')='Pending'", (role, uid))
+    audit("APPROVE_USER", f"{uname} approved as {role}")
+    return True
+
+
+@tx
+def reject_user(uid, uname):
+    run("DELETE FROM users WHERE id=%s AND COALESCE(status,'Active')='Pending'", (uid,))
+    audit("REJECT_USER", f"Registration of {uname} rejected")
+    return True
+
+
+@tx
+def set_temp_password(rid, uname, new_pw):
+    run("UPDATE users SET password=%s WHERE username=%s", (hash_password(new_pw), uname))
+    run("UPDATE password_resets SET status='Done', handled_by=%s, handled_at=%s WHERE id=%s",
+        (st.session_state.get("user", ""), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), rid))
+    audit("PASSWORD_RESET_DONE", f"Temporary password set for {uname}")
+    return True
+
+
+@tx
+def change_password(uname, new_pw):
+    run("UPDATE users SET password=%s WHERE username=%s", (hash_password(new_pw), uname))
+    audit("PASSWORD_CHANGED", f"{uname} changed own password")
+    return True
+
+
+def user_admin_panel():
+    """Store Manager only: approve registrations and answer password-reset requests."""
+    pend = q("SELECT id, username, full_name FROM users WHERE COALESCE(status,'Active')='Pending' ORDER BY id")
+    resets = q("SELECT id, username, requested_at FROM password_resets WHERE status='Pending' ORDER BY id")
+    with st.expander(f"👥 User Admin ({len(pend) + len(resets)} pending)"):
+        st.markdown("**New registrations**")
+        if not pend:
+            st.caption("Pending registration nei.")
+        else:
+            labels = {f"{r['username']} - {r['full_name']}": r for r in pend}
+            sel = labels[st.selectbox("Registration request", list(labels), key="ua_reg_sel")]
+            role = st.selectbox("Assign role", ["Store Officer", "Auditor"], key="ua_reg_role")
+            c1, c2 = st.columns(2)
+            if c1.button("✔ Approve", key="ua_reg_ok"):
+                if approve_user(sel["id"], role, sel["username"]):
+                    done(f"{sel['username']} approved as {role}.")
+            if c2.button("✖ Reject", key="ua_reg_no"):
+                if reject_user(sel["id"], sel["username"]):
+                    done(f"{sel['username']} rejected.")
+        st.markdown("**Password reset requests**")
+        if not resets:
+            st.caption("Pending reset request nei.")
+        else:
+            labels2 = {f"{r['username']} ({r['requested_at']})": r for r in resets}
+            sel2 = labels2[st.selectbox("Reset request", list(labels2), key="ua_rs_sel")]
+            np_ = st.text_input("New temporary password (min 8 chars)", type="password", key="ua_rs_pw")
+            if st.button("Set temporary password", key="ua_rs_btn"):
+                if len(np_) < 8:
+                    st.error("Password kom pokkhe 8 character hote hobe.")
+                elif set_temp_password(sel2["id"], sel2["username"], np_):
+                    done("Temporary password set. User-ke surakkhitovabe janan; login-er por password change korte bolun.")
+
+
 def sidebar_login():
     with st.sidebar:
         st.markdown(
@@ -551,6 +684,24 @@ def sidebar_login():
                 st.session_state.pop("user", None)
                 st.session_state.pop("role", None)
                 done("Logged out successfully.")
+            with st.expander("🔑 Change password"):
+                with st.form("chg_pw_form", clear_on_submit=True):
+                    cur_pw = st.text_input("Current password", type="password", key="cp_cur")
+                    new_pw1 = st.text_input("New password (min 8 chars)", type="password", key="cp_new1")
+                    new_pw2 = st.text_input("Confirm new password", type="password", key="cp_new2")
+                    chg = st.form_submit_button("Update password", use_container_width=True)
+                if chg:
+                    row = q("SELECT password FROM users WHERE username=%s", (st.session_state["user"],))
+                    if not row or not verify_password(row[0]["password"], cur_pw):
+                        st.error("Current password thik nei.")
+                    elif len(new_pw1) < 8:
+                        st.error("New password kom pokkhe 8 character hote hobe.")
+                    elif new_pw1 != new_pw2:
+                        st.error("Dui password mile ni.")
+                    elif change_password(st.session_state["user"], new_pw1):
+                        st.success("Password updated.")
+            if st.session_state.get("role") == "Store Manager":
+                user_admin_panel()
         else:
             with st.form("login_form", clear_on_submit=False):
                 u = st.text_input("Username", placeholder="Enter your username", key="login_user")
@@ -560,14 +711,51 @@ def sidebar_login():
                 if not u.strip() or not p:
                     st.error("Username ar password dui-i din.")
                 else:
-                    r = q("SELECT password, role FROM users WHERE username=%s", (u.strip(),))
+                    r = q("SELECT password, role, COALESCE(status,'Active') AS status FROM users WHERE username=%s", (u.strip(),))
                     if r and verify_password(r[0]["password"], p):
-                        st.session_state["user"] = u.strip()
-                        st.session_state["role"] = r[0]["role"]
-                        log_event("LOGIN", f"User {u.strip()} logged in as {r[0]['role']}.")
-                        done(f"Welcome, {u.strip()}!")
+                        if r[0]["status"] == "Pending":
+                            st.warning("Apnar registration Store Manager-er approval-er opekkhay ache.")
+                        elif r[0]["status"] != "Active":
+                            st.error("Ei account active nei. Store Manager-er sathe jogajog korun.")
+                        else:
+                            st.session_state["user"] = u.strip()
+                            st.session_state["role"] = r[0]["role"]
+                            log_event("LOGIN", f"User {u.strip()} logged in as {r[0]['role']}.")
+                            done(f"Welcome, {u.strip()}!")
                     else:
                         st.error("Username ba password vul.")
+
+            with st.expander("📝 Registration"):
+                st.caption("Notun account Store Manager approve korle chalu hobe.")
+                with st.form("reg_form", clear_on_submit=True):
+                    ru = st.text_input("Username*", key="reg_user", placeholder="3-30 letters / digits / _ . -")
+                    rn = st.text_input("Full name*", key="reg_name")
+                    rp1 = st.text_input("Password* (min 8 chars)", type="password", key="reg_pw1")
+                    rp2 = st.text_input("Confirm password*", type="password", key="reg_pw2")
+                    reg = st.form_submit_button("Submit registration", use_container_width=True)
+                if reg:
+                    if not USERNAME_RE.fullmatch(ru.strip()):
+                        st.error("Username 3-30 character, shudhu letter / digit / _ . - hote parbe.")
+                    elif not rn.strip():
+                        st.error("Full name din.")
+                    elif len(rp1) < 8:
+                        st.error("Password kom pokkhe 8 character hote hobe.")
+                    elif rp1 != rp2:
+                        st.error("Dui password mile ni.")
+                    elif register_user(ru.strip(), rn.strip(), rp1):
+                        st.success("Registration request pathano hoyeche. Store Manager approve korle login korte parben.")
+
+            with st.expander("🔑 Forgot Password"):
+                st.caption("Username din. Request Store Manager-er kache jabe; manager temporary password dibe, "
+                           "login-er por password change korben.")
+                with st.form("fp_form", clear_on_submit=True):
+                    fu = st.text_input("Username", key="fp_user")
+                    fps = st.form_submit_button("Send reset request", use_container_width=True)
+                if fps:
+                    if not fu.strip():
+                        st.error("Username din.")
+                    elif request_password_reset(fu.strip()):
+                        st.success("Username thakle reset request Store Manager-er kache pathano hoyeche.")
 
 
 # ============================================================
@@ -658,7 +846,8 @@ def other_factory(f):
 
 
 def item_label(r):
-    return f"SL {r['sl_no']} | {r['factory_name']} | {r['item_name']} [{r['size'] or '-'}] | {r['prod_id']} | Stock {float(r['stock'] or 0):g}"
+    return (f"SL {r['sl_no']} | S/N {r.get('serial') or '-'} | {r['factory_name']} | {r['item_name']} "
+            f"[{r['size'] or '-'}] | {r['prod_id']} | Stock {float(r['stock'] or 0):g}")
 
 
 def next_free_temp(fac):
@@ -753,21 +942,25 @@ def status_badge(text):
 # ============================================================
 #  ITEM RESOLVING
 # ============================================================
-def resolve_item(fac, key):
-    """SL No (exact) -> ERP code -> name (exact) -> partial name/size. Returns (row, candidates)."""
+def resolve_item(fac, key, in_stock_only=False):
+    """SL No (exact) -> Serial No (exact) -> ERP code -> name (exact) -> partial name/size/serial. Returns (row, candidates).
+    in_stock_only=True hides items whose current stock is 0 or negative (used for issue-type transactions)."""
     k = str(key or "").strip()
     if not k:
         return None, []
     stages = []
     if k.isdigit():
         stages.append(("sl_no=%s", [int(k)]))
+    stages.append(("LOWER(TRIM(COALESCE(serial_no,'')))=LOWER(%s)", [k]))
     stages.append(("LOWER(TRIM(prod_id))=LOWER(%s)", [k]))
     stages.append(("LOWER(TRIM(item_name))=LOWER(%s)", [k]))
     like = f"%{k.lower()}%"
-    stages.append(("(LOWER(item_name) LIKE %s OR LOWER(COALESCE(size,'')) LIKE %s)", [like, like]))
+    stages.append(("(LOWER(item_name) LIKE %s OR LOWER(COALESCE(size,'')) LIKE %s OR LOWER(COALESCE(serial_no,'')) LIKE %s)",
+                   [like, like, like]))
     fsql, fp = fw(fac)
+    stock_sql = " AND COALESCE(current_stock,0) > 0" if in_stock_only else ""
     for where, params in stages:
-        rows = q(f"SELECT {INV_COLS} FROM inventory WHERE {where}{fsql} ORDER BY factory_name, sl_no", params + fp)
+        rows = q(f"SELECT {INV_COLS} FROM inventory WHERE {where}{stock_sql}{fsql} ORDER BY factory_name, sl_no", params + fp)
         if len(rows) == 1:
             return rows[0], rows
         if len(rows) > 1:
@@ -775,22 +968,56 @@ def resolve_item(fac, key):
     return None, []
 
 
-def search_items(fac, term):
+def search_items(fac, term, in_stock_only=False):
     like = f"%{term.lower()}%"
     fsql, fp = fw(fac)
+    stock_sql = " AND COALESCE(current_stock,0) > 0" if in_stock_only else ""
     return q(f"""SELECT {INV_COLS} FROM inventory
                  WHERE (LOWER(item_name) LIKE %s OR LOWER(COALESCE(size,'')) LIKE %s OR LOWER(prod_id) LIKE %s
-                        OR CAST(sl_no AS TEXT)=%s){fsql} ORDER BY sl_no LIMIT 100""",
-             [like, like, like, term] + fp)
+                        OR LOWER(COALESCE(serial_no,'')) LIKE %s OR CAST(sl_no AS TEXT)=%s){stock_sql}{fsql}
+                 ORDER BY CASE WHEN LOWER(COALESCE(serial_no,''))=LOWER(%s) THEN 0 ELSE 1 END, sl_no LIMIT 100""",
+             [like, like, like, like, term] + fp + [term])
+
+
+def serial_owner(fac, serial, exclude_sl=None):
+    """Item of this factory that already carries the serial number (or None)."""
+    sn = (serial or "").strip()
+    if not sn:
+        return None
+    rows = q("""SELECT sl_no, item_name, COALESCE(size,'') AS size FROM inventory
+                WHERE factory_name=%s AND LOWER(TRIM(COALESCE(serial_no,'')))=LOWER(%s)""", (fac, sn))
+    rows = [r for r in rows if exclude_sl is None or r["sl_no"] != exclude_sl]
+    return rows[0] if rows else None
+
+
+def is_duplicate_tx(fac, sl, ttype, qty, date_s, user, notes):
+    """True when the newest transaction of this item is an identical one saved within the last 2 minutes
+    (same type, qty, date, officer and remarks) - i.e. a repeated click / stale form."""
+    last = q("""SELECT qty, trans_type, officer_name, date, time, notes FROM transactions
+                WHERE factory_name=%s AND sl_no=%s ORDER BY id DESC LIMIT 1""", (fac, sl))
+    if not last:
+        return False
+    t = last[0]
+    if not (t["trans_type"] == ttype and abs(float(t["qty"] or 0) - float(qty)) < 1e-9
+            and t["officer_name"] == user and t["date"] == date_s
+            and str(t["notes"] or "").strip().startswith(str(notes or "").strip())):
+        return False
+    try:
+        tm = datetime.strptime(str(t["time"]).strip(), "%I:%M %p").time()
+    except ValueError:
+        return False
+    saved = datetime.combine(datetime.now().date(), tm)
+    return 0 <= (datetime.now() - saved).total_seconds() < 120
 
 
 def inv_options(fac):
     fsql, fp = fw(fac)
     rows = q(f"""SELECT sl_no, prod_id, factory_name, item_name, COALESCE(size,'') AS size, department, category,
-                 COALESCE(erp_stock,0) AS erp_stock, COALESCE(current_stock,0) AS current_stock,
+                 COALESCE(serial_no,'') AS serial_no, COALESCE(erp_stock,0) AS erp_stock, COALESCE(current_stock,0) AS current_stock,
                  COALESCE(unit_price,0) AS unit_price, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit_name
                  FROM inventory WHERE 1=1{fsql} ORDER BY factory_name, sl_no""", fp)
-    return {f"SL {r['sl_no']} | {r['factory_name']} | {r['item_name']} [{r['size'] or '-'}] | {r['prod_id']}": r for r in rows}
+    return {f"SL {r['sl_no']} | {r['factory_name']} | {r['item_name']} [{r['size'] or '-'}] | {r['prod_id']}"
+            + (f" | S/N {r['serial_no']}" if r["serial_no"] else ""): r for r in rows}
 
 
 def find_same_item(fac, name, size):
@@ -843,13 +1070,15 @@ def recent_issue(fac, sl, ref_dt):
 #  IMPORT ENGINE (Master Inventory, in-memory index)
 # ============================================================
 def empty_index():
-    return {"all": [], "name": {}, "code": {}, "codes": set(), "max_sl": 0, "temp": 0}
+    return {"all": [], "name": {}, "code": {}, "codes": set(), "max_sl": 0, "temp": 0, "serials": {}}
 
 
-def idx_add(idx, sl, code, name, size):
+def idx_add(idx, sl, code, name, size, serial=""):
     e = {"sl": sl, "code": str(code or ""), "name": name or "", "size": size or "",
-         "nn": norm_name(name), "ns": norm_size(size)}
+         "nn": norm_name(name), "ns": norm_size(size), "serial": str(serial or "").strip()}
     idx["all"].append(e)
+    if e["serial"]:
+        idx["serials"][e["serial"].lower()] = sl
     if e["nn"]:
         idx["name"].setdefault(e["nn"], []).append(e)
     ck = e["code"].strip().lower()
@@ -868,8 +1097,9 @@ def idx_add(idx, sl, code, name, size):
 
 def load_index(fac):
     idx = empty_index()
-    for r in q("SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size FROM inventory WHERE factory_name=%s", (fac,)):
-        idx_add(idx, r["sl_no"], r["prod_id"], r["item_name"], r["size"])
+    for r in q("SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size, COALESCE(serial_no,'') AS serial_no "
+               "FROM inventory WHERE factory_name=%s", (fac,)):
+        idx_add(idx, r["sl_no"], r["prod_id"], r["item_name"], r["size"], r["serial_no"])
     mq = q("SELECT COALESCE(MAX(sl_no),0) AS m FROM import_queue WHERE factory_name=%s", (fac,))[0]["m"]
     idx["max_sl"] = max(idx["max_sl"], int(mq or 0))
     return idx
@@ -920,16 +1150,16 @@ def temp_code(idx):
     return f"TEMP-{n:04d}"
 
 
-def idx_insert(fac, idx, code, name, size, dept, cat, erp, stock, price, unit):
+def idx_insert(fac, idx, code, name, size, dept, cat, erp, stock, price, unit, serial=""):
     final = temp_code(idx) if is_blank_code(code) else unique_code(idx, code, size)
     idx["max_sl"] += 1
     sl = idx["max_sl"]
     run("""INSERT INTO inventory (sl_no, prod_id, factory_name, item_name, size, department, category,
-           erp_stock, current_stock, unit_price, erp_status, unit_name)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ERP Pending',%s)""",
+           erp_stock, current_stock, unit_price, erp_status, unit_name, serial_no)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ERP Pending',%s,%s)""",
         (sl, final, fac, name, size or "", dept or "Maintenance", cat or "Uncategorized (Edit Later)",
-         erp, stock, price or 0.0, unit or "Pcs"))
-    idx_add(idx, sl, final, name, size)
+         erp, stock, price or 0.0, unit or "Pcs", (serial or "").strip()))
+    idx_add(idx, sl, final, name, size, serial)
     return final
 
 
@@ -945,12 +1175,14 @@ def mirror_to_other(fac, code, name, size, dept, cat, price):
 def import_rows(fac, rows):
     other = other_factory(fac)
     idx, oidx = load_index(fac), load_index(other)
-    st_ = dict(updated=0, added=0, added_zero=0, mirrored=0, dup=0, no_size=0, size_fill=0, code_fix=0, queue_closed=0)
+    st_ = dict(updated=0, added=0, added_zero=0, mirrored=0, dup=0, no_size=0, size_fill=0, code_fix=0, queue_closed=0,
+               serial_set=0, serial_conflict=0)
     touched = set()
     for r in rows:
         code = "" if is_blank_code(r["code"]) else str(r["code"]).strip()
         name = r["name"] or code
         size = r["size"] or ""
+        serial = str(r.get("serial") or "").strip()
         e = idx_find(idx, code, name, size)
         if e:
             if e["sl"] in touched:
@@ -958,10 +1190,22 @@ def import_rows(fac, rows):
             touched.add(e["sl"])
             new_size = size if (size and not e["ns"]) else None
             new_code = unique_code(idx, code, size or e["size"]) if (code and e["code"].upper().startswith("TEMP-")) else None
+            new_serial = None
+            if serial and serial.lower() != str(e.get("serial") or "").lower():
+                owner = idx["serials"].get(serial.lower())
+                if owner is None or owner == e["sl"]:
+                    new_serial = serial
+                else:
+                    st_["serial_conflict"] += 1
             run("""UPDATE inventory SET current_stock=COALESCE(%s,current_stock), erp_stock=COALESCE(%s,erp_stock),
                    unit_price=COALESCE(%s,unit_price), unit_name=COALESCE(%s,unit_name),
-                   size=COALESCE(%s,size), prod_id=COALESCE(%s,prod_id) WHERE sl_no=%s AND factory_name=%s""",
-                (r["phys"], r["erp"], r["price"], r["unit"], new_size, new_code, e["sl"], fac))
+                   size=COALESCE(%s,size), prod_id=COALESCE(%s,prod_id), serial_no=COALESCE(%s,serial_no)
+                   WHERE sl_no=%s AND factory_name=%s""",
+                (r["phys"], r["erp"], r["price"], r["unit"], new_size, new_code, new_serial, e["sl"], fac))
+            if new_serial:
+                e["serial"] = new_serial
+                idx["serials"][new_serial.lower()] = e["sl"]
+                st_["serial_set"] += 1
             if new_size:
                 e["size"], e["ns"] = new_size, norm_size(new_size)
                 st_["size_fill"] += 1
@@ -976,7 +1220,11 @@ def import_rows(fac, rows):
         else:
             phys0 = r["phys"] if r["phys"] is not None else 0.0
             erp0 = r["erp"] if r["erp"] is not None else phys0
-            idx_insert(fac, idx, code, name, size, r["dept"], r["cat"], erp0, phys0, r["price"], r["unit"])
+            ins_serial = serial
+            if serial and serial.lower() in idx["serials"]:
+                ins_serial = ""
+                st_["serial_conflict"] += 1
+            idx_insert(fac, idx, code, name, size, r["dept"], r["cat"], erp0, phys0, r["price"], r["unit"], ins_serial)
             touched.add(idx["max_sl"])
             st_["added"] += 1
             st_["added_zero"] += int(phys0 == 0)
@@ -1002,6 +1250,7 @@ def detect_import_cols(df):
         "erp": find_col(df, ["erp stock", "erp_stock", "erp balance"]),
         "price": find_col(df, ["unit price", "unit_price", "price"]),
         "unit": find_col(df, ["unit", "uom"]),
+        "serial": find_col(df, ["serial no", "serial number", "serial_no", "serial", "s/n"]),
         "dept": find_col(df, ["department"]),
         "cat": find_col(df, ["category"]),
     }
@@ -1026,6 +1275,7 @@ def build_import_rows(df, c):
         rows.append({
             "code": code, "name": name,
             "size": txt(r[c["size"]]) if c["size"] else "",
+            "serial": txt(r[c["serial"]]) if c.get("serial") else "",
             "phys": num(raw_phys) if txt(raw_phys) != "" else None,
             "erp": num(r[c["erp"]]) if c["erp"] and txt(r[c["erp"]]) != "" else None,
             "price": num(r[c["price"]]) if c["price"] else None,
@@ -1261,8 +1511,42 @@ def zebra_styles(row):
     return [f"background-color:{bg}"] * len(row)
 
 
+def tx_manager_panel(df, kp, title="🔐 Manager: Delete / Edit a transaction"):
+    """Edit (date / remarks) or delete (stock is reverted) one of the transactions shown in the table above.
+    Needs the Store Manager password; deletion also needs an explicit confirmation tick."""
+    with st.expander(title):
+        if df is None or df.empty:
+            st.caption("Kono transaction nei.")
+            return
+        rows = {int(r["id"]): r for r in df.head(500).to_dict("records")}
+        tid = int(st.selectbox("Transaction ID", list(rows), key=f"{kp}_mgr_id",
+                               format_func=lambda i: f"ID {i} | {rows[i].get('item_name', '')} | qty {rows[i].get('qty', '')} | {rows[i].get('date', '')}"))
+        cur = q("SELECT date, notes FROM transactions WHERE id=%s", (tid,))
+        if not cur:
+            st.warning("Transaction paoa jay nai (ager-i delete hoye thakte pare).")
+            return
+        pw_ok = mgr_check(f"{kp}_mgr_pw")
+        conf = confirm_box(f"{kp}_del_conf_{tid}", "⚠️ Ami confirm korchi - transaction delete hobe ar stock revert hobe.")
+        if st.button("🗑 Delete & revert stock", key=f"{kp}_del"):
+            if not pw_ok:
+                st.error("Manager password thik nei.")
+            elif not conf:
+                st.error("Delete confirm tick korun.")
+            elif delete_transaction(tid):
+                done("Transaction deleted, stock reverted.")
+        cur_d = parse_date(cur[0]["date"])
+        ed = st.date_input("New date", value=cur_d.date() if cur_d else date.today(), key=f"{kp}_ed_date_{tid}")
+        en = st.text_input("Remarks", value=cur[0]["notes"] or "", key=f"{kp}_ed_notes_{tid}")
+        if st.button("💾 Save edit", key=f"{kp}_ed_btn"):
+            if not pw_ok:
+                st.error("Manager password thik nei.")
+            elif update_tx_meta(tid, ed.strftime(DATE_FMT), en.strip()):
+                done("Transaction updated.")
+
+
 def tab_transactions():
     fac, fsql, fp = FAC, FSQL, FP
+    g = st.session_state.get("tx_gen", 0)   # bumps after every successful save -> all entry widgets start fresh
     if inventory_count() == 0 and not is_cons_view:
         st.info("📦 Ei factory-r inventory khali. [2] INVENTORY → ➕ Add / Import theke opening stock upload korun.")
     left, right = st.columns([1.05, 2], gap="large")
@@ -1277,33 +1561,47 @@ def tab_transactions():
                         unsafe_allow_html=True)
             if is_cons_view:
                 st.warning("CONSOLIDATED view-te entry hoy na. Sidebar theke factory select korun.")
-            search = st.text_input("🔍 Search (Name / Size / ERP / SL)", key="tx_search", placeholder="Naam, SL, ERP code...")
+            type_label = st.selectbox("Transaction Type", list(TRANS_CODES), key="tx_type")
+            ttype = TRANS_CODES[type_label]
+            # Items with stock 0 (or negative) can not be issued / reduced, so they are not offered for those types.
+            # Receipts and (+) adjustments still see every item, otherwise an item at 0 could never be restocked.
+            stock_only = ttype in ISSUE_TYPES or ttype == ADJ_OUT
+            search = st.text_input("🔍 Search (Serial No / Name / Size / ERP / SL)", key=f"tx_search_{g}",
+                                   placeholder="Serial No, naam, SL, ERP code...")
             item, blocked, need_xfer, xfer_ok = None, False, False, False
             if search.strip():
-                cands = search_items(fac, search.strip())
+                cands = search_items(fac, search.strip(), stock_only)
                 if cands:
                     opts = {item_label(c): c for c in cands}
-                    item = opts[st.selectbox("Pick item", list(opts), key="tx_pick")]
+                    item = opts[st.selectbox("Pick item", list(opts), key=f"tx_pick_{g}")]
+                elif stock_only and search_items(fac, search.strip(), False):
+                    st.warning("Item paoa geche kintu current stock 0 - tai issue-r list-e dekhano hocche na.")
                 else:
                     st.warning("Kichu paoa jay nai.")
             else:
-                key = st.text_input("SL No / ERP Code", key="tx_key", placeholder="SL ba ERP code")
+                key = st.text_input("SL No / ERP Code / Serial No", key=f"tx_key_{g}", placeholder="SL, ERP code ba Serial No")
                 if key.strip():
-                    item, cands = resolve_item(fac, key.strip())
+                    item, cands = resolve_item(fac, key.strip(), stock_only)
                     if item is None:
-                        st.error("Item paoa jay nai" if not cands else f"{len(cands)} ta item match kore - exact SL No likhun")
+                        if cands:
+                            st.error(f"{len(cands)} ta item match kore - exact SL No / Serial No likhun")
+                        else:
+                            alt = resolve_item(fac, key.strip(), False)[0] if stock_only else None
+                            if alt is not None:
+                                st.warning(f"'{alt['item_name']}' paoa geche kintu stock {float(alt['stock']):g} - issue kora jabe na.")
+                            else:
+                                st.error("Item paoa jay nai")
 
-            type_label = st.selectbox("Transaction Type", list(TRANS_CODES), key="tx_type")
-            ttype = TRANS_CODES[type_label]
             qc, dc = st.columns(2)
-            qty = qc.number_input("Quantity", min_value=0.0, step=1.0, key="tx_qty")
+            qty = qc.number_input("Quantity", min_value=0.0, step=1.0, key=f"tx_qty_{g}")
             tx_date = dc.date_input("Date", value=date.today(), max_value=date.today(), key="tx_date")
-            verified = st.checkbox("Physically Verified (3-Day cooldown check)", key="tx_ver")
-            notes = st.text_input("Remarks", key="tx_notes", placeholder="Optional note")
+            verified = st.checkbox("Physically Verified (3-Day cooldown check)", key=f"tx_ver_{g}")
+            notes = st.text_input("Remarks", key=f"tx_notes_{g}", placeholder="Optional note")
 
             if item is not None:
-                st.info(f"**{item['item_name']}** [{item['size'] or '-'}]  ·  SL {item['sl_no']}  ·  ERP {item['prod_id']}  ·  "
-                        f"Stock **{float(item['stock']):g}**  ·  Short: {max(float(item['erp']) - float(item['stock']), 0):g}")
+                st.info(f"**{item['item_name']}** [{item['size'] or '-'}]  ·  Serial **{item['serial'] or '-'}**  ·  SL {item['sl_no']}  ·  "
+                        f"ERP {item['prod_id']}  ·  Stock **{float(item['stock']):g}**  ·  "
+                        f"Short: {max(float(item['erp']) - float(item['stock']), 0):g}")
                 if qty > 0:
                     if ttype in ISSUE_TYPES:
                         rec = recent_issue(fac, item["sl_no"], datetime.combine(tx_date, datetime.now().time()))
@@ -1319,7 +1617,7 @@ def tab_transactions():
                             st.warning(f"⚠️ Stock short {shortage:g}. {other['factory_name']} theke auto-transfer hobe "
                                        f"({other['item_name']} [{other['prod_id']}], stock {float(other['stock']):g}, "
                                        f"match: {other['level']}).")
-                            xfer_ok = st.checkbox("Transfer confirm kore issue korun", key="tx_xfer")
+                            xfer_ok = st.checkbox("Transfer confirm kore issue korun", key=f"tx_xfer_{g}")
                         else:
                             st.error(f"Shortage {shortage:g} - other unit-e enough stock/same item nei.")
                             blocked = True
@@ -1328,69 +1626,85 @@ def tab_transactions():
                         blocked = True
 
             can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor" and not is_cons_view
-            disabled = item is None or blocked or (need_xfer and not xfer_ok) or not can_write
+            disabled = item is None or blocked or qty <= 0 or (need_xfer and not xfer_ok) or not can_write
             if not can_write:
                 st.caption("Save korte login + specific factory + non-Auditor role lage.")
             if st.button("💾 Save & Update Stock", type="primary", disabled=disabled, use_container_width=True, key="tx_save"):
-                if guard() and save_transaction(fac, item, qty, ttype, tx_date, notes, verified, xfer_ok):
-                    done("✅ Transaction saved, stock updated.")
+                if st.session_state.get("tx_saved_gen") == g:
+                    st.warning("Ei form already save hoyeche. Notun transaction-er jonno notun kore item select korun.")
+                elif guard():
+                    fresh = q(f"SELECT {INV_COLS} FROM inventory WHERE sl_no=%s AND factory_name=%s",
+                              (item["sl_no"], item["factory_name"]))
+                    if not fresh:
+                        st.error("Item ar paoa jacche na. Page refresh kore abar select korun.")
+                    else:
+                        item = fresh[0]   # always work with the live stock, never a stale copy
+                        if is_duplicate_tx(item["factory_name"], item["sl_no"], ttype, qty, tx_date.strftime(DATE_FMT),
+                                           st.session_state.get("user", ""), notes):
+                            st.error("🚫 Duplicate block: ekdom ek-i transaction ei matro save hoyeche. "
+                                     "Quantity / remarks bodle ba kichukkhon por abar korun.")
+                        elif save_transaction(fac, item, qty, ttype, tx_date, notes, verified, xfer_ok):
+                            st.session_state["tx_saved_gen"] = g
+                            st.session_state["tx_gen"] = g + 1
+                            done("✅ Transaction saved, stock updated. Form reset hoyeche - porer transaction-er jonno ready.")
 
     with right:
         st.markdown('<div class="section-title">Recent Transactions</div>', unsafe_allow_html=True)
-        tdf = qdf(f"""SELECT id, factory_name, officer_name, sl_no, prod_id, item_name, qty, trans_type,
-                      verification_status, notes, date, time FROM transactions WHERE 1=1{fsql}
-                      ORDER BY id DESC LIMIT 300""", fp)
+        rs = st.text_input("🔍 Search transactions (Item / Serial / ERP / SL / Officer)", key="tx_recent_search")
+        extra, ep = "", []
+        if rs.strip():
+            like = f"%{rs.strip().lower()}%"
+            extra = """ AND (LOWER(item_name) LIKE %s OR LOWER(prod_id) LIKE %s OR LOWER(COALESCE(officer_name,'')) LIKE %s
+                        OR CAST(sl_no AS TEXT)=%s OR EXISTS (SELECT 1 FROM inventory i2 WHERE i2.sl_no=transactions.sl_no
+                            AND i2.factory_name=transactions.factory_name AND LOWER(COALESCE(i2.serial_no,'')) LIKE %s))"""
+            ep = [like, like, like, rs.strip(), like]
+        tdf = qdf(f"""SELECT id, factory_name, officer_name, sl_no,
+                      (SELECT COALESCE(i.serial_no,'') FROM inventory i WHERE i.sl_no=transactions.sl_no
+                         AND i.factory_name=transactions.factory_name LIMIT 1) AS serial_no,
+                      prod_id, item_name, qty, trans_type,
+                      verification_status, notes, date, time FROM transactions WHERE 1=1{fsql}{extra}
+                      ORDER BY id DESC LIMIT 300""", fp + ep)
         if not tdf.empty:
             tdf["date_time"] = tdf[["date", "time"]].fillna("").agg(" ".join, axis=1)
             tdf["type"] = tdf["trans_type"].map(lambda c: TRANS_LABELS.get(c, c))
             tdf["status"] = tdf["verification_status"].fillna("N/A")
-            show = tdf[["id", "factory_name", "officer_name", "sl_no", "prod_id", "item_name", "qty", "type",
+            show = tdf[["id", "factory_name", "officer_name", "sl_no", "serial_no", "prod_id", "item_name", "qty", "type",
                         "status", "notes", "date_time"]]
             st.dataframe(show.style.apply(zebra_styles, axis=1), hide_index=True,
                          use_container_width=True, height=340)
         else:
             st.dataframe(tdf, hide_index=True, use_container_width=True, height=340)
         export_buttons(tdf, "transactions")
-
-        with st.expander("🔐 Manager: Delete / Edit a transaction"):
-            if tdf.empty:
-                st.caption("Kono transaction nei.")
-            else:
-                tid = int(st.selectbox("Transaction ID", tdf["id"].tolist(), key="tx_mgr_id"))
-                trow = tdf[tdf["id"] == tid].iloc[0]
-                pw_ok = mgr_check("tx_mgr_pw")
-                if st.button("🗑 Delete & revert stock", key="tx_del"):
-                    if not pw_ok:
-                        st.error("Manager password thik nei.")
-                    elif delete_transaction(tid):
-                        done("Transaction deleted, stock reverted.")
-                cur_d = parse_date(str(trow["date_time"]).split(" ")[0] if trow["date_time"] else None)
-                ed = st.date_input("New date", value=cur_d.date() if cur_d else date.today(), key="tx_ed_date")
-                en = st.text_input("Remarks", value=trow["notes"] or "", key="tx_ed_notes")
-                if st.button("💾 Save edit", key="tx_ed_btn"):
-                    if not pw_ok:
-                        st.error("Manager password thik nei.")
-                    elif update_tx_meta(tid, ed.strftime(DATE_FMT), en.strip()):
-                        done("Transaction updated.")
+        tx_manager_panel(tdf, "tx")
 
     st.markdown('<div class="section-title">Low & Negative Stock Alerts (≤ 5 pcs)</div>', unsafe_allow_html=True)
-    alerts = qdf(f"""SELECT factory_name, sl_no, prod_id, item_name, COALESCE(size,'') AS size, current_stock
+    alerts = qdf(f"""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, prod_id, item_name,
+                     COALESCE(size,'') AS size, current_stock
                      FROM inventory WHERE current_stock <= 5{fsql} ORDER BY current_stock ASC""", fp)
     if not alerts.empty:
         alerts["status"] = alerts.current_stock.apply(lambda s: "🔴 NEGATIVE (URGENT)" if s < 0 else "⚠️ LOW STOCK")
     st.dataframe(alerts, hide_index=True, use_container_width=True)
+    export_buttons(alerts, "low_stock_alerts")
 
 
 # ============================================================
 #  TAB 2 - INVENTORY MASTER
 # ============================================================
 @tx
-def add_item(fac, code, name, size, dept, cat, stock, price):
+def add_item(fac, code, name, size, dept, cat, stock, price, serial=""):
+    serial = (serial or "").strip()
     ex = find_same_item(fac, name, size)
+    owner = serial_owner(fac, serial)
+    if owner and (not ex or owner["sl_no"] != ex["sl_no"]):
+        st.error(f"Serial '{serial}' already used: SL {owner['sl_no']} ({owner['item_name']} [{owner['size'] or '-'}]).")
+        return False
     if ex:  # same name + size already exists -> stock add, no duplicate
         run("""UPDATE inventory SET current_stock=COALESCE(current_stock,0)+%s,
                unit_price=CASE WHEN %s>0 THEN %s ELSE unit_price END WHERE sl_no=%s AND factory_name=%s""",
             (stock, price, price, ex["sl_no"], fac))
+        if serial:
+            run("UPDATE inventory SET serial_no=%s WHERE sl_no=%s AND factory_name=%s AND COALESCE(serial_no,'')=''",
+                (serial, ex["sl_no"], fac))
         if stock > 0:
             now = datetime.now()
             insert_tx(fac, st.session_state["user"], ex["sl_no"], ex["prod_id"], name, stock, "Stock Adjustment (+)",
@@ -1404,15 +1718,18 @@ def add_item(fac, code, name, size, dept, cat, stock, price):
         return False
     mx = q("SELECT COALESCE(MAX(sl_no),0) AS m FROM inventory WHERE factory_name=%s", (fac,))[0]["m"]
     run("""INSERT INTO inventory (sl_no, prod_id, factory_name, item_name, size, department, category,
-           erp_stock, current_stock, unit_price, erp_status) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ERP Pending')""",
-        (int(mx) + 1, code, fac, name, size, dept, cat, stock, stock, price))
+           erp_stock, current_stock, unit_price, erp_status, serial_no)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ERP Pending',%s)""",
+        (int(mx) + 1, code, fac, name, size, dept, cat, stock, stock, price, serial))
     mirrored = mirror_to_other(fac, code, name, size, dept, cat, price)
-    audit("ADD_ITEM", f"{fac}: {name} [{size}] [{code}]" + (" + copied to other unit" if mirrored else ""))
+    audit("ADD_ITEM", f"{fac}: {name} [{size}] [{code}]" + (f" S/N {serial}" if serial else "")
+          + (" + copied to other unit" if mirrored else ""))
     return ("new", int(mx) + 1)
 
 
 @tx
-def update_item(fac, sl, old_code, old_name, code, name, size, dept, cat, erp, phys, price, unit):
+def update_item(fac, sl, old_code, old_name, code, name, size, dept, cat, erp, phys, price, unit, serial=""):
+    serial = (serial or "").strip()
     if any(norm_name(r["item_name"]) == norm_name(name) and norm_size(r["size"]) == norm_size(size)
            for r in q("SELECT item_name, COALESCE(size,'') AS size FROM inventory WHERE factory_name=%s AND sl_no<>%s", (fac, sl))):
         st.error(f"'{name}' [{size}] already exists in {fac}!")
@@ -1420,13 +1737,17 @@ def update_item(fac, sl, old_code, old_name, code, name, size, dept, cat, erp, p
     if code != old_code and q("SELECT 1 AS x FROM inventory WHERE factory_name=%s AND prod_id=%s AND sl_no<>%s", (fac, code, sl)):
         st.error(f"ERP Code '{code}' already used!")
         return False
+    owner = serial_owner(fac, serial, exclude_sl=sl)
+    if owner:
+        st.error(f"Serial '{serial}' already used: SL {owner['sl_no']} ({owner['item_name']} [{owner['size'] or '-'}]).")
+        return False
     run("""UPDATE inventory SET prod_id=%s, item_name=%s, size=%s, department=%s, category=%s, erp_stock=%s,
-           current_stock=%s, unit_price=%s, unit_name=%s WHERE sl_no=%s AND factory_name=%s""",
-        (code, name, size, dept, cat, erp, phys, price, unit, sl, fac))
+           current_stock=%s, unit_price=%s, unit_name=%s, serial_no=%s WHERE sl_no=%s AND factory_name=%s""",
+        (code, name, size, dept, cat, erp, phys, price, unit, serial, sl, fac))
     if code != old_code or name != old_name:
         run("UPDATE transactions SET prod_id=%s, item_name=%s WHERE sl_no=%s AND factory_name=%s", (code, name, sl, fac))
         run("UPDATE requisition_tracking SET prod_id=%s, item_name=%s WHERE factory_name=%s AND prod_id=%s", (code, name, fac, old_code))
-    audit("EDIT_INVENTORY", f"{fac} SL {sl}: [{old_code}] {old_name} -> [{code}] {name} [{size}]")
+    audit("EDIT_INVENTORY", f"{fac} SL {sl}: [{old_code}] {old_name} -> [{code}] {name} [{size}] S/N {serial or '-'}")
     return True
 
 
@@ -1443,7 +1764,8 @@ def do_import_opening(fac, rows):
 
 
 def inv_master_view():
-    inv = qdf(f"""SELECT factory_name, sl_no, prod_id, item_name, COALESCE(size,'') AS size, department, category,
+    inv = qdf(f"""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, prod_id, item_name,
+                  COALESCE(size,'') AS size, department, category,
                   COALESCE(erp_stock,0) AS erp_stock, COALESCE(current_stock,0) AS current_stock,
                   COALESCE(unit_price,0) AS unit_price, erp_status FROM inventory WHERE 1=1{FSQL}
                   ORDER BY factory_name, sl_no""", FP)
@@ -1461,7 +1783,7 @@ def inv_master_view():
     c[3].metric("Variance Value", f"{inv.var_value.sum():,.2f}")
     c[4].metric("Zero / No Stock", int((inv.current_stock <= 0).sum()))
     a, b = st.columns([2, 1])
-    term = a.text_input("🔍 Search (Item / Size / ERP / Dept / Category)", key="inv_search")
+    term = a.text_input("🔍 Search (Serial No / Item / Size / ERP / Dept / Category)", key="inv_search")
     mode = b.selectbox("Show", ["All Items (incl. zero)", "Zero / No Stock Only", "In Stock Only (> 0)", "Items without Size"], key="inv_mode")
     view = inv
     if mode == "Zero / No Stock Only":
@@ -1471,7 +1793,7 @@ def inv_master_view():
     elif mode == "Items without Size":
         view = inv[inv["size"].astype(str).str.strip() == ""]
     if term:
-        m = view[["item_name", "size", "prod_id", "department", "category"]].astype(str).apply(
+        m = view[["item_name", "size", "prod_id", "serial_no", "department", "category"]].astype(str).apply(
             lambda col: col.str.contains(term, case=False, regex=False)).any(axis=1)
         view = view[m]
     st.caption(f"Showing {len(view)} items")
@@ -1491,19 +1813,20 @@ def inv_add_import_view():
             cat = c2.selectbox("Category", CATEGORIES)
             stock = c3.number_input("Initial Stock", min_value=0.0, step=1.0)
             price = c1.number_input("Unit Price (BDT)", min_value=0.0, step=1.0)
+            serial = c2.text_input("Serial No (optional, unique per factory)")
             submitted = st.form_submit_button("Save Item")
         if submitted and guard():
             if not name.strip() or not size.strip():
                 st.error("Item Name ar Size mandatory.")
             else:
-                res = add_item(FAC, code, name.strip(), size.strip(), dept, cat, stock, price)
+                res = add_item(FAC, code, name.strip(), size.strip(), dept, cat, stock, price, serial.strip())
                 if res:
                     done("Stock added to existing item (no duplicate)." if res[0] == "exists" else "New item added.")
 
     with st.container(border=True):
         st.markdown('<div class="section-title">Import Opening Physical Stock</div>', unsafe_allow_html=True)
         st.download_button("📄 Download import format (CSV)",
-                           pd.DataFrame([{"SL No": 1, "ERP Code": "ERP-0001", "Item Name": "Example Item", "Size": "XL",
+                           pd.DataFrame([{"SL No": 1, "Serial No": "KW-001", "ERP Code": "ERP-0001", "Item Name": "Example Item", "Size": "XL",
                                           "Department": "Maintenance", "Category": "Maintenance Spare Parts",
                                           "Opening Physical Stock": 10, "ERP Stock": 10, "Unit Price": 150, "Unit": "Pcs"}]
                                         ).to_csv(index=False).encode("utf-8-sig"),
@@ -1525,7 +1848,8 @@ def inv_add_import_view():
                 st_ = do_import_opening(FAC, rows)
                 if st_:
                     done(f"Import done: NEW {st_['added']} (zero {st_['added_zero']}), updated {st_['updated']}, "
-                         f"mirrored to other unit {st_['mirrored']}, size missing {st_['no_size']}.")
+                         f"mirrored to other unit {st_['mirrored']}, size missing {st_['no_size']}, "
+                         f"serial set {st_['serial_set']}, serial conflict (skipped) {st_['serial_conflict']}.")
 
 
 def inv_edit_view():
@@ -1549,6 +1873,7 @@ def inv_edit_view():
         erp = c1.number_input("ERP Stock", value=float(r["erp_stock"]), step=1.0, key=f"e_erp_{k}")
         phys = c2.number_input("Physical Stock", value=float(r["current_stock"]), step=1.0, key=f"e_phys_{k}")
         price = c3.number_input("Unit Price", value=float(r["unit_price"]), min_value=0.0, key=f"e_price_{k}")
+        serial = c1.text_input("Serial No (unique per factory)", r["serial_no"] or "", key=f"e_serial_{k}")
         pw = st.text_input("🔐 Store Manager password", type="password", key=f"e_pw_{k}")
         save = st.form_submit_button("💾 Save changes")
     if save:
@@ -1557,13 +1882,16 @@ def inv_edit_view():
         elif not name.strip() or not size.strip():
             st.error("Item Name ar Size mandatory.")
         elif update_item(FAC, r["sl_no"], r["prod_id"], r["item_name"], code.strip() or r["prod_id"], name.strip(),
-                         size.strip(), dept, cat.strip(), erp, phys, price, unit):
+                         size.strip(), dept, cat.strip(), erp, phys, price, unit, serial.strip()):
             done("Inventory item updated.")
     with st.expander("🗑 Delete this item (Manager)"):
         pw2 = mgr_check(f"del_pw_{k}")
+        conf2 = confirm_box(f"del_conf_{k}")
         if st.button("Delete item", key=f"del_btn_{k}"):
             if not pw2:
                 st.error("Manager password thik nei.")
+            elif not conf2:
+                st.error("Delete confirm tick korun.")
             elif delete_item(FAC, r["sl_no"], r["prod_id"], r["item_name"]):
                 done("Item deleted.")
 
@@ -1612,6 +1940,7 @@ def inv_queue_view():
                  erp_stock, current_stock, unit_price, status FROM import_queue WHERE 1=1{FSQL} ORDER BY id DESC""", FP)
     st.caption("Unmatch / Import Queue: ERP Balance import-e Master-e na paoa item ekhane jay. Approve korle Master-e jabe.")
     st.dataframe(qd, hide_index=True, use_container_width=True)
+    export_buttons(qd, "import_queue")
     if qd.empty:
         return
     pend = [r for r in qd.to_dict("records") if r["status"] == "Pending Approval"]
@@ -1637,6 +1966,7 @@ def inv_queue_view():
             if update_queue(r["id"], code.strip(), name.strip(), size.strip(), dept, cat.strip(), erp, phys, price):
                 done("Queue item updated.")
     pw = mgr_check(f"qpw_{k}")
+    conf = confirm_box(f"qconf_{k}")
     c1, c2 = st.columns(2)
     if c1.button("✔️ Approve to Master Inventory", key=f"qap_{k}", type="primary"):
         if not pw:
@@ -1648,6 +1978,8 @@ def inv_queue_view():
     if c2.button("🗑 Delete queue item", key=f"qdel_{k}"):
         if not pw:
             st.error("Manager password din.")
+        elif not conf:
+            st.error("Delete confirm tick korun.")
         elif delete_queue(r["id"]):
             done("Queue item deleted.")
 
@@ -1797,8 +2129,40 @@ def mark_grn_receipt(tid, date_s):
     return True
 
 
+@tx
+def bulk_set_grn_done(pairs):
+    """Marks many ERP Pending items as ERP GRN Done in one transaction."""
+    for fac, sl in pairs:
+        run("UPDATE inventory SET erp_status='ERP GRN Done' WHERE sl_no=%s AND factory_name=%s AND erp_status='ERP Pending'",
+            (sl, fac))
+    audit("ERP_STATUS_DONE_BULK", f"{len(pairs)} item(s) marked ERP GRN Done: "
+          + ", ".join(f"{f}/SL{sl}" for f, sl in pairs[:50]) + (" ..." if len(pairs) > 50 else ""))
+    return len(pairs)
+
+
+@tx
+def update_task(tid, officer, prio, status, target, remarks):
+    run("""UPDATE audit_correction_tasks SET assigned_officer=%s, priority=%s, status=%s, target_date=%s,
+           manager_remarks=%s WHERE id=%s""", (officer, prio, status, target, remarks, tid))
+    audit("EDIT_TASK", f"Correction task {tid} edited")
+    return True
+
+
+def audit_search(df, term):
+    """Search ERP-audit rows by item, size, ERP code, serial, factory, status or exact SL No."""
+    t = (term or "").strip().lower()
+    if not t or df is None or df.empty:
+        return df
+    cols = [c for c in ("item_name", "size", "prod_id", "serial_no", "factory_name", "erp_status", "variance_type")
+            if c in df.columns]
+    m = df[cols].astype(str).apply(lambda c: c.str.lower().str.contains(t, regex=False)).any(axis=1)
+    m = m | (df["sl_no"].astype(str).str.strip() == t)
+    return df[m]
+
+
 def tab_erp_audit():
-    aud = qdf(f"""SELECT factory_name, sl_no, prod_id, item_name, COALESCE(size,'') AS size,
+    aud = qdf(f"""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, prod_id, item_name,
+                  COALESCE(size,'') AS size,
                   COALESCE(erp_stock,0) AS erp_stock, COALESCE(current_stock,0) AS current_stock,
                   COALESCE(unit_price,0) AS unit_price, erp_status
                   FROM inventory WHERE 1=1{FSQL} ORDER BY factory_name, sl_no""", FP)
@@ -1823,13 +2187,28 @@ def tab_erp_audit():
     c[4].metric("Open Tasks", open_n)
     c[5].metric("Unmatch Pending", int(pend_q.n.iloc[0]) if not pend_q.empty else 0)
 
+    # ---- search bar (filters every list below: tables, adjust, ERP-done selection)
+    term = st.text_input("🔍 Search ERP audit records (Item / Serial No / ERP Code / SL No / Factory / Status)",
+                         key="aud_search", placeholder="e.g. Spherical Roller Bearing, KW-001, ERP code, SL number ...")
+    view = audit_search(aud, term)
+    if not aud.empty:
+        v_short, v_exc = view[view.variance < 0], view[view.variance > 0]
+        v_match, v_pend = view[view.variance == 0], view[view.erp_status == "ERP Pending"]
+        vt = view[view.variance != 0]
+        if term.strip():
+            st.caption(f"Showing {len(view)} of {len(aud)} records")
+    else:
+        v_short = v_exc = v_match = v_pend = vt = view
+
     t_act, t_all, t_short, t_exc, t_match, t_pend, t_plan, t_age = st.tabs(
         ["⚙️ Actions", "📋 All", "🔴 Short", "🟠 Excess", "🟢 Matched", "🟡 ERP Pending", "📝 Correction Plan", "⏱ Receipt Aging"])
-    cols = ["factory_name", "sl_no", "prod_id", "item_name", "size", "erp_stock", "current_stock", "variance",
+    cols = ["factory_name", "sl_no", "serial_no", "prod_id", "item_name", "size", "erp_stock", "current_stock", "variance",
             "unit_price", "short_value", "excess_value", "erp_status", "variance_type"]
     with t_act:
         if guard():
-            with st.container(border=True):
+            a1, a2, a3, a4 = st.tabs(["📥 Import ERP Balance", "⚖️ Adjust variance to ERP (Manager)",
+                                      "📋 Assign Correction Task", "✔️ Mark ERP status Done"])
+            with a1:
                 st.markdown("**📥 Import ERP Balance** (Excel/CSV: ERP Code, Item Name, Size, ERP Balance)")
                 up = st.file_uploader("ERP balance file", type=["xlsx", "xls", "csv"], key="erp_bal_file")
                 if up and st.button("Import ERP balance", key="erp_bal_btn"):
@@ -1855,77 +2234,99 @@ def tab_erp_audit():
                             done(f"ERP import: matched {res['matched']}, unmatch queue-e {res['queued']}, "
                                  f"already queued {res['dup']}, skipped {skipped}.")
 
-            vt = aud[aud.variance != 0] if not aud.empty else aud
-            c_left, c_right = st.columns(2, gap="large")
-            with c_left:
-                with st.container(border=True):
-                    st.markdown("**⚖️ Adjust variance to ERP** (Manager)")
-                    if vt.empty:
-                        st.success("Sob item ERP-er sathe matched.")
-                    else:
-                        labels = {f"{r['item_name']} [{r['size'] or '-'}] | {r['factory_name']} | Var {r['variance']:g}": r
-                                  for r in vt.to_dict("records")}
-                        row = labels[st.selectbox("Item", list(labels), key="adj_sel")]
-                        limit = abs(float(row["variance"]))
-                        aq = st.number_input("Adjust qty", min_value=0.0, max_value=limit, value=limit, key="adj_qty")
-                        pw = mgr_check("adj_pw")
-                        if st.button("⚖️ Adjust", key="adj_btn"):
-                            if not pw:
-                                st.error("Manager password thik nei.")
-                            elif aq <= 0:
-                                st.error("Qty 0 er beshi hote hobe.")
-                            elif adjust_variance(row, aq):
-                                done("Variance adjusted.")
-            with c_right:
-                with st.container(border=True):
-                    st.markdown("**📋 Assign correction task**")
-                    if vt.empty:
-                        st.caption("Variance item nei.")
-                    else:
-                        labels2 = {f"{r['item_name']} [{r['prod_id']}] | {r['factory_name']}": r for r in vt.to_dict("records")}
-                        row2 = labels2[st.selectbox("Item for task", list(labels2), key="task_item")]
-                        c1, c2, c3 = st.columns(3)
-                        officer = c1.selectbox("Officer", ["Officer_Sagor", "Officer_Rahim", "Manager Admin"], key="task_off")
-                        days = c2.selectbox("Deadline", [1, 2, 3, 7, 15], index=1, format_func=lambda d: f"{d} day(s)", key="task_days")
-                        prio = c3.selectbox("Priority", ["Critical", "High", "Medium", "Low"], index=1, key="task_prio")
-                        rem = st.text_input("Root cause / remarks", "Physical recount and verification required", key="task_rem")
-                        if st.button("Assign task", key="task_btn"):
-                            if assign_task(row2["factory_name"], row2, officer, days, prio, rem):
-                                done("Correction task assigned.")
-
-            with st.container(border=True):
-                st.markdown("**✔️ Mark ERP status Done** (ERP Pending item)")
-                ep = aud[aud.erp_status == "ERP Pending"] if not aud.empty else aud
-                if not ep.empty:
-                    labels3 = {f"{r['item_name']} [{r['size'] or '-'}] | {r['factory_name']}": r for r in ep.to_dict("records")}
-                    row3 = labels3[st.selectbox("Item", list(labels3), key="grn_item")]
-                    if st.button("Mark ERP GRN Done", key="grn_btn"):
-                        if set_grn_done_inv(row3["factory_name"], row3["sl_no"]):
-                            done("ERP status updated.")
+            with a2:
+                st.markdown("**⚖️ Adjust variance to ERP** (Manager)")
+                st.caption("Physical stock-ke ERP balance-er sathe milano hoy. Upore search bar diye item khunje nin.")
+                if vt.empty:
+                    st.success("Sob item ERP-er sathe matched." if not term.strip() else "Search-e kono variance item nei.")
                 else:
-                    st.caption("ERP Pending item nei.")
+                    labels = {f"SL {r['sl_no']} | {r['item_name']} [{r['size'] or '-'}] | S/N {r['serial_no'] or '-'} | "
+                              f"{r['factory_name']} | Var {r['variance']:g}": r for r in vt.to_dict("records")}
+                    row = labels[st.selectbox("Item", list(labels), key="adj_sel")]
+                    limit = abs(float(row["variance"]))
+                    aq = st.number_input("Adjust qty", min_value=0.0, max_value=limit, value=limit, key="adj_qty")
+                    pw = mgr_check("adj_pw")
+                    if st.button("⚖️ Adjust", key="adj_btn", type="primary"):
+                        if not pw:
+                            st.error("Manager password thik nei.")
+                        elif aq <= 0:
+                            st.error("Qty 0 er beshi hote hobe.")
+                        elif adjust_variance(row, aq):
+                            done("Variance adjusted.")
+
+            with a3:
+                st.markdown("**📋 Assign correction task**")
+                if vt.empty:
+                    st.caption("Variance item nei.")
+                else:
+                    labels2 = {f"SL {r['sl_no']} | {r['item_name']} [{r['prod_id']}] | {r['factory_name']}": r
+                               for r in vt.to_dict("records")}
+                    row2 = labels2[st.selectbox("Item for task", list(labels2), key="task_item")]
+                    c1, c2, c3 = st.columns(3)
+                    officer = c1.selectbox("Officer", ["Officer_Sagor", "Officer_Rahim", "Manager Admin"], key="task_off")
+                    days = c2.selectbox("Deadline", [1, 2, 3, 7, 15], index=1, format_func=lambda d: f"{d} day(s)", key="task_days")
+                    prio = c3.selectbox("Priority", ["Critical", "High", "Medium", "Low"], index=1, key="task_prio")
+                    rem = st.text_input("Root cause / remarks", "Physical recount and verification required", key="task_rem")
+                    if st.button("Assign task", key="task_btn"):
+                        if assign_task(row2["factory_name"], row2, officer, days, prio, rem):
+                            done("Correction task assigned.")
+
+            with a4:
+                st.markdown("**✔️ Mark ERP status Done** (ERP Pending items)")
+                if v_pend.empty:
+                    st.caption("ERP Pending item nei." if not term.strip() else "Search-e kono ERP Pending item nei.")
+                else:
+                    st.caption("Row-er Select tick din (ek ba ekadhik), tarpor 'Mark Selected as ERP Done' click korun. "
+                               "Search bar diye list choto korte paren.")
+                    sel_all = st.checkbox(f"Select all {len(v_pend)} shown item(s)", key="erp_sel_all")
+                    ed = v_pend[["factory_name", "sl_no", "serial_no", "prod_id", "item_name", "size",
+                                 "erp_stock", "current_stock"]].copy()
+                    ed.insert(0, "Select", bool(sel_all))
+                    tag = hashlib.md5(term.strip().lower().encode()).hexdigest()[:6]
+                    edited = st.data_editor(
+                        ed, hide_index=True, use_container_width=True, height=360,
+                        disabled=[c_ for c_ in ed.columns if c_ != "Select"],
+                        column_config={"Select": st.column_config.CheckboxColumn("Select", default=False)},
+                        key=f"erp_done_ed_{int(sel_all)}_{len(ed)}_{tag}")
+                    chosen = edited[edited["Select"]]
+                    st.caption(f"Selected: {len(chosen)} of {len(ed)}")
+                    conf = st.checkbox(f"✔ Ami confirm korchi: {len(chosen)} ta selected item ERP GRN Done hobe.",
+                                       key=f"erp_done_conf_{len(chosen)}")
+                    if st.button(f"✔️ Mark Selected as ERP Done ({len(chosen)})", type="primary",
+                                 disabled=chosen.empty, key="erp_done_btn"):
+                        if not conf:
+                            st.error("Age confirm tick din.")
+                        else:
+                            pairs = [(r.factory_name, int(r.sl_no)) for r in chosen.itertuples()]
+                            if bulk_set_grn_done(pairs):
+                                done(f"{len(pairs)} item ERP GRN Done kora hoyeche.")
 
     with t_all:
-        st.dataframe(aud[cols] if not aud.empty else aud, hide_index=True, use_container_width=True, height=420)
-        export_buttons(aud, "erp_audit_all")
+        st.dataframe(view[cols] if not view.empty else view, hide_index=True, use_container_width=True, height=420)
+        export_buttons(view[cols] if not view.empty else view, "erp_audit_all")
     with t_short:
-        st.dataframe(short[cols] if not short.empty else short, hide_index=True, use_container_width=True)
+        st.dataframe(v_short[cols] if not v_short.empty else v_short, hide_index=True, use_container_width=True)
+        export_buttons(v_short[cols] if not v_short.empty else v_short, "erp_audit_short")
     with t_exc:
-        st.dataframe(exc[cols] if not exc.empty else exc, hide_index=True, use_container_width=True)
+        st.dataframe(v_exc[cols] if not v_exc.empty else v_exc, hide_index=True, use_container_width=True)
+        export_buttons(v_exc[cols] if not v_exc.empty else v_exc, "erp_audit_excess")
     with t_match:
-        mt = aud[aud.variance == 0] if not aud.empty else aud
-        st.dataframe(mt[cols] if not mt.empty else mt, hide_index=True, use_container_width=True)
+        st.dataframe(v_match[cols] if not v_match.empty else v_match, hide_index=True, use_container_width=True)
+        export_buttons(v_match[cols] if not v_match.empty else v_match, "erp_audit_matched")
     with t_pend:
-        pd_ = aud[aud.erp_status == "ERP Pending"] if not aud.empty else aud
-        st.dataframe(pd_[cols] if not pd_.empty else pd_, hide_index=True, use_container_width=True)
+        st.dataframe(v_pend[cols] if not v_pend.empty else v_pend, hide_index=True, use_container_width=True)
+        export_buttons(v_pend[cols] if not v_pend.empty else v_pend, "erp_audit_pending")
     with t_plan:
         if tasks.empty:
             st.info("Correction task nei.")
         else:
             st.dataframe(tasks, hide_index=True, use_container_width=True)
+            export_buttons(tasks, "correction_tasks")
             if guard():
                 tid = int(st.selectbox("Task ID", tasks["id"].tolist(), key="task_id_sel"))
+                trow = tasks[tasks["id"] == tid].iloc[0]
                 pw = mgr_check("task_pw")
+                conf = confirm_box(f"task_conf_{tid}")
                 c1, c2 = st.columns(2)
                 if c1.button("✅ Verify & Close", key="task_close"):
                     if not pw:
@@ -1935,8 +2336,33 @@ def tab_erp_audit():
                 if c2.button("🗑 Delete task", key="task_del"):
                     if not pw:
                         st.error("Manager password din.")
+                    elif not conf:
+                        st.error("Delete confirm tick korun.")
                     elif delete_task(tid):
                         done("Task deleted.")
+                with st.expander("✏️ Edit task"):
+                    officers = ["Officer_Sagor", "Officer_Rahim", "Manager Admin"]
+                    cur_off = str(trow["assigned_officer"] or "")
+                    if cur_off and cur_off not in officers:
+                        officers.append(cur_off)
+                    prios = ["Critical", "High", "Medium", "Low"]
+                    stats = ["Open", "In Progress", "On Hold", "Closed"]
+                    with st.form(f"task_edit_{tid}"):
+                        e1, e2, e3 = st.columns(3)
+                        eo = e1.selectbox("Officer", officers, index=officers.index(cur_off) if cur_off in officers else 0)
+                        ep_ = e2.selectbox("Priority", prios, index=prios.index(trow["priority"]) if trow["priority"] in prios else 2)
+                        es = e3.selectbox("Status", stats, index=stats.index(trow["status"]) if trow["status"] in stats else 1)
+                        et = e1.text_input("Target date (DD-Mon-YYYY)", str(trow["target_date"] or ""))
+                        er = e2.text_input("Remarks", str(trow["manager_remarks"] or ""))
+                        epw = st.text_input("🔐 Store Manager password", type="password")
+                        go = st.form_submit_button("💾 Save task changes")
+                    if go:
+                        if not verify_manager_password(epw):
+                            st.error("Manager password thik nei.")
+                        elif not parse_date(et):
+                            st.error("Target date DD-Mon-YYYY format-e din.")
+                        elif update_task(tid, eo, ep_, es, et, er.strip()):
+                            done("Task updated.")
     with t_age:
         rc = qdf(f"""SELECT id, factory_name, date, item_name, prod_id, qty, officer_name FROM transactions
                      WHERE trans_type='Supplier. Rec' AND erp_grn_status='Pending'{FSQL} ORDER BY id DESC""", FP)
@@ -1946,6 +2372,7 @@ def tab_erp_audit():
             rc["days_pending"] = rc.date.apply(lambda d: age_days(d) or 0)
             st.caption(f"Receipts waiting for ERP: {len(rc)} | Over 7 days: {int((rc.days_pending > PO_ALERT_DAYS).sum())}")
             st.dataframe(rc, hide_index=True, use_container_width=True)
+            export_buttons(rc, "receipt_aging")
             if guard():
                 labels = {f"ID {r['id']} | {r['item_name']} | qty {r['qty']:g} | {r['date']}": r for r in rc.to_dict("records")}
                 rr = labels[st.selectbox("Receipt", list(labels), key="age_sel")]
@@ -1959,7 +2386,8 @@ def tab_erp_audit():
 #  TAB 4 - ISSUE LEDGER
 # ============================================================
 def tab_issue_ledger():
-    iss = qdf(f"""SELECT t.id, t.date, t.time, t.factory_name, t.item_name, t.prod_id, t.sl_no, t.qty,
+    iss = qdf(f"""SELECT t.id, t.date, t.time, t.factory_name, t.item_name, COALESCE(i.size,'') AS size,
+                  COALESCE(i.serial_no,'') AS serial_no, t.prod_id, t.sl_no, t.qty,
                   COALESCE(i.unit_price,0) AS unit_price, t.officer_name, t.trans_type, t.notes, t.verification_status
                   FROM transactions t LEFT JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
                   WHERE t.trans_type IN ('Issued','Internal Issue'){fw(FAC, 't.')[0]} ORDER BY t.id DESC""", FP)
@@ -1967,31 +2395,89 @@ def tab_issue_ledger():
         iss["total_value"] = iss.qty * iss.unit_price
         iss["type"] = iss.trans_type.map(lambda c: TRANS_LABELS.get(c, c))
         iss["erp_status"] = iss.notes.fillna("").apply(lambda n: "ERP PO Pending" if "Pending" in n else "ERP GRN Completed")
-    st.markdown('<div class="section-title">All Issues</div>', unsafe_allow_html=True)
-    st.dataframe(iss, hide_index=True, use_container_width=True, height=380)
-    export_buttons(iss, "issue_ledger")
+        iss["_dt"] = pd.to_datetime(iss["date"].apply(parse_date), errors="coerce")
 
-    st.markdown('<div class="section-title">Item-wise Monthly Issue Search</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Search & Filter Issues</div>', unsafe_allow_html=True)
     if iss.empty:
         st.info("Issue record nei.")
+        st.dataframe(iss, hide_index=True, use_container_width=True)
         return
-    c1, c2 = st.columns(2)
-    item_txt = c1.text_input("Item Name", key="il_item")
-    iss["_dt"] = iss.date.apply(parse_date)
-    months = sorted({d.strftime("%b-%Y") for d in iss["_dt"].dropna()},
-                    key=lambda s: datetime.strptime(s, "%b-%Y"), reverse=True)
-    if not months:
-        st.info("Valid date record nei.")
+
+    month_names = list(calendar.month_name)[1:]
+    years = sorted({int(y) for y in iss["_dt"].dt.year.dropna()}, reverse=True)
+    with st.container(border=True):
+        f1, f2, f3 = st.columns([3, 1, 1])
+        term = f1.text_input("🔍 Search (Item Name / Serial No / ERP Code / SL No / Officer / Factory)", key="il_search",
+                             placeholder="e.g. Spherical Roller Bearing, KW-001 ...")
+        mon = f2.selectbox("Month", ["All"] + month_names, key="il_month")
+        yr = f3.selectbox("Year", ["All"] + [str(y) for y in years], key="il_year")
+        use_rng = st.checkbox("Use exact date range (From - To)", key="il_use_rng")
+        d_from = d_to = None
+        if use_rng:
+            r1, r2 = st.columns(2)
+            d_from = r1.date_input("From", value=date.today().replace(day=1), key="il_from")
+            d_to = r2.date_input("To", value=date.today(), key="il_to")
+
+    view = iss
+    t = term.strip().lower()
+    if t:
+        scols = ["item_name", "serial_no", "prod_id", "size", "officer_name", "factory_name", "notes"]
+        m = view[scols].fillna("").astype(str).apply(lambda c: c.str.lower().str.contains(t, regex=False)).any(axis=1)
+        view = view[m | (view["sl_no"].astype(str).str.strip() == t)]
+    if mon != "All":
+        view = view[view["_dt"].dt.month == month_names.index(mon) + 1]
+    if yr != "All":
+        view = view[view["_dt"].dt.year == int(yr)]
+    if use_rng:
+        if d_from > d_to:
+            st.error("'From' date 'To' date-er age hote hobe.")
+        else:
+            view = view[(view["_dt"] >= pd.Timestamp(d_from)) & (view["_dt"] < pd.Timestamp(d_to) + pd.Timedelta(days=1))]
+
+    mc = st.columns(4)
+    mc[0].metric("Total Issued Qty", f"{view.qty.sum():g}")
+    mc[1].metric("Issue Entries", len(view))
+    mc[2].metric("Distinct Items", view[["factory_name", "sl_no"]].drop_duplicates().shape[0])
+    mc[3].metric("Issued Value (৳)", f"{view.total_value.sum():,.0f}")
+    if view.empty:
+        st.info("Ei filter-e kono issue record nei.")
         return
-    month = c2.selectbox("Month", months, key="il_month")
-    if item_txt.strip():
-        m = iss[iss["_dt"].apply(lambda d: d is not None and d.strftime("%b-%Y") == month)]
-        m = m[m.item_name.fillna("").str.lower().str.contains(item_txt.strip().lower(), regex=False)]
-        res = m.groupby(["date", "item_name", "factory_name"], as_index=False).qty.sum()
-        res.columns = ["Date", "Item Name", "Factory", "Qty Issued"]
-        st.metric("Total Issued Qty", f"{res['Qty Issued'].sum():g}")
-        st.dataframe(res, hide_index=True, use_container_width=True)
-        export_buttons(res, f"issue_search_{item_txt.strip()}_{month}")
+
+    d1, d2, d3 = st.tabs(["📋 Issue Details", "📅 Date-wise Summary", "📦 Item-wise Summary"])
+    with d1:
+        detail = view.sort_values(["_dt", "id"], ascending=False)[
+            ["id", "date", "time", "factory_name", "serial_no", "prod_id", "sl_no", "item_name", "size", "qty", "unit_price",
+             "total_value", "officer_name", "type", "verification_status", "erp_status", "notes"]]
+        st.dataframe(detail, hide_index=True, use_container_width=True, height=380)
+        export_buttons(detail, "issue_ledger")
+    with d2:
+        dd = view[view["_dt"].notna()]
+        if dd.empty:
+            st.info("Valid date record nei.")
+        else:
+            day = dd["_dt"].dt.normalize()
+            daily = dd.groupby(day).agg(entries=("id", "count"), qty=("qty", "sum"), value=("total_value", "sum")).reset_index()
+            daily["Date"] = daily["_dt"].dt.strftime(DATE_FMT)
+            daily = daily[["Date", "entries", "qty", "value"]]
+            daily.columns = ["Date", "Issue Entries", "Qty Issued", "Value (৳)"]
+            st.markdown("**Date-wise total issued**")
+            st.dataframe(daily, hide_index=True, use_container_width=True)
+            export_buttons(daily, "issue_datewise_summary")
+            st.markdown("**Date × Item × Factory**")
+            grp = dd.groupby([day, "item_name", "factory_name"], as_index=False).qty.sum()
+            grp["Date"] = grp["_dt"].dt.strftime(DATE_FMT)
+            grp = grp[["Date", "item_name", "factory_name", "qty"]]
+            grp.columns = ["Date", "Item Name", "Factory", "Qty Issued"]
+            st.dataframe(grp, hide_index=True, use_container_width=True)
+            export_buttons(grp, "issue_date_item_factory")
+    with d3:
+        items = (view.groupby(["factory_name", "item_name", "size", "serial_no", "prod_id"], as_index=False)
+                 .agg(entries=("id", "count"), qty=("qty", "sum"), value=("total_value", "sum"))
+                 .sort_values("qty", ascending=False))
+        items.columns = ["Factory", "Item Name", "Size", "Serial No", "ERP Code", "Issue Entries", "Qty Issued", "Value (৳)"]
+        st.dataframe(items, hide_index=True, use_container_width=True)
+        export_buttons(items, "issue_item_summary")
+    tx_manager_panel(view[["id", "item_name", "qty", "date"]], "il", "🔐 Manager: Delete / Edit an issue entry")
 
 
 # ============================================================
@@ -2066,10 +2552,13 @@ def tab_transfer_history():
             reverse = bool(src and dest)
             if not reverse:
                 st.warning("Stock item paoa jay nai - delete korle shudhu record delete hobe, stock change hobe na.")
+            conf = confirm_box("tf_conf")
             c1, c2 = st.columns(2)
             if c1.button("🗑 Delete transfer", key="tf_del"):
                 if not pw:
                     st.error("Manager password din.")
+                elif not conf:
+                    st.error("Delete confirm tick korun.")
                 elif delete_transfer(t, reverse):
                     done("Transfer deleted" + (" & stock reversed." if reverse else " (record only)."))
             nq = st.number_input("New quantity", min_value=0.0, value=float(t["qty"] or 0), key="tf_qty")
@@ -2396,9 +2885,12 @@ def tab_requisition():
                     elif edit_requisition(r["id"], no.strip(), dept, d.strftime(DATE_FMT), qty, item.strip(), code.strip(), r["prod_id"]):
                         done("Requisition updated.")
             pw = mgr_check(f"req_pw_{k}")
+            conf = confirm_box(f"req_conf_{k}")
             if st.button("🗑 Delete requisition", key=f"req_del_{k}"):
                 if not pw:
                     st.error("Manager password din.")
+                elif not conf:
+                    st.error("Delete confirm tick korun.")
                 elif delete_requisition(r["id"], r["req_no"], r["item_name"]):
                     done("Requisition deleted.")
     with t4:
@@ -2509,8 +3001,14 @@ def tab_repair():
                 elif update_repair(r["id"], dict(gate=gate, item=item, qty=qty, stype=stype, rtype=rtype, supplier=supplier,
                                                  sent=sent, ret=ret or None, status=status)):
                     done("Record updated.")
+            rpw = mgr_check(f"rpw_{k}")
+            rconf = confirm_box(f"rconf_{k}")
             if st.button("🗑 Delete record", key=f"rdel_{k}"):
-                if delete_repair(r["id"]):
+                if not rpw:
+                    st.error("Manager password thik nei.")
+                elif not rconf:
+                    st.error("Delete confirm tick korun.")
+                elif delete_repair(r["id"]):
                     done("Record deleted.")
 
 
@@ -2518,18 +3016,27 @@ def tab_repair():
 #  TAB 8 - LEDGER
 # ============================================================
 def tab_ledger():
-    led = qdf(f"""SELECT t.factory_name, t.officer_name, t.sl_no, t.prod_id, t.item_name, t.qty, t.trans_type, t.notes,
+    led = qdf(f"""SELECT t.id, t.factory_name, t.officer_name, t.sl_no, COALESCE(i.serial_no,'') AS serial_no, t.prod_id,
+                  t.item_name, t.qty, t.trans_type, t.notes,
                   t.date, t.time, COALESCE(i.unit_price,0) AS unit_price
                   FROM transactions t LEFT JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
                   WHERE 1=1{fw(FAC, 't.')[0]} ORDER BY t.id DESC""", FP)
+    term = st.text_input("🔍 Search ledger (Item / Serial / ERP / SL / Officer)", key="led_search")
+    if not led.empty and term.strip():
+        tl = term.strip().lower()
+        scols = ["item_name", "serial_no", "prod_id", "officer_name", "factory_name"]
+        m = led[scols].fillna("").astype(str).apply(lambda c: c.str.lower().str.contains(tl, regex=False)).any(axis=1)
+        led = led[m | (led["sl_no"].astype(str).str.strip() == tl)]
+    manage = led[["id", "item_name", "qty", "date"]].copy() if not led.empty else led
     if not led.empty:
         led["type"] = led.trans_type.map(lambda c: TRANS_LABELS.get(c, c))
         led["total_price"] = (led.qty * led.unit_price).round(2)
         led["date_time"] = led[["date", "time"]].fillna("").agg(" ".join, axis=1)
-        led = led[["factory_name", "officer_name", "sl_no", "prod_id", "item_name", "qty", "type",
+        led = led[["id", "factory_name", "officer_name", "sl_no", "serial_no", "prod_id", "item_name", "qty", "type",
                    "total_price", "notes", "date_time"]]
     st.dataframe(led, hide_index=True, use_container_width=True, height=440)
     export_buttons(led, "ledger")
+    tx_manager_panel(manage, "led")
 
 
 # ============================================================
@@ -2645,6 +3152,74 @@ def tab_forecast():
 # ============================================================
 #  TAB 10 - BUDGET (metric cards + category cards)
 # ============================================================
+@tx
+def update_budget(bid, amount, dept):
+    run("UPDATE category_budgets SET allocated_budget=%s, department_name=%s WHERE id=%s", (amount, dept, bid))
+    audit("EDIT_BUDGET", f"Budget line {bid}: allocated {amount:,.0f}, dept {dept}")
+    return True
+
+
+@tx
+def delete_budget(bid, label):
+    run("DELETE FROM category_budgets WHERE id=%s", (bid,))
+    audit("DELETE_BUDGET", f"Deleted budget line {bid}: {label}")
+    return True
+
+
+@tx
+def add_budget(fac, dept, cat, amount):
+    if q("SELECT 1 AS x FROM category_budgets WHERE factory_name=%s AND category_name=%s", (fac, cat)):
+        st.error(f"{fac} / {cat} budget line already ache - edit korun.")
+        return False
+    run("INSERT INTO category_budgets (factory_name, department_name, category_name, allocated_budget) VALUES (%s,%s,%s,%s)",
+        (fac, dept, cat, amount))
+    audit("ADD_BUDGET", f"{fac} / {dept} / {cat}: {amount:,.0f}")
+    return True
+
+
+def budget_manage_panel():
+    brows = q(f"""SELECT id, factory_name, department_name, category_name, allocated_budget FROM category_budgets
+                  WHERE 1=1{FSQL} ORDER BY factory_name, department_name, category_name""", FP)
+    with st.expander("🔐 Manager: Edit / Add / Delete budget lines"):
+        if not guard():
+            return
+        pw_ok = mgr_check("bud_pw")
+        if brows:
+            labels = {f"{r['factory_name']} | {r['department_name']} | {r['category_name']} "
+                      f"(৳ {float(r['allocated_budget'] or 0):,.0f})": r for r in brows}
+            r = labels[st.selectbox("Budget line", list(labels), key="bud_sel")]
+            k = str(r["id"])
+            amt = st.number_input("Allocated budget (৳)", min_value=0.0, step=100.0,
+                                  value=float(r["allocated_budget"] or 0), key=f"bud_amt_{k}")
+            dept = st.selectbox("Department", DEPARTMENTS,
+                                index=DEPARTMENTS.index(r["department_name"]) if r["department_name"] in DEPARTMENTS else 0,
+                                key=f"bud_dept_{k}")
+            conf = confirm_box(f"bud_conf_{k}")
+            c1, c2 = st.columns(2)
+            if c1.button("💾 Save budget line", key=f"bud_save_{k}"):
+                if not pw_ok:
+                    st.error("Manager password thik nei.")
+                elif update_budget(r["id"], amt, dept):
+                    done("Budget line updated.")
+            if c2.button("🗑 Delete budget line", key=f"bud_del_{k}"):
+                if not pw_ok:
+                    st.error("Manager password thik nei.")
+                elif not conf:
+                    st.error("Delete confirm tick korun.")
+                elif delete_budget(r["id"], f"{r['factory_name']} / {r['category_name']}"):
+                    done("Budget line deleted.")
+        st.markdown("**➕ Add budget line** (current factory)")
+        a1, a2, a3 = st.columns(3)
+        n_dept = a1.selectbox("Department", DEPARTMENTS, key="bud_n_dept")
+        n_cat = a2.selectbox("Category", CATEGORIES, key="bud_n_cat")
+        n_amt = a3.number_input("Allocated (৳)", min_value=0.0, step=100.0, key="bud_n_amt")
+        if st.button("➕ Add budget line", key="bud_add"):
+            if not pw_ok:
+                st.error("Manager password thik nei.")
+            elif add_budget(FAC, n_dept, n_cat, n_amt):
+                done("Budget line added.")
+
+
 def tab_budget():
     bud = qdf(f"SELECT factory_name, department_name, category_name, allocated_budget FROM category_budgets WHERE 1=1{FSQL}", FP)
     cost_rows = q(f"""SELECT t.factory_name, i.category, SUM(t.qty*i.unit_price) AS cost
@@ -2688,6 +3263,7 @@ def tab_budget():
         "remaining": st.column_config.NumberColumn("Remaining (৳)", format="%.0f"),
     })
     export_buttons(bud, "budget")
+    budget_manage_panel()
 
 
 # ============================================================
@@ -2723,7 +3299,8 @@ def autoset_uom_once():
 
 def daily_rows(d, fac, show_all):
     ds = d.strftime(DATE_FMT)
-    rows = q("""SELECT i.sl_no, i.item_name, COALESCE(i.size,'') AS size, COALESCE(NULLIF(i.unit_name,''),'Pcs') AS unit,
+    rows = q("""SELECT i.sl_no, COALESCE(i.serial_no,'') AS serial, i.item_name, COALESCE(i.size,'') AS size,
+                COALESCE(NULLIF(i.unit_name,''),'Pcs') AS unit,
                 COALESCE(i.current_stock,0) AS cur, COALESCE(i.erp_stock,0) AS erp,
                 COALESCE((SELECT SUM(t.qty) FROM transactions t WHERE t.factory_name=i.factory_name AND t.sl_no=i.sl_no
                           AND t.date=%s AND t.trans_type IN ('Issued','Internal Issue')),0) AS issue,
@@ -2737,7 +3314,7 @@ def daily_rows(d, fac, show_all):
         short, exc = (abs(diff) if diff < 0 else 0.0), (diff if diff > 0 else 0.0)
         if not show_all and abs(cur) < 1e-9 and short == 0 and exc == 0 and float(r["issue"]) <= 0 and float(r["recv"]) <= 0:
             continue
-        out.append({"SL No.": r["sl_no"], "Item Name": r["item_name"], "Size": r["size"], "Unit": r["unit"],
+        out.append({"SL No.": r["sl_no"], "Serial No": r["serial"], "Item Name": r["item_name"], "Size": r["size"], "Unit": r["unit"],
                     "Current Stock": cur, "Daily Issue": float(r["issue"]), "Daily Received": float(r["recv"]),
                     "Short Qty": short, "Excess Qty": exc})
     return pd.DataFrame(out)
@@ -2761,6 +3338,7 @@ def sheet_html(d, fac, df, auto):
         issue_txt = f"{r['Daily Issue']:g}" if auto else ""
         recv_txt = f"{r['Daily Received']:g}" if auto else ""
         body += (f"<tr class='{cls}'><td>{r['SL No.']}</td>"
+                 f"<td>{esc(str(r['Serial No'] or '-'))}</td>"
                  f"<td style='text-align:left'>{esc(str(r['Item Name']))}</td>"
                  f"<td>{esc(str(r['Size'] or '-'))}</td><td>{esc(str(r['Unit']))}</td>"
                  f"<td>{r['Current Stock']:g}</td><td>{issue_txt}</td><td>{recv_txt}</td>"
@@ -2774,7 +3352,7 @@ td {{ border:1px solid #333; padding:3px 4px; text-align:center; }}
 tr.short td {{ background:#fde8e8; }} tr.excess td {{ background:#fff3e0; }}</style></head><body>
 <h2>Daily Issue Status For Month: {d.strftime('%B-%Y')}</h2>
 <p><b>Date:</b> {d.strftime(DATE_FMT)} &nbsp; <b>Factory Name:</b> {esc(fac)}</p>
-<table><thead><tr><th>SL No.</th><th>Item Name</th><th>Size</th><th>Unit</th><th>Current Stock</th>
+<table><thead><tr><th>SL No.</th><th>Serial No</th><th>Item Name</th><th>Size</th><th>Unit</th><th>Current Stock</th>
 <th>Daily Issue</th><th>Daily Received</th><th>Short Qty</th><th>Excess Qty</th></tr></thead>
 <tbody>{body}</tbody></table>
 </body></html>"""
@@ -2787,18 +3365,27 @@ def tab_daily_sheet():
         fac = c2.selectbox("Factory", FACTORIES, index=FACTORIES.index(FAC) if FAC in FACTORIES else 0, key="ds_fac")
         show_all = c3.checkbox("Include zero-stock", key="ds_all")
         auto = c4.checkbox("Auto-fill issue/received", key="ds_auto")
-    df = daily_rows(d, fac, show_all)
+    ds_term = st.text_input("🔍 Search (Serial No / Item / Size / SL No)", key="ds_search",
+                            placeholder="Serial No likhe khujun, e.g. KW-001")
+    df = daily_rows(d, fac, show_all or bool(ds_term.strip()))
+    shown = df
+    if ds_term.strip() and not df.empty:
+        tl = ds_term.strip().lower()
+        m = df[["Serial No", "Item Name", "Size"]].astype(str).apply(
+            lambda c: c.str.lower().str.contains(tl, regex=False)).any(axis=1)
+        shown = df[m | (df["SL No."].astype(str) == tl)]
     st.markdown(f'<div class="section-title">Daily Issue Status For Month: {d.strftime("%B-%Y")}</div>',
                 unsafe_allow_html=True)
     n_short = int((df["Short Qty"] > 0).sum()) if not df.empty else 0
     n_exc = int((df["Excess Qty"] > 0).sum()) if not df.empty else 0
     st.caption(f"Date: {d.strftime(DATE_FMT)} | Factory: {fac} | SL No = Master Inventory SL (same as Transactions). "
                f"Items: {len(df)} | Short: {n_short} | Excess: {n_exc}")
-    view = df.copy()
+    view = shown.copy()
     if not auto and not view.empty:
         view["Daily Issue"] = None
         view["Daily Received"] = None
     st.dataframe(view, hide_index=True, use_container_width=True, height=420)
+    export_buttons(view, f"daily_work_sheet_{d:%Y%m%d}")
     st.download_button("🖨️ Download print sheet (HTML → open & Print)", sheet_html(d, fac, df, auto),
                        f"Daily_Work_Sheet_{d:%Y%m%d}.html", "text/html")
     with st.expander("✏️ Edit UOM"):
