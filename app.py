@@ -1,5 +1,5 @@
 # ============================================================
-#  KC & Windy Smart Stock Tracker & Budget Control
+#  KC & Windy Smart Inventory & Budget Control
 #  Warm Orange / Peach SaaS Edition  (v2: top navigation + blue-white entry form)
 # ============================================================
 import calendar
@@ -12,14 +12,14 @@ import math
 import os
 import re
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 import psycopg2
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="KC & Windy Stock Tracker", page_icon="📦", layout="wide",
+st.set_page_config(page_title="KC & Windy Smart Inventory", page_icon="📦", layout="wide",
                    initial_sidebar_state="expanded")
 
 # ============================================================
@@ -260,6 +260,41 @@ section[data-testid="stSidebar"] div[data-testid="stExpander"] div[data-testid="
     border: none !important; padding: 4px !important; background: transparent !important; box-shadow: none !important;
 }}
 section[data-testid="stSidebar"] div[data-testid="stCaptionContainer"] * {{ color: #FFF7ED !important; }}
+
+/* ---------- Module navigation: radio styled exactly like the compact tabs (only the open module is rendered = fast) ---------- */
+.st-key-main_nav div[role="radiogroup"], .st-key-aud_view div[role="radiogroup"] {{ gap: 6px; flex-wrap: wrap; padding: 2px 0 12px 0; }}
+.st-key-main_nav label[data-baseweb="radio"], .st-key-aud_view label[data-baseweb="radio"] {{
+    background: #ffffff; border: 1.5px solid #E2E8F0; border-radius: 10px; padding: 7px 14px; margin: 0;
+    box-shadow: 0 1px 3px rgba(15,23,42,.08); cursor: pointer; min-height: 36px; align-items: center; transition: all .15s ease;
+}}
+.st-key-main_nav label[data-baseweb="radio"] > div:not(:has(p)), .st-key-aud_view label[data-baseweb="radio"] > div:not(:has(p)),
+.st-key-main_nav label[data-baseweb="radio"] > span, .st-key-aud_view label[data-baseweb="radio"] > span {{ display: none !important; }}
+.st-key-main_nav label[data-baseweb="radio"] p, .st-key-aud_view label[data-baseweb="radio"] p {{
+    font-weight: 700; font-size: 12.5px; color: #334155; white-space: nowrap; margin: 0;
+}}
+.st-key-main_nav label[data-baseweb="radio"]:hover, .st-key-aud_view label[data-baseweb="radio"]:hover {{ border-color: {ORANGE}; }}
+.st-key-main_nav label[data-baseweb="radio"]:has(input:checked) {{
+    background: linear-gradient(120deg, #F97316, {ORANGE}); border-color: #EA580C; box-shadow: 0 3px 10px rgba(234,88,12,.30);
+}}
+.st-key-main_nav label[data-baseweb="radio"]:has(input:checked) p {{ color: #fff !important; }}
+.st-key-aud_view label[data-baseweb="radio"] {{ border-radius: 8px; padding: 5px 12px; background: #F8FAFC; min-height: 32px; }}
+.st-key-aud_view label[data-baseweb="radio"] p {{ font-size: 12px; }}
+.st-key-aud_view label[data-baseweb="radio"]:has(input:checked) {{
+    background: #1E293B; border-color: #1E293B; box-shadow: 0 2px 6px rgba(30,41,59,.25);
+}}
+.st-key-aud_view label[data-baseweb="radio"]:has(input:checked) p {{ color: #fff !important; }}
+
+/* ---------- ERP PO Pending summary card (clickable) ---------- */
+.st-key-po_card_btn button {{
+    height: auto; min-height: 96px; text-align: left; justify-content: flex-start; padding: 12px 18px;
+    background: linear-gradient(135deg, #FFF7ED 0%, #FFE8CC 100%); border: 1.5px solid #FDBA74; border-left: 6px solid {ORANGE};
+    border-radius: 14px; box-shadow: 0 6px 16px rgba(234,88,12,.18);
+}}
+.st-key-po_card_btn button:hover {{ border-color: #EA580C; transform: translateY(-2px); box-shadow: 0 10px 22px rgba(234,88,12,.28); }}
+.st-key-po_card_btn button p {{ white-space: pre-line; text-align: left; margin: 0; font-size: 28px; font-weight: 800; color: #9A3412; line-height: 1.15; }}
+.st-key-po_card_btn button p:first-child::first-line {{
+    font-size: 12px; font-weight: 800; color: #C2410C; text-transform: uppercase; letter-spacing: .7px;
+}}
 </style>""", unsafe_allow_html=True)
 
 # ============================================================
@@ -307,6 +342,15 @@ REQ_KEYS = {
 }
 VERDICT = {"FOUND": "✔ FOUND", "SIZE_MISSING": "⚠ SIZE NOT IN LIST", "CODE_MATCH": "⚠ CODE MATCH (name differs)",
            "SIMILAR": "≈ SIMILAR NAME ONLY", "NOT_FOUND": "✘ NOT FOUND - NEW ITEM"}
+# Navigation state keys / ERP Audit view names (used by the clickable "ERP PO Pending" card)
+NAV_KEY = "main_nav"
+NAV_ERP_AUDIT = "🔍 [3] ERP AUDIT"
+AUD_VIEW_KEY = "aud_view"
+AUD_ACT, AUD_ALL, AUD_SHORT, AUD_EXC, AUD_MATCH = "⚙️ Actions", "📋 All", "🔴 Short", "🟠 Excess", "🟢 Matched"
+AUD_PEND, AUD_PO, AUD_RECV = "🟡 ERP Pending", "📌 ERP PO Pending", "📥 Product Received"
+AUD_PLAN, AUD_AGE = "📝 Correction Plan", "⏱ Receipt Aging"
+AUD_VIEWS = [AUD_ACT, AUD_ALL, AUD_SHORT, AUD_EXC, AUD_MATCH, AUD_PEND, AUD_PO, AUD_RECV, AUD_PLAN, AUD_AGE]
+VERIFY_AFTER_DAYS = 3   # same product issued on 3 consecutive days -> physical verification on the 4th day
 MODULE_NAV = [("📝", "Transactions"), ("📦", "Inventory Master"), ("🔍", "ERP Audit"), ("📜", "Issue Ledger"),
               ("🔁", "Transfer History"), ("📑", "Requisition"), ("🛠", "Repair & Returns"), ("📒", "Ledger"),
               ("📈", "Forecast"), ("💵", "Budget"), ("🗓", "Daily Work Sheet")]
@@ -317,7 +361,8 @@ MODULE_NAV = [("📝", "Transactions"), ("📦", "Inventory Master"), ("🔍", "
 # ============================================================
 @st.cache_resource(show_spinner=False)
 def _connect():
-    conn = psycopg2.connect(st.secrets["DB_URL"], connect_timeout=10)
+    conn = psycopg2.connect(st.secrets["DB_URL"], connect_timeout=10, keepalives=1, keepalives_idle=30,
+                            keepalives_interval=10, keepalives_count=3)
     conn.autocommit = False
     return conn
 
@@ -446,6 +491,11 @@ def init_db():
         "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS serial_no TEXT DEFAULT ''",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Active'",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TEXT",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS supplier_name TEXT DEFAULT ''",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS challan_no TEXT DEFAULT ''",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS erp_product_name TEXT DEFAULT ''",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS erp_code TEXT DEFAULT ''",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS erp_sl_ref TEXT DEFAULT ''",
         """CREATE TABLE IF NOT EXISTS password_resets (
             id SERIAL PRIMARY KEY, username TEXT, requested_at TEXT, status TEXT DEFAULT 'Pending',
             handled_by TEXT, handled_at TEXT)""",
@@ -509,7 +559,36 @@ def init_db():
         conn.commit()
     except Exception:
         conn.rollback()
+    # Speed indexes (plain, additive - no data is touched). Without them every save / table refresh scanned the
+    # whole transactions + inventory tables, and the daily sheet ran one full scan per inventory row.
+    for ix_sql in (
+        "CREATE INDEX IF NOT EXISTS ix_inventory_fac_sl ON inventory(factory_name, sl_no)",
+        "CREATE INDEX IF NOT EXISTS ix_inventory_fac_prod ON inventory(factory_name, prod_id)",
+        "CREATE INDEX IF NOT EXISTS ix_tx_fac_sl_id ON transactions(factory_name, sl_no, id)",
+        "CREATE INDEX IF NOT EXISTS ix_tx_fac_date ON transactions(factory_name, date)",
+    ):
+        try:
+            with conn.cursor() as cur:
+                cur.execute(ix_sql)
+            conn.commit()
+        except Exception:
+            conn.rollback()
     return True
+
+
+def ensure_live_connection():
+    """One cheap ping per rerun: a silently dropped cloud connection is replaced at once
+    instead of hanging for minutes on a dead socket."""
+    try:
+        conn = get_conn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        conn.rollback()
+    except Exception:
+        try:
+            _connect.clear()
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -669,7 +748,7 @@ def user_admin_panel():
 def sidebar_login():
     with st.sidebar:
         st.markdown(
-            '<div class="brand-card"><div class="b-t">📦 KC &amp; Windy Smart Stock Tracker</div>'
+            '<div class="brand-card"><div class="b-t">📦 KC &amp; Windy Smart Inventory</div>'
             '<div class="b-s">Budget Control · Designed by MD. Sagor Ali</div></div>', unsafe_allow_html=True)
         st.markdown("### 🔐 Secure Login")
         if st.session_state.get("user"):
@@ -858,10 +937,12 @@ def next_free_temp(fac):
     return f"TEMP-{n:04d}"
 
 
-def insert_tx(fac, officer, sl, pid, name, qty, ttype, day, notes, date_s, time_s, verif, grn="Not Required"):
+def insert_tx(fac, officer, sl, pid, name, qty, ttype, day, notes, date_s, time_s, verif, grn="Not Required",
+              supplier="", challan=""):
     run("""INSERT INTO transactions (factory_name, officer_name, sl_no, prod_id, item_name, qty, trans_type, day,
-           notes, date, time, verification_status, erp_grn_status) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-        (fac, officer, sl, pid, name, qty, ttype, day, notes, date_s, time_s, verif, grn))
+           notes, date, time, verification_status, erp_grn_status, supplier_name, challan_no)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (fac, officer, sl, pid, name, qty, ttype, day, notes, date_s, time_s, verif, grn, supplier, challan))
 
 
 def export_buttons(df, name):
@@ -1064,6 +1145,27 @@ def recent_issue(fac, sl, ref_dt):
         if dt and 0 <= (ref_dt - dt).total_seconds() < COOLDOWN_DAYS * 86400:
             return dt, r["qty"], r["officer_name"]
     return None
+
+
+def verification_needed(fac, sl, tx_dt):
+    """Physical-verification rule. The SAME product (factory + SL No) issued on the 3 calendar days directly
+    before tx_dt (Day 1, Day 2, Day 3) -> tx_dt is Day 4 and physical verification is required.
+    The days must be CONSECUTIVE: a missing day breaks the run. A day that was physically verified
+    starts a new run. Returns (needed, consecutive_days_found)."""
+    days = [(tx_dt - timedelta(days=k)).strftime(DATE_FMT) for k in range(1, VERIFY_AFTER_DAYS + 1)]
+    rows = q("""SELECT date, verification_status FROM transactions
+                WHERE factory_name=%s AND sl_no=%s AND trans_type IN ('Issued','Internal Issue') AND date IN %s""",
+             (fac, sl, tuple(days)))
+    by_day = {}
+    for r in rows:
+        by_day.setdefault(str(r["date"]).strip(), []).append(str(r["verification_status"] or ""))
+    streak = 0
+    for d in days:                      # D-1, D-2, D-3 : stop at the first gap / verified day
+        sts = by_day.get(d)
+        if not sts or any(s.startswith("Physically") for s in sts):
+            break
+        streak += 1
+    return streak >= VERIFY_AFTER_DAYS, streak
 
 
 # ============================================================
@@ -1349,12 +1451,22 @@ def inventory_count():
 # ============================================================
 #  HEADER (factory, live date/time, user)
 # ============================================================
+def local_now():
+    """Current time in the application's intended timezone (Asia/Dhaka), never hard-coded."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Asia/Dhaka"))
+    except Exception:
+        return datetime.now(timezone(timedelta(hours=6)))
+
+
 def render_header():
     """Slim one-line strip shown at the top of every tab (tabs themselves sit above everything)."""
     user_txt = (f"{st.session_state['user']} · {st.session_state.get('role', '')}"
                 if st.session_state.get("user") else "Guest (view only)")
     st.markdown(
         f'<div class="strip"><span>🏭 <b>{html_lib.escape(FAC)}</b></span>'
+        f'<span>🕒 <b>{local_now():%d %b %Y | %I:%M %p}</b></span>'
         f'<span>👤 {html_lib.escape(user_txt)}</span></div>', unsafe_allow_html=True)
 
 
@@ -1438,7 +1550,7 @@ def tab_dashboard():
 #  TAB 1 - TRANSACTIONS (daily entry, top priority)
 # ============================================================
 @tx
-def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok):
+def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, supplier="", challan=""):
     user = st.session_state.get("user", "")
     sl, pid, name = item["sl_no"], item["prod_id"], item["item_name"]
     stock = float(item["stock"] or 0)
@@ -1446,11 +1558,11 @@ def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok):
     verif = "Verified"
 
     if ttype in ISSUE_TYPES:
-        rec = recent_issue(fac, sl, datetime.combine(tx_dt, datetime.now().time()))
-        if rec and not verified:
-            st.error("Cooldown: physical verification tick korun.")
+        needed, _streak = verification_needed(fac, sl, tx_dt)
+        if needed and not verified:
+            st.error("Physical verification required: ei product porpor 3 din issue hoyeche - 4th din verification tick korun.")
             return False
-        verif = "Physically Verified" if verified else "Not Required"
+        verif = "Physically Verified" if (needed and verified) else "Not Required"
 
     if ttype in ISSUE_TYPES and qty > stock:
         shortage = qty - stock
@@ -1476,7 +1588,8 @@ def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok):
     if ttype in RECEIPT_TYPES:
         grn = "Pending" if ttype == "Supplier. Rec" else "Not Required"
         run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (qty, sl, fac))
-        insert_tx(fac, user, sl, pid, name, qty, ttype, day, notes, date_s, time_s, "Verified", grn)
+        insert_tx(fac, user, sl, pid, name, qty, ttype, day, notes, date_s, time_s, "Verified", grn,
+                  supplier if ttype == "Supplier. Rec" else "", challan if ttype == "Supplier. Rec" else "")
     else:
         if qty > stock:
             st.error(f"Available stock ({stock:g}) kom ache requested qty ({qty:g}) theke.")
@@ -1549,6 +1662,12 @@ def tab_transactions():
     g = st.session_state.get("tx_gen", 0)   # bumps after every successful save -> all entry widgets start fresh
     if inventory_count() == 0 and not is_cons_view:
         st.info("📦 Ei factory-r inventory khali. [2] INVENTORY → ➕ Add / Import theke opening stock upload korun.")
+    po_n = po_pending_counts()
+    po_c1, _po_c2 = st.columns([1.3, 2.7])
+    with po_c1:
+        st.button(f"ERP PO Pending\n\n{po_n['total']}", key="po_card_btn", on_click=go_erp_po_pending,
+                  use_container_width=True)
+        st.caption(f"Issue {po_n['issue']} · Received {po_n['recv']}  —  click to open ERP Audit → ERP PO Pending")
     left, right = st.columns([1.05, 2], gap="large")
     with left:
         try:
@@ -1563,6 +1682,10 @@ def tab_transactions():
                 st.warning("CONSOLIDATED view-te entry hoy na. Sidebar theke factory select korun.")
             type_label = st.selectbox("Transaction Type", list(TRANS_CODES), key="tx_type")
             ttype = TRANS_CODES[type_label]
+            supplier, challan = "", ""
+            if ttype == "Supplier. Rec":
+                supplier = st.text_input("Supplier", key=f"tx_supplier_{g}", placeholder="Supplier name")
+                challan = st.text_input("Challan Number", key=f"tx_challan_{g}", placeholder="Challan / delivery note number")
             # Items with stock 0 (or negative) can not be issued / reduced, so they are not offered for those types.
             # Receipts and (+) adjustments still see every item, otherwise an item at 0 could never be restocked.
             stock_only = ttype in ISSUE_TYPES or ttype == ADJ_OUT
@@ -1595,7 +1718,12 @@ def tab_transactions():
             qc, dc = st.columns(2)
             qty = qc.number_input("Quantity", min_value=0.0, step=1.0, key=f"tx_qty_{g}")
             tx_date = dc.date_input("Date", value=date.today(), max_value=date.today(), key="tx_date")
-            verified = st.checkbox("Physically Verified (3-Day cooldown check)", key=f"tx_ver_{g}")
+            verified, need_verif = False, False
+            if item is not None and ttype in ISSUE_TYPES:
+                need_verif, v_streak = verification_needed(fac, item["sl_no"], tx_date)
+                if need_verif:
+                    st.warning(f"Physical verification required: ei product porpor {v_streak} din issue hoyeche (4th consecutive day).")
+                    verified = st.checkbox("Physically Verified (required today)", key=f"tx_ver_{g}")
             notes = st.text_input("Remarks", key=f"tx_notes_{g}", placeholder="Optional note")
 
             if item is not None:
@@ -1603,12 +1731,8 @@ def tab_transactions():
                         f"ERP {item['prod_id']}  ·  Stock **{float(item['stock']):g}**  ·  "
                         f"Short: {max(float(item['erp']) - float(item['stock']), 0):g}")
                 if qty > 0:
-                    if ttype in ISSUE_TYPES:
-                        rec = recent_issue(fac, item["sl_no"], datetime.combine(tx_date, datetime.now().time()))
-                        if rec and not verified:
-                            st.warning(f"Cooldown: {rec[0]:%d-%b-%Y %I:%M %p} te issue hoyeche (Qty {rec[1]:g}, {rec[2]}). "
-                                       "Physical verify tick korun.")
-                            blocked = True
+                    if ttype in ISSUE_TYPES and need_verif and not verified:
+                        blocked = True
                     if qty > float(item["stock"]) and ttype in ISSUE_TYPES:
                         shortage = qty - float(item["stock"])
                         other = find_same_in_other(item["prod_id"], item["item_name"], other_factory(fac), item["size"])
@@ -1643,7 +1767,8 @@ def tab_transactions():
                                            st.session_state.get("user", ""), notes):
                             st.error("🚫 Duplicate block: ekdom ek-i transaction ei matro save hoyeche. "
                                      "Quantity / remarks bodle ba kichukkhon por abar korun.")
-                        elif save_transaction(fac, item, qty, ttype, tx_date, notes, verified, xfer_ok):
+                        elif save_transaction(fac, item, qty, ttype, tx_date, notes, verified, xfer_ok,
+                                              supplier.strip(), challan.strip()):
                             st.session_state["tx_saved_gen"] = g
                             st.session_state["tx_gen"] = g + 1
                             done("✅ Transaction saved, stock updated. Form reset hoyeche - porer transaction-er jonno ready.")
@@ -1662,6 +1787,7 @@ def tab_transactions():
                       (SELECT COALESCE(i.serial_no,'') FROM inventory i WHERE i.sl_no=transactions.sl_no
                          AND i.factory_name=transactions.factory_name LIMIT 1) AS serial_no,
                       prod_id, item_name, qty, trans_type,
+                      COALESCE(supplier_name,'') AS supplier_name, COALESCE(challan_no,'') AS challan_no,
                       verification_status, notes, date, time FROM transactions WHERE 1=1{fsql}{extra}
                       ORDER BY id DESC LIMIT 300""", fp + ep)
         if not tdf.empty:
@@ -1669,7 +1795,7 @@ def tab_transactions():
             tdf["type"] = tdf["trans_type"].map(lambda c: TRANS_LABELS.get(c, c))
             tdf["status"] = tdf["verification_status"].fillna("N/A")
             show = tdf[["id", "factory_name", "officer_name", "sl_no", "serial_no", "prod_id", "item_name", "qty", "type",
-                        "status", "notes", "date_time"]]
+                        "supplier_name", "challan_no", "status", "notes", "date_time"]]
             st.dataframe(show.style.apply(zebra_styles, axis=1), hide_index=True,
                          use_container_width=True, height=340)
         else:
@@ -2160,6 +2286,220 @@ def audit_search(df, term):
     return df[m]
 
 
+# ---------- ERP PO Pending (Issue + Received) ----------
+PO_FROM = "FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name"
+# Issue / Internal Issue: the product's ERP status is still 'ERP Pending' (the status set by "Mark ERP status Done").
+# Received (Supplier Receipt): the receipt's own ERP GRN status is still 'Pending' (same field Receipt Aging uses).
+PO_WHERE = ("((t.trans_type IN ('Issued','Internal Issue') AND i.erp_status='ERP Pending') "
+            "OR (t.trans_type='Supplier. Rec' AND t.erp_grn_status='Pending'))")
+
+
+def po_pending_counts():
+    fsql, fp = fw(FAC, "t.")
+    r = q(f"""SELECT COALESCE(SUM(CASE WHEN t.trans_type='Supplier. Rec' THEN 0 ELSE 1 END),0) AS issue_n,
+                     COALESCE(SUM(CASE WHEN t.trans_type='Supplier. Rec' THEN 1 ELSE 0 END),0) AS recv_n
+              {PO_FROM} WHERE {PO_WHERE}{fsql}""", fp)[0]
+    i_n, r_n = int(r["issue_n"] or 0), int(r["recv_n"] or 0)
+    return {"issue": i_n, "recv": r_n, "total": i_n + r_n}
+
+
+def go_erp_po_pending():
+    """Button callback: open [3] ERP AUDIT on the ERP PO Pending view."""
+    st.session_state[NAV_KEY] = NAV_ERP_AUDIT
+    st.session_state[AUD_VIEW_KEY] = AUD_PO
+
+
+def erp_po_pending_view():
+    fsql, fp = fw(FAC, "t.")
+    df = qdf(f"""SELECT t.id, t.factory_name, t.sl_no, COALESCE(i.serial_no,'') AS serial_no, t.item_name,
+                 COALESCE(NULLIF(t.erp_code,''), t.prod_id) AS erp_code,
+                 CASE WHEN t.trans_type='Supplier. Rec' THEN 'Received' ELSE 'Issue' END AS type,
+                 t.qty, t.date, t.time, t.officer_name
+                 {PO_FROM} WHERE {PO_WHERE}{fsql} ORDER BY t.id DESC""", fp)
+    st.markdown('<div class="section-title">ERP PO Pending · Issue & Received transactions</div>', unsafe_allow_html=True)
+    if df.empty:
+        st.success("ERP PO Pending transaction nei.")
+        return
+    df["status"] = "ERP PO Pending"
+    f1, f2 = st.columns([1, 3])
+    tsel = f1.selectbox("Type", ["All", "Issue", "Received"], key="po_type")
+    term = f2.text_input("🔍 Search (Item / Serial No / ERP Code / SL No / Officer / Factory)", key="po_search")
+    view = df if tsel == "All" else df[df["type"] == tsel]
+    t = term.strip().lower()
+    if t and not view.empty:
+        m = view[["item_name", "serial_no", "erp_code", "officer_name", "factory_name"]].fillna("").astype(str).apply(
+            lambda c: c.str.lower().str.contains(t, regex=False)).any(axis=1)
+        view = view[m | (view["sl_no"].astype(str).str.strip() == t)]
+    mc = st.columns(3)
+    mc[0].metric("ERP PO Pending", len(view))
+    mc[1].metric("Issue", int((view["type"] == "Issue").sum()))
+    mc[2].metric("Received", int((view["type"] == "Received").sum()))
+    out = view[["item_name", "serial_no", "erp_code", "type", "qty", "date", "status", "factory_name", "sl_no", "officer_name", "id"]].copy()
+    out.columns = ["Item", "Serial", "ERP Code", "Type", "Qty", "Date", "Status", "Factory", "SL No", "Officer", "ID"]
+    st.dataframe(out, hide_index=True, use_container_width=True, height=400)
+    export_buttons(out, "erp_po_pending")
+
+
+# ---------- Product Received ----------
+@tx
+def update_received_record(tid, name, erp_name, erp_code, erp_status, erp_sl, supplier, challan, date_s, notes, set_master):
+    """Edits ONE existing supplier-receipt record (and, when asked, its product record). Never creates a product."""
+    rows = q("SELECT * FROM transactions WHERE id=%s AND trans_type='Supplier. Rec'", (tid,))
+    if not rows:
+        st.error("Received record paoa jay nai.")
+        return False
+    t = rows[0]
+    fac, sl = t["factory_name"], t["sl_no"]
+    inv = q("SELECT prod_id, item_name, COALESCE(size,'') AS size FROM inventory WHERE sl_no=%s AND factory_name=%s", (sl, fac))
+    if inv:
+        cur_name, cur_code, size = inv[0]["item_name"], inv[0]["prod_id"], inv[0]["size"]
+        new_code = cur_code
+        if name != cur_name and any(
+                norm_name(r["item_name"]) == norm_name(name) and norm_size(r["size"]) == norm_size(size)
+                for r in q("SELECT item_name, COALESCE(size,'') AS size FROM inventory WHERE factory_name=%s AND sl_no<>%s", (fac, sl))):
+            st.error(f"'{name}' [{size}] already exists in {fac} - duplicate product toiri kora jabe na.")
+            return False
+        if set_master and erp_code and erp_code != cur_code:
+            if q("SELECT 1 AS x FROM inventory WHERE factory_name=%s AND prod_id=%s AND sl_no<>%s", (fac, erp_code, sl)):
+                st.error(f"ERP Code '{erp_code}' already used by another product in {fac}!")
+                return False
+            new_code = erp_code
+        if name != cur_name or new_code != cur_code:
+            run("UPDATE inventory SET item_name=%s, prod_id=%s WHERE sl_no=%s AND factory_name=%s", (name, new_code, sl, fac))
+            run("UPDATE transactions SET prod_id=%s, item_name=%s WHERE sl_no=%s AND factory_name=%s", (new_code, name, sl, fac))
+            run("UPDATE requisition_tracking SET prod_id=%s, item_name=%s WHERE factory_name=%s AND prod_id=%s",
+                (new_code, name, fac, cur_code))
+    grn_date = t.get("erp_grn_date")
+    if erp_status == "Done":
+        grn_date = grn_date or datetime.now().strftime(DATE_FMT)
+    elif erp_status == "Pending":
+        grn_date = None
+    run("""UPDATE transactions SET erp_product_name=%s, erp_code=%s, erp_grn_status=%s, erp_grn_date=%s, erp_sl_ref=%s,
+           supplier_name=%s, challan_no=%s, date=%s, notes=%s WHERE id=%s""",
+        (erp_name, erp_code, erp_status, grn_date, erp_sl, supplier, challan, date_s, notes, tid))
+    audit("EDIT_RECEIVED", f"Received record {tid} ({name}): ERP name '{erp_name}', ERP code '{erp_code}', status {erp_status}, "
+                           f"supplier '{supplier}', challan '{challan}'")
+    return True
+
+
+def erp_product_received_view():
+    fsql, fp = fw(FAC, "t.")
+    rc = qdf(f"""SELECT t.id, t.date, t.time, t.factory_name, t.item_name, COALESCE(t.erp_product_name,'') AS erp_product_name,
+                 COALESCE(i.serial_no,'') AS serial_no, t.sl_no, t.prod_id,
+                 COALESCE(NULLIF(t.erp_code,''), t.prod_id) AS erp_code, COALESCE(t.erp_sl_ref,'') AS erp_sl_ref,
+                 t.qty, COALESCE(t.supplier_name,'') AS supplier_name, COALESCE(t.challan_no,'') AS challan_no,
+                 COALESCE(t.erp_grn_status,'') AS erp_status, t.officer_name, COALESCE(t.notes,'') AS notes
+                 FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                 WHERE t.trans_type='Supplier. Rec'{fsql} ORDER BY t.id DESC""", fp)
+    st.markdown('<div class="section-title">Product Received · ERP & receiving history</div>', unsafe_allow_html=True)
+    if rc.empty:
+        st.info("Supplier receipt record nei. [1] TRANSACTIONS-e 'Supplier Receipt' diye product receive korun.")
+        return
+    rc["qty"] = rc["qty"].astype(float)
+    rc["_dt"] = pd.to_datetime(rc["date"].apply(parse_date), errors="coerce")
+    month_names = list(calendar.month_name)[1:]
+    years = sorted({int(y) for y in rc["_dt"].dt.year.dropna()}, reverse=True)
+    with st.container(border=True):
+        f1, f2, f3 = st.columns([3, 1, 1])
+        term = f1.text_input("🔍 Search product (Name / Serial No / ERP Code / SL No / Supplier / Challan)", key="pr_search",
+                             placeholder="e.g. Spherical Roller Bearing, KW-001, ERP code, SL number ...")
+        mon = f2.selectbox("Month", ["All"] + month_names, key="pr_month")
+        yr = f3.selectbox("Year", ["All"] + [str(y) for y in years], key="pr_year")
+
+    view = rc
+    t = term.strip().lower()
+    if t:
+        scols = ["item_name", "erp_product_name", "serial_no", "prod_id", "erp_code", "erp_sl_ref", "supplier_name",
+                 "challan_no", "factory_name"]
+        m = view[scols].fillna("").astype(str).apply(lambda c: c.str.lower().str.contains(t, regex=False)).any(axis=1)
+        view = view[m | (view["sl_no"].astype(str).str.strip() == t)]
+    if mon != "All":
+        view = view[view["_dt"].dt.month == month_names.index(mon) + 1]
+    if yr != "All":
+        view = view[view["_dt"].dt.year == int(yr)]
+    chrono = mon != "All" or yr != "All"
+    view = view.sort_values(["_dt", "id"], ascending=chrono, na_position="last")
+
+    total_qty = float(view["qty"].sum()) if not view.empty else 0.0
+    mc = st.columns(3)
+    mc[0].metric("Total Received (Qty)", f"{total_qty:g}")
+    mc[1].metric("Times Received (entries)", len(view))
+    mc[2].metric("Distinct Products", view[["factory_name", "sl_no"]].drop_duplicates().shape[0] if not view.empty else 0)
+    period = " ".join(x for x in (mon if mon != "All" else "", yr if yr != "All" else "") if x)
+    if period or t:
+        what = f"'{term.strip()}'" if t else "All products"
+        st.caption(f"{what}{' · ' + period if period else ''}: received {len(view)} time(s), Total Received {total_qty:g}.")
+    if view.empty:
+        st.info("Ei filter-e kono received record nei.")
+        return
+
+    d1, d2 = st.tabs(["📋 Receiving History (date-wise)", "📦 Product-wise Summary"])
+    with d1:
+        out = view[["id", "date", "item_name", "serial_no", "sl_no", "erp_code", "qty", "factory_name", "supplier_name",
+                    "challan_no", "erp_status", "officer_name", "erp_product_name", "erp_sl_ref", "notes"]].copy()
+        out.columns = ["ID", "Date", "Item Name", "Serial No", "SL No", "ERP Code", "Qty", "Factory", "Supplier",
+                       "Challan No", "ERP Status", "Officer", "ERP Product Name", "ERP SL / ID", "Remarks"]
+        st.dataframe(out, hide_index=True, use_container_width=True, height=380)
+        export_buttons(out, "product_received")
+    with d2:
+        g = (view.groupby(["factory_name", "item_name", "serial_no", "erp_code"], as_index=False)
+             .agg(times=("id", "count"), qty=("qty", "sum"), first=("_dt", "min"), last=("_dt", "max"))
+             .sort_values("qty", ascending=False))
+        g["first"] = g["first"].dt.strftime(DATE_FMT).fillna("")
+        g["last"] = g["last"].dt.strftime(DATE_FMT).fillna("")
+        g.columns = ["Factory", "Item Name", "Serial No", "ERP Code", "Times Received", "Total Qty Received",
+                     "First Received", "Last Received"]
+        st.dataframe(g, hide_index=True, use_container_width=True)
+        export_buttons(g, "product_received_summary")
+
+    with st.expander("🔐 Manager: Edit / Delete a received product"):
+        if not guard(write=False):
+            return
+        rows = {int(r["id"]): r for r in view.head(500).to_dict("records")}
+        tid = int(st.selectbox(
+            "Received record", list(rows), key="pr_id",
+            format_func=lambda i: (f"ID {i} | {rows[i]['date']} | {rows[i]['item_name']} | qty {float(rows[i]['qty']):g} | "
+                                   f"{rows[i]['supplier_name'] or '-'} | {rows[i]['challan_no'] or '-'}")))
+        r = rows[tid]
+        pw_ok = mgr_check("pr_mgr_pw")
+        st.markdown("**✏️ Edit** (same product / same receipt record - no duplicate is created)")
+        e1, e2 = st.columns(2)
+        e_name = e1.text_input("Product Name", value=str(r["item_name"] or ""), key=f"pr_e_name_{tid}")
+        e_erpn = e2.text_input("ERP Product Name", value=str(r["erp_product_name"] or ""), key=f"pr_e_erpn_{tid}")
+        e_code = e1.text_input("ERP Code", value=str(r["erp_code"] or ""), key=f"pr_e_code_{tid}")
+        statuses = ["Pending", "Done", "Not Required"]
+        if r["erp_status"] and r["erp_status"] not in statuses:
+            statuses.append(r["erp_status"])
+        e_stat = e2.selectbox("ERP Status", statuses, index=statuses.index(r["erp_status"]) if r["erp_status"] in statuses else 0,
+                              key=f"pr_e_stat_{tid}")
+        e_sl = e1.text_input("ERP SL / Identifier", value=str(r["erp_sl_ref"] or ""), key=f"pr_e_sl_{tid}")
+        e_sup = e2.text_input("Supplier", value=str(r["supplier_name"] or ""), key=f"pr_e_sup_{tid}")
+        e_ch = e1.text_input("Challan Number", value=str(r["challan_no"] or ""), key=f"pr_e_ch_{tid}")
+        cur_d = parse_date(r["date"])
+        e_date = e2.date_input("Receiving date", value=cur_d.date() if cur_d else date.today(), key=f"pr_e_date_{tid}")
+        e_notes = st.text_input("Remarks", value=str(r["notes"] or ""), key=f"pr_e_notes_{tid}")
+        e_master = st.checkbox("Also set this ERP Code as the product's master ERP code (renames it in inventory & history)",
+                               key=f"pr_e_master_{tid}")
+        if st.button("💾 Save changes", type="primary", key="pr_save"):
+            if not pw_ok:
+                st.error("Manager password thik nei.")
+            elif not e_name.strip():
+                st.error("Product Name khali rakha jabe na.")
+            elif update_received_record(tid, e_name.strip(), e_erpn.strip(), e_code.strip(), e_stat, e_sl.strip(),
+                                        e_sup.strip(), e_ch.strip(), e_date.strftime(DATE_FMT), e_notes.strip(), e_master):
+                done("Received record updated.")
+        st.markdown("**🗑 Delete**")
+        conf = confirm_box(f"pr_del_conf_{tid}",
+                           f"⚠️ Ami confirm korchi - ei received record delete hobe ar stock {float(r['qty']):g} kome jabe.")
+        if st.button("🗑 Delete received record", key="pr_del"):
+            if not pw_ok:
+                st.error("Manager password thik nei.")
+            elif not conf:
+                st.error("Delete confirm tick korun.")
+            elif delete_transaction(tid):
+                done("Received record deleted, stock reverted.")
+
+
 def tab_erp_audit():
     aud = qdf(f"""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, prod_id, item_name,
                   COALESCE(size,'') AS size,
@@ -2188,8 +2528,13 @@ def tab_erp_audit():
     c[5].metric("Unmatch Pending", int(pend_q.n.iloc[0]) if not pend_q.empty else 0)
 
     # ---- search bar (filters every list below: tables, adjust, ERP-done selection)
-    term = st.text_input("🔍 Search ERP audit records (Item / Serial No / ERP Code / SL No / Factory / Status)",
-                         key="aud_search", placeholder="e.g. Spherical Roller Bearing, KW-001, ERP code, SL number ...")
+    if st.session_state.get(AUD_VIEW_KEY) not in AUD_VIEWS:
+        st.session_state[AUD_VIEW_KEY] = AUD_VIEWS[0]
+    if st.session_state[AUD_VIEW_KEY] in (AUD_PO, AUD_RECV):
+        term = ""   # these two views carry their own search bar
+    else:
+        term = st.text_input("🔍 Search ERP audit records (Item / Serial No / ERP Code / SL No / Factory / Status)",
+                             key="aud_search", placeholder="e.g. Spherical Roller Bearing, KW-001, ERP code, SL number ...")
     view = audit_search(aud, term)
     if not aud.empty:
         v_short, v_exc = view[view.variance < 0], view[view.variance > 0]
@@ -2200,11 +2545,10 @@ def tab_erp_audit():
     else:
         v_short = v_exc = v_match = v_pend = vt = view
 
-    t_act, t_all, t_short, t_exc, t_match, t_pend, t_plan, t_age = st.tabs(
-        ["⚙️ Actions", "📋 All", "🔴 Short", "🟠 Excess", "🟢 Matched", "🟡 ERP Pending", "📝 Correction Plan", "⏱ Receipt Aging"])
+    aud_sel = st.radio("ERP Audit view", AUD_VIEWS, key=AUD_VIEW_KEY, horizontal=True, label_visibility="collapsed")
     cols = ["factory_name", "sl_no", "serial_no", "prod_id", "item_name", "size", "erp_stock", "current_stock", "variance",
             "unit_price", "short_value", "excess_value", "erp_status", "variance_type"]
-    with t_act:
+    if aud_sel == AUD_ACT:
         if guard():
             a1, a2, a3, a4 = st.tabs(["📥 Import ERP Balance", "⚖️ Adjust variance to ERP (Manager)",
                                       "📋 Assign Correction Task", "✔️ Mark ERP status Done"])
@@ -2301,22 +2645,26 @@ def tab_erp_audit():
                             if bulk_set_grn_done(pairs):
                                 done(f"{len(pairs)} item ERP GRN Done kora hoyeche.")
 
-    with t_all:
+    if aud_sel == AUD_ALL:
         st.dataframe(view[cols] if not view.empty else view, hide_index=True, use_container_width=True, height=420)
         export_buttons(view[cols] if not view.empty else view, "erp_audit_all")
-    with t_short:
+    if aud_sel == AUD_SHORT:
         st.dataframe(v_short[cols] if not v_short.empty else v_short, hide_index=True, use_container_width=True)
         export_buttons(v_short[cols] if not v_short.empty else v_short, "erp_audit_short")
-    with t_exc:
+    if aud_sel == AUD_EXC:
         st.dataframe(v_exc[cols] if not v_exc.empty else v_exc, hide_index=True, use_container_width=True)
         export_buttons(v_exc[cols] if not v_exc.empty else v_exc, "erp_audit_excess")
-    with t_match:
+    if aud_sel == AUD_MATCH:
         st.dataframe(v_match[cols] if not v_match.empty else v_match, hide_index=True, use_container_width=True)
         export_buttons(v_match[cols] if not v_match.empty else v_match, "erp_audit_matched")
-    with t_pend:
+    if aud_sel == AUD_PEND:
         st.dataframe(v_pend[cols] if not v_pend.empty else v_pend, hide_index=True, use_container_width=True)
         export_buttons(v_pend[cols] if not v_pend.empty else v_pend, "erp_audit_pending")
-    with t_plan:
+    if aud_sel == AUD_PO:
+        erp_po_pending_view()
+    if aud_sel == AUD_RECV:
+        erp_product_received_view()
+    if aud_sel == AUD_PLAN:
         if tasks.empty:
             st.info("Correction task nei.")
         else:
@@ -2363,7 +2711,7 @@ def tab_erp_audit():
                             st.error("Target date DD-Mon-YYYY format-e din.")
                         elif update_task(tid, eo, ep_, es, et, er.strip()):
                             done("Task updated.")
-    with t_age:
+    if aud_sel == AUD_AGE:
         rc = qdf(f"""SELECT id, factory_name, date, item_name, prod_id, qty, officer_name FROM transactions
                      WHERE trans_type='Supplier. Rec' AND erp_grn_status='Pending'{FSQL} ORDER BY id DESC""", FP)
         if rc.empty:
@@ -3017,7 +3365,8 @@ def tab_repair():
 # ============================================================
 def tab_ledger():
     led = qdf(f"""SELECT t.id, t.factory_name, t.officer_name, t.sl_no, COALESCE(i.serial_no,'') AS serial_no, t.prod_id,
-                  t.item_name, t.qty, t.trans_type, t.notes,
+                  t.item_name, t.qty, t.trans_type, t.notes, COALESCE(t.supplier_name,'') AS supplier_name,
+                  COALESCE(t.challan_no,'') AS challan_no,
                   t.date, t.time, COALESCE(i.unit_price,0) AS unit_price
                   FROM transactions t LEFT JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
                   WHERE 1=1{fw(FAC, 't.')[0]} ORDER BY t.id DESC""", FP)
@@ -3033,7 +3382,7 @@ def tab_ledger():
         led["total_price"] = (led.qty * led.unit_price).round(2)
         led["date_time"] = led[["date", "time"]].fillna("").agg(" ".join, axis=1)
         led = led[["id", "factory_name", "officer_name", "sl_no", "serial_no", "prod_id", "item_name", "qty", "type",
-                   "total_price", "notes", "date_time"]]
+                   "supplier_name", "challan_no", "total_price", "notes", "date_time"]]
     st.dataframe(led, hide_index=True, use_container_width=True, height=440)
     export_buttons(led, "ledger")
     tx_manager_panel(manage, "led")
@@ -3282,7 +3631,10 @@ def guess_uom(name, stock):
 
 
 def autoset_uom_once():
+    if st.session_state.get("_uom_checked"):
+        return
     if q("SELECT 1 AS x FROM req_settings WHERE setting_key='uom_autoset_v1' AND setting_value='done'"):
+        st.session_state["_uom_checked"] = True
         return
 
     @tx
@@ -3294,7 +3646,8 @@ def autoset_uom_once():
         run("""INSERT INTO req_settings (setting_key, setting_value) VALUES ('uom_autoset_v1','done')
                ON CONFLICT (setting_key) DO UPDATE SET setting_value='done'""")
         return True
-    _do()
+    if _do():
+        st.session_state["_uom_checked"] = True
 
 
 def daily_rows(d, fac, show_all):
@@ -3302,11 +3655,13 @@ def daily_rows(d, fac, show_all):
     rows = q("""SELECT i.sl_no, COALESCE(i.serial_no,'') AS serial, i.item_name, COALESCE(i.size,'') AS size,
                 COALESCE(NULLIF(i.unit_name,''),'Pcs') AS unit,
                 COALESCE(i.current_stock,0) AS cur, COALESCE(i.erp_stock,0) AS erp,
-                COALESCE((SELECT SUM(t.qty) FROM transactions t WHERE t.factory_name=i.factory_name AND t.sl_no=i.sl_no
-                          AND t.date=%s AND t.trans_type IN ('Issued','Internal Issue')),0) AS issue,
-                COALESCE((SELECT SUM(t.qty) FROM transactions t WHERE t.factory_name=i.factory_name AND t.sl_no=i.sl_no
-                          AND t.date=%s AND t.trans_type IN ('Supplier. Rec','Internal Rec')),0) AS recv
-                FROM inventory i WHERE i.factory_name=%s ORDER BY i.sl_no""", (ds, ds, fac))
+                COALESCE(d.issue,0) AS issue, COALESCE(d.recv,0) AS recv
+                FROM inventory i
+                LEFT JOIN (SELECT sl_no,
+                                  SUM(CASE WHEN trans_type IN ('Issued','Internal Issue') THEN qty ELSE 0 END) AS issue,
+                                  SUM(CASE WHEN trans_type IN ('Supplier. Rec','Internal Rec') THEN qty ELSE 0 END) AS recv
+                           FROM transactions WHERE factory_name=%s AND date=%s GROUP BY sl_no) d ON d.sl_no=i.sl_no
+                WHERE i.factory_name=%s ORDER BY i.sl_no""", (fac, ds, fac))
     out = []
     for r in rows:
         cur, erp = float(r["cur"]), float(r["erp"])
@@ -3403,6 +3758,7 @@ def tab_daily_sheet():
 # ============================================================
 #  MAIN
 # ============================================================
+ensure_live_connection()
 try:
     init_db()
 except Exception as e:
@@ -3428,13 +3784,15 @@ is_cons_view = "CONSOLIDATED" in FAC
 autoset_uom_once()
 
 # Top-level navigation: the very first element of the main page. [1] TRANSACTIONS is the default tab.
-TAB_NAMES = ["📝 [1] TRANSACTIONS", "📦 [2] INVENTORY", "🔍 [3] ERP AUDIT", "📜 [4] ISSUE LEDGER",
+TAB_NAMES = ["📝 [1] TRANSACTIONS", "📦 [2] INVENTORY", NAV_ERP_AUDIT, "📜 [4] ISSUE LEDGER",
              "🔁 [5] TRANSFER HISTORY", "📑 [6] REQUISITION", "🛠 [7] REPAIR", "📒 [8] LEDGER",
              "📈 [9] FORECAST", "💵 [10] BUDGET", "🗓 [11] DAILY WORK SHEET"]
 RENDERERS = [tab_transactions, tab_inventory, tab_erp_audit, tab_issue_ledger, tab_transfer_history,
              tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet]
-tabs = st.tabs(TAB_NAMES)
-for t, fn in zip(tabs, RENDERERS):
-    with t:
-        render_header()
-        fn()
+# Only the opened module is rendered. Streamlit's st.tabs() runs EVERY tab on EVERY click, which made each
+# "Save & Update Stock" re-run all 11 modules (twice, because of the refresh after save).
+if st.session_state.get(NAV_KEY) not in TAB_NAMES:
+    st.session_state[NAV_KEY] = TAB_NAMES[0]
+active_tab = st.radio("Module", TAB_NAMES, key=NAV_KEY, horizontal=True, label_visibility="collapsed")
+render_header()
+RENDERERS[TAB_NAMES.index(active_tab)]()
