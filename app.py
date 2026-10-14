@@ -527,6 +527,8 @@ def init_db():
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS erp_product_name TEXT DEFAULT ''",
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS erp_code TEXT DEFAULT ''",
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS erp_sl_ref TEXT DEFAULT ''",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS po_pending_flag TEXT DEFAULT ''",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS po_pending_date TEXT",
         """CREATE TABLE IF NOT EXISTS password_resets (
             id SERIAL PRIMARY KEY, username TEXT, requested_at TEXT, status TEXT DEFAULT 'Pending',
             handled_by TEXT, handled_at TEXT)""",
@@ -969,11 +971,13 @@ def next_free_temp(fac):
 
 
 def insert_tx(fac, officer, sl, pid, name, qty, ttype, day, notes, date_s, time_s, verif, grn="Not Required",
-              supplier="", challan=""):
+              supplier="", challan="", po_flag="", po_date=None):
     run("""INSERT INTO transactions (factory_name, officer_name, sl_no, prod_id, item_name, qty, trans_type, day,
-           notes, date, time, verification_status, erp_grn_status, supplier_name, challan_no)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-        (fac, officer, sl, pid, name, qty, ttype, day, notes, date_s, time_s, verif, grn, supplier, challan))
+           notes, date, time, verification_status, erp_grn_status, supplier_name, challan_no,
+           po_pending_flag, po_pending_date)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (fac, officer, sl, pid, name, qty, ttype, day, notes, date_s, time_s, verif, grn, supplier, challan,
+         po_flag, po_date))
 
 
 def export_buttons(df, name):
@@ -1581,12 +1585,13 @@ def tab_dashboard():
 #  TAB 1 - TRANSACTIONS (daily entry, top priority)
 # ============================================================
 @tx
-def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, supplier="", challan=""):
+def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, supplier="", challan="", po_pending=False):
     user = st.session_state.get("user", "")
     sl, pid, name = item["sl_no"], item["prod_id"], item["item_name"]
     stock = float(item["stock"] or 0)
     date_s, time_s, day = tx_dt.strftime(DATE_FMT), datetime.now().strftime("%I:%M %p"), tx_dt.day
     verif = "Verified"
+    po_flag, po_date = ("Pending", date_s) if po_pending else ("", None)   # "ERP PO Pending" box ticked at entry
 
     if ttype in ISSUE_TYPES:
         needed, _streak = verification_needed(fac, sl, tx_dt)
@@ -1612,7 +1617,7 @@ def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, sup
         run("UPDATE inventory SET current_stock=current_stock-%s WHERE sl_no=%s AND factory_name=%s", (qty, sl, fac))
         insert_tx(fac, user, sl, pid, name, qty, ttype, day,
                   f"{notes} [Auto-transferred {shortage:g} pcs from {other['factory_name']}]".strip(),
-                  date_s, time_s, verif)
+                  date_s, time_s, verif, po_flag=po_flag, po_date=po_date)
         audit("AUTO_TRANSFER", f"{shortage:g} pcs from {other['factory_name']} to {fac} for {pid}")
         return True
 
@@ -1620,14 +1625,16 @@ def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, sup
         grn = "Pending" if ttype == "Supplier. Rec" else "Not Required"
         run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (qty, sl, fac))
         insert_tx(fac, user, sl, pid, name, qty, ttype, day, notes, date_s, time_s, "Verified", grn,
-                  supplier if ttype == "Supplier. Rec" else "", challan if ttype == "Supplier. Rec" else "")
+                  supplier if ttype == "Supplier. Rec" else "", challan if ttype == "Supplier. Rec" else "",
+                  po_flag=po_flag, po_date=po_date)
     else:
         if qty > stock:
             st.error(f"Available stock ({stock:g}) kom ache requested qty ({qty:g}) theke.")
             return False
         run("UPDATE inventory SET current_stock=current_stock-%s WHERE sl_no=%s AND factory_name=%s", (qty, sl, fac))
-        insert_tx(fac, user, sl, pid, name, qty, ttype, day, notes, date_s, time_s, verif)
-    audit("TRANSACTION", f"{fac}: {ttype} {qty:g} of {pid} ({name})")
+        insert_tx(fac, user, sl, pid, name, qty, ttype, day, notes, date_s, time_s, verif,
+                  po_flag=po_flag, po_date=po_date)
+    audit("TRANSACTION", f"{fac}: {ttype} {qty:g} of {pid} ({name})" + (" [ERP PO Pending ticked]" if po_pending else ""))
     return True
 
 
@@ -1750,6 +1757,8 @@ def tab_transactions():
                     st.warning(f"Physical verification required: ei product porpor {v_streak} din issue hoyeche (4th consecutive day).")
             verified = st.checkbox("✅ Physically Verified (required today)" if need_verif else "✅ Verified",
                                    key=f"tx_ver_{g}")
+            po_pending = st.checkbox("📌 ERP PO Pending", key=f"tx_po_{g}",
+                                     help="Tick korle ei transaction ERP PO Pending list-e record hobe (ERP Audit → ERP PO Pending) - track korar jonno.")
             notes = st.text_input("Remarks", key=f"tx_notes_{g}", placeholder="Optional note")
 
             if item is not None:
@@ -1794,7 +1803,7 @@ def tab_transactions():
                             st.error("🚫 Duplicate block: ekdom ek-i transaction ei matro save hoyeche. "
                                      "Quantity / remarks bodle ba kichukkhon por abar korun.")
                         elif save_transaction(fac, item, qty, ttype, tx_date, notes, verified, xfer_ok,
-                                              supplier.strip(), challan.strip()):
+                                              supplier.strip(), challan.strip(), po_pending):
                             st.session_state["tx_saved_gen"] = g
                             st.session_state["tx_gen"] = g + 1
                             done("✅ Transaction saved, stock updated. Form reset hoyeche - porer transaction-er jonno ready.")
@@ -2317,7 +2326,8 @@ PO_FROM = "FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.fa
 # Issue / Internal Issue: the product's ERP status is still 'ERP Pending' (the status set by "Mark ERP status Done").
 # Received (Supplier Receipt): the receipt's own ERP GRN status is still 'Pending' (same field Receipt Aging uses).
 PO_WHERE = ("((t.trans_type IN ('Issued','Internal Issue') AND i.erp_status='ERP Pending') "
-            "OR (t.trans_type='Supplier. Rec' AND t.erp_grn_status='Pending'))")
+            "OR (t.trans_type='Supplier. Rec' AND t.erp_grn_status='Pending') "
+            "OR t.po_pending_flag='Pending')")
 
 
 def po_pending_counts():
@@ -2335,12 +2345,23 @@ def go_erp_po_pending():
     st.session_state[AUD_VIEW_KEY] = AUD_PO
 
 
+@tx
+def clear_po_pending_flags(ids, date_s):
+    """Closes transactions that were ticked 'ERP PO Pending' at entry (keeps the record + date for tracking)."""
+    for i in ids:
+        run("UPDATE transactions SET po_pending_flag='Done', po_pending_date=%s WHERE id=%s AND po_pending_flag='Pending'",
+            (date_s, int(i)))
+    audit("ERP_PO_DONE", f"Ticked ERP PO Pending cleared on transactions {sorted(int(i) for i in ids)}")
+    return True
+
+
 def erp_po_pending_view():
     fsql, fp = fw(FAC, "t.")
     df = qdf(f"""SELECT t.id, t.factory_name, t.sl_no, COALESCE(i.serial_no,'') AS serial_no, t.item_name,
                  COALESCE(NULLIF(t.erp_code,''), t.prod_id) AS erp_code,
-                 CASE WHEN t.trans_type='Supplier. Rec' THEN 'Received' ELSE 'Issue' END AS type,
-                 t.qty, t.date, t.time, t.officer_name
+                 CASE WHEN t.trans_type IN ('Supplier. Rec','Internal Rec','Stock Adjustment (+)') THEN 'Received' ELSE 'Issue' END AS type,
+                 t.qty, t.date, t.time, t.officer_name,
+                 CASE WHEN t.po_pending_flag='Pending' THEN 'Yes' ELSE '' END AS ticked
                  {PO_FROM} WHERE {PO_WHERE}{fsql} ORDER BY t.id DESC""", fp)
     st.markdown('<div class="section-title">ERP PO Pending · Issue & Received transactions</div>', unsafe_allow_html=True)
     if df.empty:
@@ -2360,10 +2381,19 @@ def erp_po_pending_view():
     mc[0].metric("ERP PO Pending", len(view))
     mc[1].metric("Issue", int((view["type"] == "Issue").sum()))
     mc[2].metric("Received", int((view["type"] == "Received").sum()))
-    out = view[["item_name", "serial_no", "erp_code", "type", "qty", "date", "status", "factory_name", "sl_no", "officer_name", "id"]].copy()
-    out.columns = ["Item", "Serial", "ERP Code", "Type", "Qty", "Date", "Status", "Factory", "SL No", "Officer", "ID"]
+    out = view[["item_name", "serial_no", "erp_code", "type", "qty", "date", "status", "factory_name", "sl_no", "officer_name", "id", "ticked"]].copy()
+    out.columns = ["Item", "Serial", "ERP Code", "Type", "Qty", "Date", "Status", "Factory", "SL No", "Officer", "ID", "Ticked at entry"]
     st.dataframe(out, hide_index=True, use_container_width=True, height=400)
     export_buttons(out, "erp_po_pending")
+    ticked = view[view["ticked"] == "Yes"]
+    if not ticked.empty:
+        with st.expander(f"✔ Mark ticked ERP PO Pending as Done ({len(ticked)})"):
+            rows = {int(r["id"]): r for r in ticked.to_dict("records")}
+            sel = st.multiselect("Transaction ID", list(rows), key=f"po_clear_ids_{len(ticked)}",
+                                 format_func=lambda i: f"ID {i} | {rows[i].get('item_name', '')} | qty {rows[i].get('qty', '')} | {rows[i].get('date', '')}")
+            if st.button("✔ Mark ERP PO Done", key="po_clear_btn", disabled=not sel):
+                if guard() and clear_po_pending_flags(sel, datetime.now().strftime(DATE_FMT)):
+                    done(f"{len(sel)} transaction ERP PO Done mark kora holo.")
 
 
 # ---------- Product Received ----------
