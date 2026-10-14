@@ -19,6 +19,41 @@ import streamlit as st
 
 st.set_page_config(page_title="KC & Windy Stock Tracker", page_icon="📦", layout="wide")
 
+st.markdown("""
+<style>
+    .stApp { background: #f4f6f9; }
+    .block-container { padding-top: 1.2rem; max-width: 98%; }
+    .app-header {
+        background: #1b3b6f; color: white; text-align: center;
+        padding: 10px 12px 8px 12px; border-radius: 6px; margin-bottom: 8px;
+    }
+    .app-header h1 { color: white; font-size: 22px; margin: 0; letter-spacing: 0.5px; }
+    .app-header p { color: #a0c4ff; font-size: 12px; font-style: italic; margin: 2px 0 0 0; }
+    .factory-bar {
+        background: #d9e2ec; color: #1b3b6f; font-weight: 700;
+        padding: 6px 12px; border-radius: 4px; margin-bottom: 8px; font-size: 13px;
+    }
+    div[data-testid="stMetric"] {
+        background: white; border: 1px solid #d0d7e2; border-top: 3px solid #1b3b6f;
+        padding: 8px 12px; border-radius: 4px;
+    }
+    div[data-testid="stMetricLabel"] { color: #1b3b6f; font-weight: 700; font-size: 12px; }
+    div[data-testid="stMetricValue"] { color: #1b3b6f; font-size: 20px; }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 2px; background: #e0e0e0; padding: 3px 3px 0 3px; border-radius: 4px 4px 0 0;
+    }
+    .stTabs [data-baseweb="tab"] {
+        font-weight: 700; font-size: 12px; padding: 6px 10px; background: #e0e0e0; color: #333;
+    }
+    .stTabs [aria-selected="true"] { background: #1b3b6f !important; color: white !important; }
+    .stTabs [data-baseweb="tab-highlight"] { display: none; }
+    .stDataFrame { border: 1px solid #d0d7e2; border-radius: 4px; background: white; }
+    section[data-testid="stSidebar"] { background: #2d3748; }
+    section[data-testid="stSidebar"] * { color: #e2e8f0; }
+    section[data-testid="stSidebar"] div[data-baseweb="select"] * { color: #1a202c; }
+</style>
+""", unsafe_allow_html=True)
+
 # ============================================================
 #  CONSTANTS
 # ============================================================
@@ -46,7 +81,7 @@ TRANS_LABELS = {
     "Stock Adjustment (+)": "➕ Stock Adjustment (Increase)",
     "Stock Adjustment (-)": "➖ Stock Adjustment (Decrease)",
 }
-TRANS_CODES = {v: k for k, v in TRANS_LABELS.items()}
+TRANS_CODES = {v: k for k, v in TRANS_LABELS.items()}   # label -> code
 DS_KG_KEYWORDS = ("super enamel wire", "enamel paint", "anamel paint", "weather coat", "plastic paint", "thinner",
                   "cement", " rope", "welding rod", "wood chips", "perak", "heatproof fiber", "decoloring agent",
                   "gear oil", "lube oil", "compressor fluid", "poly bag", "jeet powder", "copper busbar", "varnish",
@@ -175,7 +210,6 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, username TEXT UNIQUE, password TEXT, role TEXT, full_name TEXT)",
         "CREATE TABLE IF NOT EXISTS audit_logs (id SERIAL PRIMARY KEY, timestamp TEXT, username TEXT, action_type TEXT, details TEXT)",
         "CREATE TABLE IF NOT EXISTS req_settings (setting_key TEXT PRIMARY KEY, setting_value TEXT)",
-        # old databases get the new columns; existing data is kept
         "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS size TEXT DEFAULT ''",
         "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS unit_name TEXT DEFAULT 'Pcs'",
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS erp_grn_status TEXT DEFAULT 'Not Required'",
@@ -472,7 +506,7 @@ def read_any(upload):
 
 
 def backup_zip():
-    """Every table as CSV inside one zip (replaces the old backup folder)."""
+    """Every table as CSV inside one zip."""
     buf = io.BytesIO()
     tables = [r["table_name"] for r in q("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")]
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
@@ -810,12 +844,9 @@ def ec_lookup(index, fac, name, size, code):
 # ============================================================
 #  GUARDS
 # ============================================================
-is_cons_view = None  # set in main()
-
-
 def guard(write=True):
     if not st.session_state.get("user"):
-        st.warning("🔑 Age sidebar theke login korun.")
+        st.warning("🔑 Sidebar theke login korun.")
         return False
     if write and st.session_state.get("role") == "Auditor":
         st.error("Auditor role read-only.")
@@ -907,7 +938,7 @@ def tab_transactions():
         if is_cons_view:
             st.warning("CONSOLIDATED view-te entry hoy na. Sidebar theke factory select korun.")
         search = st.text_input("🔍 Search (Name / Size / ERP / SL)", key="tx_search")
-        item, need_xfer, blocked, xfer_ok = None, False, False, False
+        item, blocked, need_xfer, xfer_ok = None, False, False, False
         if search.strip():
             cands = search_items(fac, search.strip())
             if cands:
@@ -922,7 +953,9 @@ def tab_transactions():
                 if item is None:
                     st.error("Item paoa jay nai" if not cands else f"{len(cands)} ta item match kore - exact SL No likhun")
 
-        ttype = TRANS_CODES[st.selectbox("Transaction Type", list(TRANS_LABELS), key="tx_type")]
+        # FIX: options are labels, lookup is label -> code
+        type_label = st.selectbox("Transaction Type", list(TRANS_CODES), key="tx_type")
+        ttype = TRANS_CODES[type_label]
         qty = st.number_input("Quantity", min_value=0.0, step=1.0, key="tx_qty")
         tx_date = st.date_input("Date", value=date.today(), max_value=date.today(), key="tx_date")
         verified = st.checkbox("Physically Verified (3-Day cooldown check)", key="tx_ver")
@@ -986,7 +1019,7 @@ def tab_transactions():
                         st.error("Manager password thik nei.")
                     elif delete_transaction(tid):
                         done("Transaction deleted, stock reverted.")
-                cur_d = parse_date(trow["date_time"].split(" ")[0] if trow["date_time"] else None)
+                cur_d = parse_date(str(trow["date_time"]).split(" ")[0] if trow["date_time"] else None)
                 ed = st.date_input("New date", value=cur_d.date() if cur_d else date.today(), key="tx_ed_date")
                 en = st.text_input("Remarks", value=trow["notes"] or "", key="tx_ed_notes")
                 if st.button("💾 Save edit", key="tx_ed_btn"):
@@ -1060,9 +1093,8 @@ def delete_item(fac, sl, pid, name):
 
 
 @tx
-def do_import_opening(fac, rows, fname):
-    st_ = import_rows(fac, rows)
-    return st_
+def do_import_opening(fac, rows):
+    return import_rows(fac, rows)
 
 
 def inv_master_view():
@@ -1143,7 +1175,7 @@ def inv_add_import_view():
         st.download_button("💾 Download backup (all tables, CSV zip) before import", backup_zip(),
                            "windy_backup.zip", "application/zip")
         if st.button("✅ Import now", type="primary", key="do_open_import"):
-            st_ = do_import_opening(FAC, rows, up.name)
+            st_ = do_import_opening(FAC, rows)
             if st_:
                 done(f"Import done: NEW {st_['added']} (zero {st_['added_zero']}), updated {st_['updated']}, "
                      f"mirrored to other unit {st_['mirrored']}, size missing {st_['no_size']}.")
@@ -1163,7 +1195,8 @@ def inv_edit_view():
         code = c1.text_input("ERP Code", r["prod_id"] or "", key=f"e_code_{k}")
         name = c2.text_input("Item Name", r["item_name"] or "", key=f"e_name_{k}")
         size = c3.text_input("Size (mandatory)", r["size"] or "", key=f"e_size_{k}")
-        dept = c1.selectbox("Department", DEPARTMENTS, index=DEPARTMENTS.index(r["department"]) if r["department"] in DEPARTMENTS else 0, key=f"e_dept_{k}")
+        dept = c1.selectbox("Department", DEPARTMENTS,
+                            index=DEPARTMENTS.index(r["department"]) if r["department"] in DEPARTMENTS else 0, key=f"e_dept_{k}")
         cat = c2.text_input("Category", r["category"] or "", key=f"e_cat_{k}")
         unit = c3.selectbox("Unit", UOM, index=UOM.index(r["unit_name"]) if r["unit_name"] in UOM else 0, key=f"e_unit_{k}")
         erp = c1.number_input("ERP Stock", value=float(r["erp_stock"]), step=1.0, key=f"e_erp_{k}")
@@ -1291,8 +1324,9 @@ def erp_check_view():
     up = st.file_uploader("List to check", type=["xlsx", "xls", "csv"], key="bulk_chk")
     if up and st.button("🔍 Run bulk check"):
         df = read_any(up)
-        cn, cs, cc = find_col(df, ["item name", "item_name", "description", "item", "product"]), \
-            find_col(df, ["size"]), find_col(df, ["erp code", "erp_code", "prod_id", "code"])
+        cn = find_col(df, ["item name", "item_name", "description", "item", "product"])
+        cs = find_col(df, ["size"])
+        cc = find_col(df, ["erp code", "erp_code", "prod_id", "code"])
         out = []
         for _, r in df.iterrows():
             n = txt(r[cn]) if cn else ""
@@ -1384,13 +1418,13 @@ def set_grn_done_inv(fac, sl):
 @tx
 def assign_task(fac, row, officer, days, prio, remarks):
     variance = float(row["current_stock"]) - float(row["erp_stock"])
-    val = float(row["variance_value"])
+    val = variance * float(row["unit_price"] or 0)
+    target = (datetime.now().date().fromordinal(datetime.now().date().toordinal() + days)).strftime(DATE_FMT)
     run("""INSERT INTO audit_correction_tasks (factory_name, prod_id, item_name, variance_type, variance_qty, variance_value,
            root_cause, corrective_action, assigned_officer, task_date, target_date, status, manager_remarks, priority, verification_status)
            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'In Progress',%s,%s,'Pending')""",
         (fac, row["prod_id"], row["item_name"], "Shortage" if variance < 0 else "Excess", variance, val, remarks,
-         "Verify physical count & documents", officer, datetime.now().strftime(DATE_FMT),
-         (datetime.now().date().fromordinal(datetime.now().date().toordinal() + days)).strftime(DATE_FMT), remarks, prio))
+         "Verify physical count & documents", officer, datetime.now().strftime(DATE_FMT), target, remarks, prio))
     audit("ASSIGN_TASK", f"{fac}: correction task {row['item_name']} -> {officer}")
     return True
 
@@ -1417,8 +1451,9 @@ def mark_grn_receipt(tid, date_s):
 
 
 def tab_erp_audit():
-    aud = qdf(f"""SELECT factory_name, sl_no, prod_id, item_name, COALESCE(size,'') AS size, COALESCE(erp_stock,0) AS erp_stock,
-                  COALESCE(current_stock,0) AS current_stock, COALESCE(unit_price,0) AS unit_price, erp_status
+    aud = qdf(f"""SELECT factory_name, sl_no, prod_id, item_name, COALESCE(size,'') AS size,
+                  COALESCE(erp_stock,0) AS erp_stock, COALESCE(current_stock,0) AS current_stock,
+                  COALESCE(unit_price,0) AS unit_price, erp_status
                   FROM inventory WHERE 1=1{FSQL} ORDER BY factory_name, sl_no""", FP)
     if not aud.empty:
         aud["variance"] = aud.current_stock - aud.erp_stock
@@ -1426,7 +1461,10 @@ def tab_erp_audit():
         aud["short_value"] = aud.var_value.where(aud.variance < 0, 0).abs()
         aud["excess_value"] = aud.var_value.where(aud.variance > 0, 0)
         aud["variance_type"] = aud.variance.apply(lambda v: "Shortage" if v < 0 else ("Excess" if v > 0 else "Matched"))
-    short, exc = aud[aud.variance < 0] if not aud.empty else aud, aud[aud.variance > 0] if not aud.empty else aud
+        short = aud[aud.variance < 0]
+        exc = aud[aud.variance > 0]
+    else:
+        short = exc = aud
     tasks = qdf(f"SELECT * FROM audit_correction_tasks WHERE 1=1{FSQL}", FP)
     open_n = int((tasks["status"] != "Closed").sum()) if not tasks.empty else 0
     pend_q = qdf(f"SELECT COUNT(*) AS n FROM import_queue WHERE status='Pending Approval'{FSQL}", FP)
@@ -1443,9 +1481,7 @@ def tab_erp_audit():
     cols = ["factory_name", "sl_no", "prod_id", "item_name", "size", "erp_stock", "current_stock", "variance",
             "unit_price", "short_value", "excess_value", "erp_status", "variance_type"]
     with t_act:
-        if not guard():
-            pass
-        else:
+        if guard():
             st.markdown("**📥 Import ERP Balance** (Excel/CSV: ERP Code, Item Name, Size, ERP Balance)")
             up = st.file_uploader("ERP balance file", type=["xlsx", "xls", "csv"], key="erp_bal_file")
             if up and st.button("Import ERP balance", key="erp_bal_btn"):
@@ -1491,9 +1527,8 @@ def tab_erp_audit():
                     elif adjust_variance(row, aq):
                         done("Variance adjusted.")
 
-            st.markdown("---")
-            st.markdown("**📋 Assign correction task**")
-            if not vt.empty:
+                st.markdown("---")
+                st.markdown("**📋 Assign correction task**")
                 labels2 = {f"{r['item_name']} [{r['prod_id']}] | {r['factory_name']}": r for r in vt.to_dict("records")}
                 row2 = labels2[st.selectbox("Item for task", list(labels2), key="task_item")]
                 c1, c2, c3 = st.columns(3)
@@ -1505,15 +1540,15 @@ def tab_erp_audit():
                     if assign_task(row2["factory_name"], row2, officer, days, prio, rem):
                         done("Correction task assigned.")
 
-            st.markdown("---")
-            st.markdown("**✔️ Mark ERP status Done** (ERP Pending item)")
-            ep = aud[aud.erp_status == "ERP Pending"] if not aud.empty else aud
-            if not ep.empty:
-                labels3 = {f"{r['item_name']} [{r['size'] or '-'}] | {r['factory_name']}": r for r in ep.to_dict("records")}
-                row3 = labels3[st.selectbox("Item", list(labels3), key="grn_item")]
-                if st.button("Mark ERP GRN Done", key="grn_btn"):
-                    if set_grn_done_inv(row3["factory_name"], row3["sl_no"]):
-                        done("ERP status updated.")
+                st.markdown("---")
+                st.markdown("**✔️ Mark ERP status Done** (ERP Pending item)")
+                ep = aud[aud.erp_status == "ERP Pending"]
+                if not ep.empty:
+                    labels3 = {f"{r['item_name']} [{r['size'] or '-'}] | {r['factory_name']}": r for r in ep.to_dict("records")}
+                    row3 = labels3[st.selectbox("Item", list(labels3), key="grn_item")]
+                    if st.button("Mark ERP GRN Done", key="grn_btn"):
+                        if set_grn_done_inv(row3["factory_name"], row3["sl_no"]):
+                            done("ERP status updated.")
 
     with t_all:
         st.dataframe(aud[cols] if not aud.empty else aud, hide_index=True, use_container_width=True)
@@ -1588,7 +1623,8 @@ def tab_issue_ledger():
     c1, c2 = st.columns(2)
     item_txt = c1.text_input("Item Name", key="il_item")
     iss["_dt"] = iss.date.apply(parse_date)
-    months = sorted({d.strftime("%b-%Y") for d in iss["_dt"].dropna()}, key=lambda s: datetime.strptime(s, "%b-%Y"), reverse=True)
+    months = sorted({d.strftime("%b-%Y") for d in iss["_dt"].dropna()},
+                    key=lambda s: datetime.strptime(s, "%b-%Y"), reverse=True)
     if not months:
         st.info("Valid date record nei.")
         return
@@ -1652,17 +1688,12 @@ def edit_transfer(t, new_qty, date_s, time_s, notes):
 
 
 def tab_transfer_history():
-    tf = qdf(f"""SELECT id, transfer_ref, source_factory, dest_factory, prod_id, item_name, qty, transfer_date,
-                 transfer_time, initiated_by, status, notes FROM inter_factory_transfers
-                 WHERE 1=1{fw(FAC, '')[0].replace('factory_name', 'source_factory').replace(' AND ', ' AND ')
-                           if False else ''} ORDER BY id DESC""")
+    cols_sql = """SELECT id, transfer_ref, source_factory, dest_factory, prod_id, item_name, qty, transfer_date,
+                  transfer_time, initiated_by, status, notes FROM inter_factory_transfers"""
     if not FAC or "CONSOLIDATED" in FAC:
-        tf = qdf("""SELECT id, transfer_ref, source_factory, dest_factory, prod_id, item_name, qty, transfer_date,
-                    transfer_time, initiated_by, status, notes FROM inter_factory_transfers ORDER BY id DESC""")
+        tf = qdf(cols_sql + " ORDER BY id DESC")
     else:
-        tf = qdf("""SELECT id, transfer_ref, source_factory, dest_factory, prod_id, item_name, qty, transfer_date,
-                    transfer_time, initiated_by, status, notes FROM inter_factory_transfers
-                    WHERE source_factory=%s OR dest_factory=%s ORDER BY id DESC""", (FAC, FAC))
+        tf = qdf(cols_sql + " WHERE source_factory=%s OR dest_factory=%s ORDER BY id DESC", (FAC, FAC))
     term = st.text_input("🔍 Search (ref / item / code / factory / date)", key="tf_search")
     view = tf
     if term and not tf.empty:
@@ -1867,7 +1898,8 @@ def req_import_view():
     if st.button("✅ Import requisition", type="primary", disabled=not ok_rows, key="req_import_btn"):
         n = import_requisition(FAC, ok_rows, create)
         if n is not None:
-            done(f"Requisition import done: {len(ok_rows)} line(s), new inventory items {n}. Audit approved qty 0 - Executive approve korbe.")
+            done(f"Requisition import done: {len(ok_rows)} line(s), new inventory items {n}. "
+                 "Audit approved qty 0 - Executive approve korbe.")
 
 
 def sourcing_email(rows, fac_label, sender, role):
@@ -1950,23 +1982,24 @@ def tab_requisition():
     total_pending = sum(r["pending"] for r in rows)
     st.caption(f"Requisitions: {len(rows)} | Fully Received: {sum(r['calc_status'] == 'Fully Received' for r in rows)} | "
                f"Awaiting PO: {sum(not r['has_po'] and r['aud_qty'] > 0 for r in rows)} | Pending Qty: {total_pending:,.2f}")
-    if rows:
-        df = pd.DataFrame([{"ID": r["id"], "Factory": r["factory_name"], "Req No": r["req_no"], "Department": r["department"],
-                            "Req Date": r["req_date"], "Item": r["item_name"], "ERP Code": r["prod_id"], "Req Qty": r["req_qty"],
-                            "Audit Approved": r["aud_qty"], "Received": r["rec_qty"], "Pending": r["pending"],
-                            "PO Date": r["po_date"] or "Pending PO", "Status": r["calc_status"],
-                            "Delay (days)": r["delay"]} for r in rows])
-
-        def hl(row):
-            return ["background-color:#e8f5e9" if row["Status"] == "Fully Received" else
-                    "background-color:#fff8e1" if row["Status"] == "Partially Received" else
-                    "background-color:#fde8e8" if (not row["PO Date"] or row["PO Date"] == "Pending PO") and row["Delay (days)"] > PO_ALERT_DAYS and row["Audit Approved"] > 0
-                    else "" for _ in row]
-        st.dataframe(df.style.apply(hl, axis=1), hide_index=True, use_container_width=True)
-        export_buttons(df, "requisition_tracking")
-    else:
+    if not rows:
         st.info("Requisition nei.")
         return
+    df = pd.DataFrame([{"ID": r["id"], "Factory": r["factory_name"], "Req No": r["req_no"], "Department": r["department"],
+                        "Req Date": r["req_date"], "Item": r["item_name"], "ERP Code": r["prod_id"], "Req Qty": r["req_qty"],
+                        "Audit Approved": r["aud_qty"], "Received": r["rec_qty"], "Pending": r["pending"],
+                        "PO Date": r["po_date"] or "Pending PO", "Status": r["calc_status"],
+                        "Delay (days)": r["delay"]} for r in rows])
+
+    def hl(row):
+        late = (row["PO Date"] == "Pending PO") and row["Delay (days)"] > PO_ALERT_DAYS and row["Audit Approved"] > 0
+        color = ("#e8f5e9" if row["Status"] == "Fully Received" else
+                 "#fff8e1" if row["Status"] == "Partially Received" else
+                 "#fde8e8" if late else "")
+        return [f"background-color:{color}" if color else "" for _ in row]
+
+    st.dataframe(df.style.apply(hl, axis=1), hide_index=True, use_container_width=True)
+    export_buttons(df, "requisition_tracking")
 
     labels = {f"ID {r['id']} | {r['req_no']} | {r['item_name']}": r for r in rows}
     r = labels[st.selectbox("Select requisition", list(labels), key="req_sel")]
@@ -1995,7 +2028,8 @@ def tab_requisition():
             with st.form(f"req_edit_{k}"):
                 c1, c2, c3 = st.columns(3)
                 no = c1.text_input("Requisition No", r["req_no"] or "", key=f"rn_{k}")
-                dept = c2.selectbox("Department", DEPARTMENTS, index=DEPARTMENTS.index(r["department"]) if r["department"] in DEPARTMENTS else 0, key=f"rdp_{k}")
+                dept = c2.selectbox("Department", DEPARTMENTS,
+                                    index=DEPARTMENTS.index(r["department"]) if r["department"] in DEPARTMENTS else 0, key=f"rdp_{k}")
                 rdate = c3.text_input("Req Date (DD-Mon-YYYY)", r["req_date"] or "", key=f"rdt_{k}")
                 qty = c1.number_input("Req Qty", min_value=0.0, value=float(r["req_qty"]), key=f"rqty_{k}")
                 item = c2.text_input("Item", r["item_name"] or "", key=f"ri_{k}")
@@ -2112,7 +2146,7 @@ def tab_repair():
                 supplier = c3.text_input("Supplier", r["supplier_name"] or "", key=f"rsu_{k}")
                 sent = c1.text_input("Sent Date (DD-Mon-YYYY)", r["sent_date"] or "", key=f"rse_{k}")
                 status = c2.selectbox("Status", ["Pending Return", "Returned", "Closed"], key=f"rst_{k}")
-                ret = c3.text_input("Return Date (blank = not returned)", "" if r["return_date"] in (None, "") else r["return_date"], key=f"rre_{k}")
+                ret = c3.text_input("Return Date (blank = not returned)", r["return_date"] or "", key=f"rre_{k}")
                 upd = st.form_submit_button("✏️ Update")
             if upd:
                 if not parse_date(sent):
@@ -2126,7 +2160,7 @@ def tab_repair():
 
 
 # ============================================================
-#  TAB 8 - LEDGER (all transactions with value)
+#  TAB 8 - LEDGER
 # ============================================================
 def tab_ledger():
     led = qdf(f"""SELECT t.factory_name, t.officer_name, t.sl_no, t.prod_id, t.item_name, t.qty, t.trans_type, t.notes,
@@ -2137,7 +2171,8 @@ def tab_ledger():
         led["type"] = led.trans_type.map(lambda c: TRANS_LABELS.get(c, c))
         led["total_price"] = (led.qty * led.unit_price).round(2)
         led["date_time"] = led[["date", "time"]].fillna("").agg(" ".join, axis=1)
-        led = led[["factory_name", "officer_name", "sl_no", "prod_id", "item_name", "qty", "type", "total_price", "notes", "date_time"]]
+        led = led[["factory_name", "officer_name", "sl_no", "prod_id", "item_name", "qty", "type",
+                   "total_price", "notes", "date_time"]]
     st.dataframe(led, hide_index=True, use_container_width=True)
     export_buttons(led, "ledger")
 
@@ -2187,7 +2222,8 @@ def compute_forecast(mi):
     plans = {(p["factory_name"], p["plan_month"]): float(p["plan_qty"] or 0)
              for p in q("SELECT factory_name, plan_month, plan_qty FROM production_plans")}
     out = []
-    for r in q(f"SELECT factory_name, sl_no, prod_id, item_name, COALESCE(current_stock,0) AS stock, COALESCE(unit_price,0) AS price FROM inventory WHERE 1=1{FSQL}", FP):
+    for r in q(f"""SELECT factory_name, sl_no, prod_id, item_name, COALESCE(current_stock,0) AS stock,
+                   COALESCE(unit_price,0) AS price FROM inventory WHERE 1=1{FSQL}""", FP):
         k = (r["factory_name"], r["sl_no"])
         cur_p = plans.get((r["factory_name"], mi["cur_key"]), 0)
         nxt_p = plans.get((r["factory_name"], mi["next_key"]), 0)
@@ -2200,7 +2236,8 @@ def compute_forecast(mi):
                     "Current Stock": round(float(r["stock"]), 2), "Current Month Cons.": round(cur_c.get(k, 0), 2),
                     "Last 3M Cons.": round(l3_c.get(k, 0), 2), "Avg Daily": round(avg, 3),
                     "Next Month Projected": round(proj, 2), "Factor": round(factor, 2),
-                    "Net Requisition": net, "Unit Price": float(r["price"]), "Est. Cost": round(net * float(r["price"]), 2)})
+                    "Net Requisition": net, "Unit Price": float(r["price"]),
+                    "Est. Cost": round(net * float(r["price"]), 2)})
     return pd.DataFrame(out)
 
 
@@ -2212,8 +2249,10 @@ def tab_forecast():
         cp = plans.get((FAC, mi["cur_key"]), {})
         npn = plans.get((FAC, mi["next_key"]), {})
         c1, c2, c3 = st.columns([1, 1, 2])
-        cur_q = c1.number_input("Current month plan (pcs)", min_value=0.0, step=100.0, value=float(cp.get("plan_qty") or 0), key="fc_cur")
-        next_q = c2.number_input("Next month plan (pcs)", min_value=0.0, step=100.0, value=float(npn.get("plan_qty") or 0), key="fc_next")
+        cur_q = c1.number_input("Current month plan (pcs)", min_value=0.0, step=100.0,
+                                value=float(cp.get("plan_qty") or 0), key="fc_cur")
+        next_q = c2.number_input("Next month plan (pcs)", min_value=0.0, step=100.0,
+                                 value=float(npn.get("plan_qty") or 0), key="fc_next")
         note = c3.text_input("Plan remarks (e.g. Denim Pant)", (npn.get("plan_note") or cp.get("plan_note") or ""), key="fc_note")
         if cur_q > 0 and next_q > 0:
             f = next_q / cur_q
@@ -2233,9 +2272,11 @@ def tab_forecast():
     if only and not fc.empty:
         fc = fc[(fc["Current Month Cons."] > 0) | (fc["Last 3M Cons."] > 0)]
     if term and not fc.empty:
-        fc = fc[fc["Item"].str.lower().str.contains(term.lower(), regex=False) | fc["ERP Code"].astype(str).str.lower().str.contains(term.lower(), regex=False)]
-    fc = fc.sort_values("Est. Cost", ascending=False) if not fc.empty else fc
+        t_low = term.lower()
+        fc = fc[fc["Item"].str.lower().str.contains(t_low, regex=False)
+                | fc["ERP Code"].astype(str).str.lower().str.contains(t_low, regex=False)]
     if not fc.empty:
+        fc = fc.sort_values("Est. Cost", ascending=False)
         st.caption(f"Items: {len(fc)} | Need requisition: {int((fc['Net Requisition'] > 0).sum())} | "
                    f"Total net qty: {fc['Net Requisition'].sum():,.0f} | Est. cost: {fc['Est. Cost'].sum():,.2f} BDT")
     st.dataframe(fc, hide_index=True, use_container_width=True)
@@ -2249,10 +2290,11 @@ def tab_forecast():
 # ============================================================
 def tab_budget():
     bud = qdf(f"SELECT factory_name, department_name, category_name, allocated_budget FROM category_budgets WHERE 1=1{FSQL}", FP)
-    cost = {(r["factory_name"], r["category"]): float(r["cost"] or 0) for r in q(f"""
-            SELECT t.factory_name, i.category, SUM(t.qty*i.unit_price) AS cost
-            FROM transactions t JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
-            WHERE t.trans_type IN ('Issued','Internal Issue'){fw(FAC, 't.')[0]} GROUP BY t.factory_name, i.category""", FP)}
+    cost_rows = q(f"""SELECT t.factory_name, i.category, SUM(t.qty*i.unit_price) AS cost
+                      FROM transactions t JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
+                      WHERE t.trans_type IN ('Issued','Internal Issue'){fw(FAC, 't.')[0]}
+                      GROUP BY t.factory_name, i.category""", FP)
+    cost = {(r["factory_name"], r["category"]): float(r["cost"] or 0) for r in cost_rows}
     if bud.empty:
         st.info("Budget nei.")
         return
@@ -2290,10 +2332,12 @@ def autoset_uom_once():
 
     @tx
     def _do():
-        for r in q("SELECT sl_no, factory_name, item_name, COALESCE(current_stock,0) AS stock, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit FROM inventory"):
+        for r in q("""SELECT sl_no, factory_name, item_name, COALESCE(current_stock,0) AS stock,
+                      COALESCE(NULLIF(unit_name,''),'Pcs') AS unit FROM inventory"""):
             if r["unit"] == "Pcs" and guess_uom(r["item_name"], r["stock"]) == "Kg":
                 run("UPDATE inventory SET unit_name='Kg' WHERE sl_no=%s AND factory_name=%s", (r["sl_no"], r["factory_name"]))
-        run("INSERT INTO req_settings (setting_key, setting_value) VALUES ('uom_autoset_v1','done') ON CONFLICT (setting_key) DO UPDATE SET setting_value='done'")
+        run("""INSERT INTO req_settings (setting_key, setting_value) VALUES ('uom_autoset_v1','done')
+               ON CONFLICT (setting_key) DO UPDATE SET setting_value='done'""")
         return True
     _do()
 
@@ -2335,20 +2379,25 @@ def sheet_html(d, fac, df, auto):
     body = ""
     for _, r in df.iterrows():
         cls = "short" if r["Short Qty"] > 0 else ("excess" if r["Excess Qty"] > 0 else "")
-        body += (f"<tr class='{cls}'><td>{r['SL No.']}</td><td style='text-align:left'>{esc(str(r['Item Name']))}</td>"
-                 f"<td>{esc(str(r['Size'] or '-'))}</td><td>{esc(str(r['Unit']))}</td><td>{r['Current Stock']:g}</td>"
-                 f"<td>{r['Daily Issue']:g if auto else ''}</td><td>{r['Daily Received']:g if auto else ''}</td>"
+        issue_txt = f"{r['Daily Issue']:g}" if auto else ""
+        recv_txt = f"{r['Daily Received']:g}" if auto else ""
+        body += (f"<tr class='{cls}'><td>{r['SL No.']}</td>"
+                 f"<td style='text-align:left'>{esc(str(r['Item Name']))}</td>"
+                 f"<td>{esc(str(r['Size'] or '-'))}</td><td>{esc(str(r['Unit']))}</td>"
+                 f"<td>{r['Current Stock']:g}</td><td>{issue_txt}</td><td>{recv_txt}</td>"
                  f"<td>{r['Short Qty']:g}</td><td>{r['Excess Qty']:g}</td></tr>")
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Daily Work Sheet</title>
 <style>@page {{ size: A4 portrait; margin: 10mm; }} body {{ font-family: Arial; font-size: 11px; }}
 h2 {{ text-align:center; color:#1b3b6f; margin:0; }} p {{ text-align:center; margin:4px 0 10px; }}
-table {{ width:100%; border-collapse:collapse; }} th {{ background:#1b3b6f; color:#fff; padding:4px; border:1px solid #333; }}
-td {{ border:1px solid #333; padding:3px 4px; text-align:center; }} tr.short td {{ background:#fde8e8; }}
-tr.excess td {{ background:#fff3e0; }}</style></head><body>
+table {{ width:100%; border-collapse:collapse; }}
+th {{ background:#1b3b6f; color:#fff; padding:4px; border:1px solid #333; }}
+td {{ border:1px solid #333; padding:3px 4px; text-align:center; }}
+tr.short td {{ background:#fde8e8; }} tr.excess td {{ background:#fff3e0; }}</style></head><body>
 <h2>Daily Issue Status For Month: {d.strftime('%B-%Y')}</h2>
 <p><b>Date:</b> {d.strftime(DATE_FMT)} &nbsp; <b>Factory Name:</b> {esc(fac)}</p>
 <table><thead><tr><th>SL No.</th><th>Item Name</th><th>Size</th><th>Unit</th><th>Current Stock</th>
-<th>Daily Issue</th><th>Daily Received</th><th>Short Qty</th><th>Excess Qty</th></tr></thead><tbody>{body}</tbody></table>
+<th>Daily Issue</th><th>Daily Received</th><th>Short Qty</th><th>Excess Qty</th></tr></thead>
+<tbody>{body}</tbody></table>
 </body></html>"""
 
 
@@ -2360,9 +2409,10 @@ def tab_daily_sheet():
     auto = c4.checkbox("Auto-fill issue/received", key="ds_auto")
     df = daily_rows(d, fac, show_all)
     st.markdown(f"### Daily Issue Status For Month: {d.strftime('%B-%Y')}")
+    n_short = int((df["Short Qty"] > 0).sum()) if not df.empty else 0
+    n_exc = int((df["Excess Qty"] > 0).sum()) if not df.empty else 0
     st.caption(f"Date: {d.strftime(DATE_FMT)} | Factory: {fac} | SL No = Master Inventory SL (same as Transactions). "
-               f"Items: {len(df)} | Short: {int((df['Short Qty'] > 0).sum()) if not df.empty else 0} | "
-               f"Excess: {int((df['Excess Qty'] > 0).sum()) if not df.empty else 0}")
+               f"Items: {len(df)} | Short: {n_short} | Excess: {n_exc}")
     view = df.copy()
     if not auto and not view.empty:
         view["Daily Issue"] = None
@@ -2391,42 +2441,46 @@ except Exception as e:
     st.error(f"Cloud database-e connect kora jacche na: {e}")
     st.stop()
 
-st.title("📦 KC & Windy Smart Stock Tracker & Budget Control")
-st.caption("Designed & Created By: MD. Sagor Ali")
 show_flash()
 sidebar_login()
 
 with st.sidebar:
+    st.markdown("### 🏭 Factory")
+    FAC = st.selectbox("Active factory", FACTORIES + [ALL_VIEW], key="factory", label_visibility="collapsed")
     st.markdown("---")
-    FAC = st.selectbox("🏭 Active Factory", FACTORIES + [ALL_VIEW], key="factory")
+    st.caption("📌 CONSOLIDATED view shudhu dekhar jonno. Entry-r jonno specific factory bachun.")
 
 FSQL, FP = fw(FAC)
-FSQL_T, _ = fw(FAC, "t.")
 is_cons_view = "CONSOLIDATED" in FAC
 autoset_uom_once()
 
-st.session_state.setdefault("role", "Guest")
-tabs = st.tabs(["[1] TRANSACTIONS", "[2] INVENTORY", "[3] ERP AUDIT", "[4] ISSUE LEDGER", "[5] TRANSFER HISTORY",
-                "[6] REQUISITION", "[7] REPAIR", "[8] LEDGER", "[9] FORECAST", "[10] BUDGET", "[11] DAILY WORK SHEET"])
-with tabs[0]:
-    tab_transactions()
-with tabs[1]:
-    tab_inventory()
-with tabs[2]:
-    tab_erp_audit()
-with tabs[3]:
-    tab_issue_ledger()
-with tabs[4]:
-    tab_transfer_history()
-with tabs[5]:
-    tab_requisition()
-with tabs[6]:
-    tab_repair()
-with tabs[7]:
-    tab_ledger()
-with tabs[8]:
-    tab_forecast()
-with tabs[9]:
-    tab_budget()
-with tabs[10]:
-    tab_daily_sheet()
+st.markdown(f"""
+<div class="app-header">
+    <h1>KC &amp; WINDY SMART STOCK TRACKER &amp; BUDGET CONTROL</h1>
+    <p>Designed &amp; Created By: MD. Sagor Ali</p>
+</div>
+<div class="factory-bar">🏭 Active View: {html_lib.escape(FAC)}</div>
+""", unsafe_allow_html=True)
+
+try:
+    kpi = q(f"""SELECT COUNT(*) AS items,
+                       COALESCE(SUM(COALESCE(current_stock,0)*COALESCE(unit_price,0)),0) AS stock_value,
+                       SUM(CASE WHEN current_stock <= 5 THEN 1 ELSE 0 END) AS alerts
+                FROM inventory WHERE 1=1{FSQL}""", FP)[0]
+    bud = q(f"SELECT COALESCE(SUM(allocated_budget),0) AS b FROM category_budgets WHERE 1=1{FSQL}", FP)[0]["b"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("TOTAL ITEMS", int(kpi["items"] or 0))
+    c2.metric("STOCK VALUE (BDT)", f"{float(kpi['stock_value']):,.0f}")
+    c3.metric("ALLOCATED BUDGET (BDT)", f"{float(bud):,.0f}")
+    c4.metric("LOW / NEGATIVE STOCK", int(kpi["alerts"] or 0))
+except Exception as e:
+    st.warning(f"Summary load kora jacche na: {e}")
+
+TAB_NAMES = ["[1] TRANSACTIONS", "[2] INVENTORY", "[3] ERP AUDIT", "[4] ISSUE LEDGER", "[5] TRANSFER HISTORY",
+             "[6] REQUISITION", "[7] REPAIR", "[8] LEDGER", "[9] FORECAST", "[10] BUDGET", "[11] DAILY WORK SHEET"]
+RENDERERS = [tab_transactions, tab_inventory, tab_erp_audit, tab_issue_ledger, tab_transfer_history,
+             tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet]
+tabs = st.tabs(TAB_NAMES)
+for t, fn in zip(tabs, RENDERERS):
+    with t:
+        fn()
