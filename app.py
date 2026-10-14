@@ -1,5 +1,6 @@
 # ============================================================
-#  KC & Windy Smart Stock Tracker & Budget Control - Streamlit
+#  KC & Windy Smart Stock Tracker & Budget Control
+#  Executive Streamlit Edition
 # ============================================================
 import calendar
 import difflib
@@ -19,38 +20,82 @@ import streamlit as st
 
 st.set_page_config(page_title="KC & Windy Stock Tracker", page_icon="📦", layout="wide")
 
+# ============================================================
+#  STYLING (Inter font, cards, shadows, sidebar login)
+# ============================================================
 st.markdown("""
 <style>
-    .stApp { background: #f4f6f9; }
-    .block-container { padding-top: 1.2rem; max-width: 98%; }
-    .app-header {
-        background: #1b3b6f; color: white; text-align: center;
-        padding: 10px 12px 8px 12px; border-radius: 6px; margin-bottom: 8px;
-    }
-    .app-header h1 { color: white; font-size: 22px; margin: 0; letter-spacing: 0.5px; }
-    .app-header p { color: #a0c4ff; font-size: 12px; font-style: italic; margin: 2px 0 0 0; }
-    .factory-bar {
-        background: #d9e2ec; color: #1b3b6f; font-weight: 700;
-        padding: 6px 12px; border-radius: 4px; margin-bottom: 8px; font-size: 13px;
-    }
-    div[data-testid="stMetric"] {
-        background: white; border: 1px solid #d0d7e2; border-top: 3px solid #1b3b6f;
-        padding: 8px 12px; border-radius: 4px;
-    }
-    div[data-testid="stMetricLabel"] { color: #1b3b6f; font-weight: 700; font-size: 12px; }
-    div[data-testid="stMetricValue"] { color: #1b3b6f; font-size: 20px; }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 2px; background: #e0e0e0; padding: 3px 3px 0 3px; border-radius: 4px 4px 0 0;
-    }
-    .stTabs [data-baseweb="tab"] {
-        font-weight: 700; font-size: 12px; padding: 6px 10px; background: #e0e0e0; color: #333;
-    }
-    .stTabs [aria-selected="true"] { background: #1b3b6f !important; color: white !important; }
-    .stTabs [data-baseweb="tab-highlight"] { display: none; }
-    .stDataFrame { border: 1px solid #d0d7e2; border-radius: 4px; background: white; }
-    section[data-testid="stSidebar"] { background: #2d3748; }
-    section[data-testid="stSidebar"] * { color: #e2e8f0; }
-    section[data-testid="stSidebar"] div[data-baseweb="select"] * { color: #1a202c; }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+html, body, [class*="css"], .stApp { font-family: 'Inter', sans-serif !important; }
+.stApp { background: #f1f5f9; }
+.block-container { padding-top: 1.4rem; padding-bottom: 2rem; max-width: 1400px; }
+
+.app-header {
+    background: linear-gradient(135deg, #0f2a5c 0%, #1e4fa3 100%);
+    border-radius: 16px; padding: 22px 28px; color: #fff; margin-bottom: 18px;
+    box-shadow: 0 10px 30px rgba(15, 42, 92, .25);
+    display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;
+}
+.app-header h1 { color: #fff; font-size: 22px; font-weight: 800; margin: 0; letter-spacing: .3px; }
+.app-header p { color: #bfdbfe; font-size: 12.5px; margin: 4px 0 0 0; }
+.badge {
+    background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.25);
+    padding: 6px 14px; border-radius: 999px; font-size: 12px; font-weight: 600; color: #fff;
+}
+.section-title {
+    font-size: 13px; font-weight: 700; color: #0f172a; text-transform: uppercase;
+    letter-spacing: .6px; margin: 6px 0 10px 0;
+}
+.card {
+    background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 18px 20px;
+    box-shadow: 0 4px 18px rgba(15, 23, 42, .06); margin-bottom: 16px;
+}
+div[data-testid="stMetric"] {
+    background: #fff; border: 1px solid #e2e8f0; border-top: 4px solid #1e4fa3; border-radius: 14px;
+    padding: 16px 18px; box-shadow: 0 4px 18px rgba(15, 23, 42, .06);
+}
+div[data-testid="stMetricLabel"] p { color: #475569 !important; font-weight: 600; font-size: 12.5px; }
+div[data-testid="stMetricValue"] { color: #0f172a; font-weight: 800; }
+.bar-wrap { background: #e2e8f0; border-radius: 999px; height: 18px; overflow: hidden; margin: 6px 0 4px 0; }
+.bar-fill { height: 100%; border-radius: 999px; transition: width .6s ease; }
+.bar-label { font-size: 13px; color: #334155; font-weight: 600; display: flex; justify-content: space-between; }
+
+.stTabs [data-baseweb="tab-list"] { gap: 4px; background: #e2e8f0; padding: 4px; border-radius: 12px; }
+.stTabs [data-baseweb="tab"] { font-weight: 600; font-size: 12.5px; padding: 8px 12px; border-radius: 9px; color: #334155; }
+.stTabs [aria-selected="true"] { background: #1e4fa3 !important; color: #fff !important; }
+.stTabs [data-baseweb="tab-highlight"] { display: none; }
+.stDataFrame { border-radius: 12px; overflow: hidden; box-shadow: 0 2px 10px rgba(15, 23, 42, .05); }
+.stButton > button { border-radius: 9px; font-weight: 600; border: 1px solid #cbd5e1; }
+.stButton > button[kind="primary"] { background: #1e4fa3; border-color: #1e4fa3; color: #fff; }
+
+section[data-testid="stSidebar"] { background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%); }
+section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] h3 { color: #e2e8f0 !important; }
+section[data-testid="stSidebar"] div[data-baseweb="input"],
+section[data-testid="stSidebar"] div[data-baseweb="base-input"] {
+    background: #ffffff !important; border: 1px solid #cbd5e1 !important; border-radius: 10px !important;
+}
+section[data-testid="stSidebar"] div[data-baseweb="input"]:focus-within {
+    border-color: #3b82f6 !important; box-shadow: 0 0 0 3px rgba(59, 130, 246, .35) !important;
+}
+section[data-testid="stSidebar"] input {
+    color: #0f172a !important; padding: 9px 12px !important; font-size: 14px !important;
+    -webkit-text-security: none;
+}
+section[data-testid="stSidebar"] input::placeholder { color: #94a3b8 !important; }
+section[data-testid="stSidebar"] div[data-baseweb="select"] > div {
+    background: #fff !important; border-radius: 10px !important;
+}
+section[data-testid="stSidebar"] div[data-baseweb="select"] span { color: #0f172a !important; }
+section[data-testid="stSidebar"] form {
+    background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.12);
+    border-radius: 14px; padding: 14px;
+}
+section[data-testid="stSidebar"] form button {
+    background: #3b82f6; color: #fff; border: none; border-radius: 10px; font-weight: 700; width: 100%;
+}
+section[data-testid="stSidebar"] form button:hover { background: #2563eb; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -65,6 +110,7 @@ RECEIPT_TYPES = ("Supplier. Rec", "Internal Rec", "Stock Adjustment (+)")
 ADJ_OUT = "Stock Adjustment (-)"
 COOLDOWN_DAYS = 3
 PO_ALERT_DAYS = 7
+BUDGET_ALERT_PCT = 85
 DEPARTMENTS = ["Maintenance", "Warehouse", "Admin, HR & Compliance", "Lab"]
 CATEGORIES = ["Maintenance Spare Parts", "Electrical Accessories", "Utilities Spare Parts", "Stationeries Items",
               "Production Consumable Items", "Safety and Security", "Cleaning Goods", "Furniture Accessories",
@@ -104,9 +150,18 @@ VERDICT = {"FOUND": "✔ FOUND", "SIZE_MISSING": "⚠ SIZE NOT IN LIST", "CODE_M
 #  DATABASE
 # ============================================================
 @st.cache_resource(show_spinner=False)
-def get_conn():
-    conn = psycopg2.connect(st.secrets["DB_URL"])
+def _connect():
+    conn = psycopg2.connect(st.secrets["DB_URL"], connect_timeout=10)
     conn.autocommit = False
+    return conn
+
+
+def get_conn():
+    """Returns a live connection; reconnects automatically if the old one was dropped."""
+    conn = _connect()
+    if conn.closed:
+        _connect.clear()
+        conn = _connect()
     return conn
 
 
@@ -227,15 +282,18 @@ def init_db():
         with conn.cursor() as cur:
             for s in ddl:
                 cur.execute(s)
-            cur.execute("SELECT COUNT(*) FROM users")
-            if cur.fetchone()[0] == 0:
-                cur.executemany("INSERT INTO users (username, password, role, full_name) VALUES (%s,%s,%s,%s)", [
-                    ("Officer_Sagor", hash_password("sagor123"), "Store Officer", "Md. Sagor Ali"),
-                    ("Officer_Rahim", hash_password("rahim123"), "Store Officer", "Abdul Rahim"),
-                    ("Store_Manager", hash_password("windy123"), "Store Manager", "Manager Admin"),
-                    ("Auditor_User", hash_password("audit2026"), "Auditor", "External Auditor"),
-                    ("Executive_Sattar", hash_password("sattar123"), "Executive", "Mr. Sattar"),
-                ])
+            default_users = [
+                ("Officer_Sagor", "sagor123", "Store Officer", "Md. Sagor Ali"),
+                ("Officer_Rahim", "rahim123", "Store Officer", "Abdul Rahim"),
+                ("Store_Manager", "windy123", "Store Manager", "Manager Admin"),
+                ("Auditor_User", "audit2026", "Auditor", "External Auditor"),
+                ("Executive_Sattar", "sattar123", "Executive", "Mr. Sattar"),
+            ]
+            for uname, pw, role, full in default_users:   # adds any missing default account
+                cur.execute("SELECT 1 FROM users WHERE username=%s", (uname,))
+                if not cur.fetchone():
+                    cur.execute("INSERT INTO users (username, password, role, full_name) VALUES (%s,%s,%s,%s)",
+                                (uname, hash_password(pw), role, full))
             cur.execute("SELECT COUNT(*) FROM category_budgets")
             if cur.fetchone()[0] == 0:
                 budgets = [
@@ -312,7 +370,7 @@ def log_event(action, details):
 
 
 def done(msg):
-    """Success message survives the rerun."""
+    """Success message survives the rerun, so the screen refreshes cleanly."""
     st.session_state["flash"] = msg
     st.rerun()
 
@@ -333,27 +391,31 @@ def mgr_check(key):
 
 def sidebar_login():
     with st.sidebar:
-        st.markdown("### 🔐 Login")
+        st.markdown("### 🔐 Secure Login")
         if st.session_state.get("user"):
-            st.success(f"{st.session_state['user']} [{st.session_state['role']}]")
-            if st.button("🚪 Logout"):
+            st.success(f"Logged in: **{st.session_state['user']}**\n\nRole: {st.session_state.get('role', '-')}")
+            if st.button("🚪 Logout", use_container_width=True):
                 log_event("LOGOUT", f"User {st.session_state['user']} logged out.")
                 st.session_state.pop("user", None)
                 st.session_state.pop("role", None)
-                done("Logged out.")
+                done("Logged out successfully.")
         else:
-            with st.form("login_form"):
-                u = st.text_input("Username")
-                p = st.text_input("Password", type="password")
-                if st.form_submit_button("Login"):
+            with st.form("login_form", clear_on_submit=False):
+                u = st.text_input("Username", placeholder="Username likhun", key="login_user")
+                p = st.text_input("Password", type="password", placeholder="Password likhun", key="login_pass")
+                submitted = st.form_submit_button("Sign in")
+            if submitted:
+                if not u.strip() or not p:
+                    st.error("Username ar password dui-i din.")
+                else:
                     r = q("SELECT password, role FROM users WHERE username=%s", (u.strip(),))
-                    if r and verify_password(r[0]["password"], p.strip()):
+                    if r and verify_password(r[0]["password"], p):
                         st.session_state["user"] = u.strip()
                         st.session_state["role"] = r[0]["role"]
                         log_event("LOGIN", f"User {u.strip()} logged in as {r[0]['role']}.")
-                        done(f"Welcome {u.strip()}!")
+                        done(f"Welcome, {u.strip()}!")
                     else:
-                        st.error("Username ba password vul")
+                        st.error("Username ba password vul.")
 
 
 # ============================================================
@@ -513,6 +575,13 @@ def backup_zip():
         for t in tables:
             z.writestr(f"{t}.csv", qdf(f'SELECT * FROM "{t}"').to_csv(index=False))
     return buf.getvalue()
+
+
+def budget_bar_html(pct):
+    width = min(max(pct, 0), 100)
+    color = "#16a34a" if pct < 70 else ("#f59e0b" if pct <= BUDGET_ALERT_PCT else "#dc2626")
+    return (f'<div class="bar-label"><span>Budget consumption</span><span>{pct:.1f}%</span></div>'
+            f'<div class="bar-wrap"><div class="bar-fill" style="width:{width:.1f}%;background:{color};"></div></div>')
 
 
 # ============================================================
@@ -851,10 +920,90 @@ def guard(write=True):
     if write and st.session_state.get("role") == "Auditor":
         st.error("Auditor role read-only.")
         return False
-    if write and "CONSOLIDATED" in st.session_state.get("factory", ""):
+    if write and "CONSOLIDATED" in FAC:
         st.error("CONSOLIDATED view-te edit kora jabe na. Specific factory select korun.")
         return False
     return True
+
+
+# ============================================================
+#  HOME - EXECUTIVE DASHBOARD & BUDGET
+# ============================================================
+def tab_dashboard():
+    cur_label = datetime.now().strftime("%b-%Y")
+    cons = qdf(f"""SELECT t.factory_name, t.date, t.qty, COALESCE(i.unit_price,0) AS price,
+                   COALESCE(i.category,'') AS category
+                   FROM transactions t JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
+                   WHERE t.trans_type IN ('Issued','Internal Issue'){fw(FAC, 't.')[0]}""", FP)
+    bud = qdf(f"SELECT factory_name, category_name, allocated_budget FROM category_budgets WHERE 1=1{FSQL}", FP)
+
+    if not cons.empty:
+        cons["qty"] = cons["qty"].astype(float)
+        cons["price"] = cons["price"].astype(float)
+        cons["cost"] = cons["qty"] * cons["price"]
+        cons["month"] = cons["date"].apply(lambda s: parse_date(s).strftime("%b-%Y") if parse_date(s) else "")
+    else:
+        cons = pd.DataFrame(columns=["factory_name", "date", "qty", "price", "category", "cost", "month"])
+
+    months = {m for m in cons["month"] if m}
+    options = ["All time"] + sorted(months | {cur_label}, key=lambda s: datetime.strptime(s, "%b-%Y"), reverse=True)
+
+    top_l, top_r = st.columns([3, 1])
+    with top_l:
+        st.markdown('<div class="section-title">Executive Dashboard · Budget Control</div>', unsafe_allow_html=True)
+    with top_r:
+        period = st.selectbox("Period", options, index=options.index(cur_label), key="dash_period", label_visibility="collapsed")
+
+    view = cons if period == "All time" else cons[cons["month"] == period]
+    total_budget = float(bud["allocated_budget"].astype(float).sum()) if not bud.empty else 0.0
+    consumption = float(view["cost"].sum()) if not view.empty else 0.0
+    remaining = total_budget - consumption
+    pct = (consumption / total_budget * 100) if total_budget > 0 else 0.0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Monthly Budget", f"৳ {total_budget:,.0f}")
+    c2.metric("Total Consumption Cost", f"৳ {consumption:,.0f}")
+    c3.metric("Expense % of Budget", f"{pct:.1f}%")
+    c4.metric("Remaining Balance", f"৳ {remaining:,.0f}")
+
+    st.markdown('<div class="card">' + budget_bar_html(pct) + '</div>', unsafe_allow_html=True)
+
+    if total_budget <= 0:
+        st.info("Budget set kora nei. Budget module-e allocation dhukan.")
+    elif pct > 100:
+        st.error(f"🚨 BUDGET EXCEEDED: Consumption {pct:.1f}% - budget ৳ {abs(remaining):,.0f} beshi kharc hoyeche. "
+                 "Turant review korun.")
+    elif pct > BUDGET_ALERT_PCT:
+        st.warning(f"⚠️ OPERATIONAL ALERT: Budget consumption {pct:.1f}% (সীমা {BUDGET_ALERT_PCT}%). "
+                   "Baki budget ৳ {:,.0f}. Issue-er agey approval nin.".format(max(remaining, 0)))
+    else:
+        st.success(f"✅ Budget safe: consumption {pct:.1f}% (alert limit {BUDGET_ALERT_PCT}%).")
+
+    if period == "All time":
+        st.caption("All time view: budget monthly, kintu consumption shob mash-er. Ei percentage shudhu tulona-er jonno.")
+
+    # Category-wise budget vs consumption
+    bud_g = (bud.groupby(["factory_name", "category_name"], as_index=False)["allocated_budget"].sum()
+             if not bud.empty else pd.DataFrame(columns=["factory_name", "category_name", "allocated_budget"]))
+    bud_g.columns = ["Factory", "Category", "Budget"]
+    cons_g = (view.groupby(["factory_name", "category"], as_index=False)["cost"].sum()
+              if not view.empty else pd.DataFrame(columns=["factory_name", "category", "cost"]))
+    cons_g.columns = ["Factory", "Category", "Consumption"]
+    cat = bud_g.merge(cons_g, on=["Factory", "Category"], how="outer")
+    cat[["Budget", "Consumption"]] = cat[["Budget", "Consumption"]].fillna(0).astype(float)
+    cat["Remaining"] = cat["Budget"] - cat["Consumption"]
+    if not cat.empty:
+        cat["Used %"] = cat.apply(lambda r: (r["Consumption"] / r["Budget"] * 100) if r["Budget"] > 0
+                                  else (100.0 if r["Consumption"] > 0 else 0.0), axis=1)
+        cat = cat.sort_values("Consumption", ascending=False)
+
+    st.markdown('<div class="section-title">Category-wise Budget vs Consumption</div>', unsafe_allow_html=True)
+    st.dataframe(cat, hide_index=True, use_container_width=True, column_config={
+        "Budget": st.column_config.NumberColumn("Budget (৳)", format="%.0f"),
+        "Consumption": st.column_config.NumberColumn("Consumption (৳)", format="%.0f"),
+        "Remaining": st.column_config.NumberColumn("Remaining (৳)", format="%.0f"),
+        "Used %": st.column_config.ProgressColumn("Used %", format="%.1f%%", min_value=0, max_value=100),
+    })
 
 
 # ============================================================
@@ -933,7 +1082,7 @@ def tab_transactions():
     fac, fsql, fp = FAC, FSQL, FP
     left, right = st.columns([1, 2])
     with left:
-        st.markdown("#### 📝 New Transaction")
+        st.markdown('<div class="section-title">New Transaction</div>', unsafe_allow_html=True)
         st.text_input("Authenticated Officer", value=st.session_state.get("user", "-"), disabled=True)
         if is_cons_view:
             st.warning("CONSOLIDATED view-te entry hoy na. Sidebar theke factory select korun.")
@@ -953,7 +1102,6 @@ def tab_transactions():
                 if item is None:
                     st.error("Item paoa jay nai" if not cands else f"{len(cands)} ta item match kore - exact SL No likhun")
 
-        # FIX: options are labels, lookup is label -> code
         type_label = st.selectbox("Transaction Type", list(TRANS_CODES), key="tx_type")
         ttype = TRANS_CODES[type_label]
         qty = st.number_input("Quantity", min_value=0.0, step=1.0, key="tx_qty")
@@ -996,7 +1144,7 @@ def tab_transactions():
                 done("✅ Transaction saved, stock updated.")
 
     with right:
-        st.markdown("#### 📜 Recent Transactions")
+        st.markdown('<div class="section-title">Recent Transactions</div>', unsafe_allow_html=True)
         tdf = qdf(f"""SELECT id, factory_name, officer_name, sl_no, prod_id, item_name, qty, trans_type,
                       verification_status, notes, date, time FROM transactions WHERE 1=1{fsql}
                       ORDER BY id DESC LIMIT 300""", fp)
@@ -1028,7 +1176,7 @@ def tab_transactions():
                     elif update_tx_meta(tid, ed.strftime(DATE_FMT), en.strip()):
                         done("Transaction updated.")
 
-    st.markdown("#### 🚨 Low & Negative Stock Alerts (≤ 5 pcs)")
+    st.markdown('<div class="section-title">Low & Negative Stock Alerts (≤ 5 pcs)</div>', unsafe_allow_html=True)
     alerts = qdf(f"""SELECT factory_name, sl_no, prod_id, item_name, COALESCE(size,'') AS size, current_stock
                      FROM inventory WHERE current_stock <= 5{fsql} ORDER BY current_stock ASC""", fp)
     if not alerts.empty:
@@ -1037,7 +1185,7 @@ def tab_transactions():
 
 
 # ============================================================
-#  TAB 2 - INVENTORY
+#  TAB 2 - INVENTORY MASTER
 # ============================================================
 @tx
 def add_item(fac, code, name, size, dept, cat, stock, price):
@@ -1135,7 +1283,7 @@ def inv_master_view():
 
 
 def inv_add_import_view():
-    st.markdown("#### ➕ Add New Item")
+    st.markdown('<div class="section-title">Add New Item</div>', unsafe_allow_html=True)
     with st.form("add_item_form", clear_on_submit=False):
         c1, c2, c3 = st.columns(3)
         code = c1.text_input("ERP Code (blank = temporary)")
@@ -1154,7 +1302,7 @@ def inv_add_import_view():
             if res:
                 done("Stock added to existing item (no duplicate)." if res[0] == "exists" else "New item added.")
 
-    st.markdown("#### 📥 Import Opening Physical Stock")
+    st.markdown('<div class="section-title">Import Opening Physical Stock</div>', unsafe_allow_html=True)
     st.download_button("📄 Download import format (CSV)",
                        pd.DataFrame([{"SL No": 1, "ERP Code": "ERP-0001", "Item Name": "Example Item", "Size": "XL",
                                       "Department": "Maintenance", "Category": "Maintenance Spare Parts",
@@ -1320,7 +1468,7 @@ def erp_check_view():
                 st.dataframe(pd.DataFrame([{"SL": e["sl"], "ERP Code": e["code"], "Item": e["name"], "Size": e["size"],
                                             "ERP Stock": e.get("erp"), "Physical Stock": e.get("phys")} for e in hits[:200]]),
                              hide_index=True, use_container_width=True)
-    st.markdown("#### 📋 Bulk check (Excel / CSV: Item Name, Size, ERP Code)")
+    st.markdown('<div class="section-title">Bulk check (Excel / CSV: Item Name, Size, ERP Code)</div>', unsafe_allow_html=True)
     up = st.file_uploader("List to check", type=["xlsx", "xls", "csv"], key="bulk_chk")
     if up and st.button("🔍 Run bulk check"):
         df = read_any(up)
@@ -1612,11 +1760,11 @@ def tab_issue_ledger():
         iss["total_value"] = iss.qty * iss.unit_price
         iss["type"] = iss.trans_type.map(lambda c: TRANS_LABELS.get(c, c))
         iss["erp_status"] = iss.notes.fillna("").apply(lambda n: "ERP PO Pending" if "Pending" in n else "ERP GRN Completed")
-    st.markdown("#### 📋 All Issues")
+    st.markdown('<div class="section-title">All Issues</div>', unsafe_allow_html=True)
     st.dataframe(iss, hide_index=True, use_container_width=True)
     export_buttons(iss, "issue_ledger")
 
-    st.markdown("#### 🔍 Item-wise Monthly Issue Search")
+    st.markdown('<div class="section-title">Item-wise Monthly Issue Search</div>', unsafe_allow_html=True)
     if iss.empty:
         st.info("Issue record nei.")
         return
@@ -2243,7 +2391,8 @@ def compute_forecast(mi):
 
 def tab_forecast():
     mi = month_info()
-    st.markdown(f"#### 🏭 Production Plan   |   Current: **{mi['cur_label']}**   |   Next: **{mi['next_label']}**")
+    st.markdown(f'<div class="section-title">Production Plan · Current {mi["cur_label"]} · Next {mi["next_label"]}</div>',
+                unsafe_allow_html=True)
     plans = {(p["factory_name"], p["plan_month"]): p for p in q("SELECT * FROM production_plans")}
     if FAC and "CONSOLIDATED" not in FAC:
         cp = plans.get((FAC, mi["cur_key"]), {})
@@ -2286,7 +2435,7 @@ def tab_forecast():
 
 
 # ============================================================
-#  TAB 10 - BUDGET
+#  TAB 10 - BUDGET (detailed)
 # ============================================================
 def tab_budget():
     bud = qdf(f"SELECT factory_name, department_name, category_name, allocated_budget FROM category_budgets WHERE 1=1{FSQL}", FP)
@@ -2301,13 +2450,11 @@ def tab_budget():
     bud["actual_cost"] = [cost.get((f, c), 0.0) for f, c in zip(bud.factory_name, bud.category_name)]
     bud["remaining"] = bud.allocated_budget - bud.actual_cost
     bud["status"] = bud.remaining.apply(lambda v: "SAFE" if v >= 0 else "OVER BUDGET")
-    total_b, total_c = bud.allocated_budget.sum(), bud.actual_cost.sum()
-    c = st.columns(4)
-    c[0].metric("Total Budget", f"{total_b:,.2f}")
-    c[1].metric("Consumption", f"{total_c:,.2f}")
-    c[2].metric("Remaining", f"{total_b - total_c:,.2f}")
-    c[3].metric("Utilization", f"{(total_c / total_b * 100 if total_b else 0):.1f}%")
-    st.dataframe(bud, hide_index=True, use_container_width=True)
+    st.dataframe(bud, hide_index=True, use_container_width=True, column_config={
+        "allocated_budget": st.column_config.NumberColumn("Allocated (৳)", format="%.0f"),
+        "actual_cost": st.column_config.NumberColumn("Actual Cost (৳)", format="%.0f"),
+        "remaining": st.column_config.NumberColumn("Remaining (৳)", format="%.0f"),
+    })
     export_buttons(bud, "budget")
 
 
@@ -2408,7 +2555,8 @@ def tab_daily_sheet():
     show_all = c3.checkbox("Include zero-stock", key="ds_all")
     auto = c4.checkbox("Auto-fill issue/received", key="ds_auto")
     df = daily_rows(d, fac, show_all)
-    st.markdown(f"### Daily Issue Status For Month: {d.strftime('%B-%Y')}")
+    st.markdown(f'<div class="section-title">Daily Issue Status For Month: {d.strftime("%B-%Y")}</div>',
+                unsafe_allow_html=True)
     n_short = int((df["Short Qty"] > 0).sum()) if not df.empty else 0
     n_exc = int((df["Excess Qty"] > 0).sum()) if not df.empty else 0
     st.caption(f"Date: {d.strftime(DATE_FMT)} | Factory: {fac} | SL No = Master Inventory SL (same as Transactions). "
@@ -2445,37 +2593,32 @@ show_flash()
 sidebar_login()
 
 with st.sidebar:
-    st.markdown("### 🏭 Factory")
+    st.markdown("### 🏭 Active Factory")
     FAC = st.selectbox("Active factory", FACTORIES + [ALL_VIEW], key="factory", label_visibility="collapsed")
-    st.markdown("---")
     st.caption("📌 CONSOLIDATED view shudhu dekhar jonno. Entry-r jonno specific factory bachun.")
 
 FSQL, FP = fw(FAC)
 is_cons_view = "CONSOLIDATED" in FAC
 autoset_uom_once()
 
+user_badge = (f"👤 {st.session_state['user']} · {st.session_state.get('role', '')}"
+              if st.session_state.get("user") else "🔒 Guest (view only)")
 st.markdown(f"""
 <div class="app-header">
-    <h1>KC &amp; WINDY SMART STOCK TRACKER &amp; BUDGET CONTROL</h1>
-    <p>Designed &amp; Created By: MD. Sagor Ali</p>
+    <div>
+        <h1>KC &amp; WINDY SMART STOCK TRACKER &amp; BUDGET CONTROL</h1>
+        <p>Designed &amp; Created By: MD. Sagor Ali · Active View: {html_lib.escape(FAC)}</p>
+    </div>
+    <span class="badge">{html_lib.escape(user_badge)}</span>
 </div>
-<div class="factory-bar">🏭 Active View: {html_lib.escape(FAC)}</div>
 """, unsafe_allow_html=True)
 
 try:
-    kpi = q(f"""SELECT COUNT(*) AS items,
-                       COALESCE(SUM(COALESCE(current_stock,0)*COALESCE(unit_price,0)),0) AS stock_value,
-                       SUM(CASE WHEN current_stock <= 5 THEN 1 ELSE 0 END) AS alerts
-                FROM inventory WHERE 1=1{FSQL}""", FP)[0]
-    bud = q(f"SELECT COALESCE(SUM(allocated_budget),0) AS b FROM category_budgets WHERE 1=1{FSQL}", FP)[0]["b"]
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("TOTAL ITEMS", int(kpi["items"] or 0))
-    c2.metric("STOCK VALUE (BDT)", f"{float(kpi['stock_value']):,.0f}")
-    c3.metric("ALLOCATED BUDGET (BDT)", f"{float(bud):,.0f}")
-    c4.metric("LOW / NEGATIVE STOCK", int(kpi["alerts"] or 0))
+    tab_dashboard()
 except Exception as e:
-    st.warning(f"Summary load kora jacche na: {e}")
+    st.warning(f"Dashboard load kora jacche na: {e}")
 
+st.markdown("<br>", unsafe_allow_html=True)
 TAB_NAMES = ["[1] TRANSACTIONS", "[2] INVENTORY", "[3] ERP AUDIT", "[4] ISSUE LEDGER", "[5] TRANSFER HISTORY",
              "[6] REQUISITION", "[7] REPAIR", "[8] LEDGER", "[9] FORECAST", "[10] BUDGET", "[11] DAILY WORK SHEET"]
 RENDERERS = [tab_transactions, tab_inventory, tab_erp_audit, tab_issue_ledger, tab_transfer_history,
