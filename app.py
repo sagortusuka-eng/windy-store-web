@@ -11,6 +11,7 @@ import io
 import math
 import os
 import re
+import secrets
 import zipfile
 from datetime import date, datetime, timedelta, timezone
 
@@ -563,6 +564,7 @@ def init_db():
         """CREATE TABLE IF NOT EXISTS password_resets (
             id SERIAL PRIMARY KEY, username TEXT, requested_at TEXT, status TEXT DEFAULT 'Pending',
             handled_by TEXT, handled_at TEXT)""",
+        "CREATE TABLE IF NOT EXISTS login_sessions (token_hash TEXT PRIMARY KEY, username TEXT, created_at TEXT, expires_at TEXT)",
     ]
     try:
         with conn.cursor() as cur:
@@ -809,6 +811,82 @@ def user_admin_panel():
                     done("Temporary password set. User-ke surakkhitovabe janan; login-er por password change korte bolun.")
 
 
+# ---------- Stay logged in after a browser refresh ----------
+# A browser refresh starts a brand-new Streamlit session, so st.session_state is empty. After a successful login a random
+# token is stored (hashed) in the database and in a browser cookie; on refresh the cookie is checked and the login restored.
+SESSION_COOKIE = "kcw_session"
+SESSION_HOURS = 12
+
+
+def _tok_hash(tok):
+    return hashlib.sha256(tok.encode()).hexdigest()
+
+
+def _cookie_token():
+    try:
+        return st.context.cookies.get(SESSION_COOKIE) or ""
+    except Exception:   # Streamlit older than 1.37 has no st.context.cookies -> no auto re-login, nothing else changes
+        return ""
+
+
+@tx
+def create_login_session(username):
+    tok = secrets.token_urlsafe(32)
+    now = datetime.now()
+    run("DELETE FROM login_sessions WHERE expires_at < %s", (now.strftime("%Y-%m-%d %H:%M:%S"),))
+    run("INSERT INTO login_sessions (token_hash, username, created_at, expires_at) VALUES (%s,%s,%s,%s)",
+        (_tok_hash(tok), username, now.strftime("%Y-%m-%d %H:%M:%S"),
+         (now + timedelta(hours=SESSION_HOURS)).strftime("%Y-%m-%d %H:%M:%S")))
+    return tok
+
+
+@tx
+def end_login_session():
+    tok = _cookie_token()
+    if tok:
+        run("DELETE FROM login_sessions WHERE token_hash=%s", (_tok_hash(tok),))
+    return True
+
+
+def restore_login_from_cookie():
+    """Runs at the start of every session: if nobody is logged in but a valid session cookie exists, log that user back in."""
+    if st.session_state.get("user"):
+        return
+    tok = _cookie_token()
+    if not tok:
+        return
+    try:
+        r = q("""SELECT s.username, u.role, COALESCE(u.status,'Active') AS status
+                 FROM login_sessions s JOIN users u ON u.username=s.username
+                 WHERE s.token_hash=%s AND s.expires_at > %s""",
+              (_tok_hash(tok), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    except Exception:
+        return
+    if r and r[0]["status"] == "Active":
+        st.session_state["user"] = r[0]["username"]
+        st.session_state["role"] = r[0]["role"]
+
+
+def render_session_cookie_js():
+    """Writes (after login) or removes (after logout) the session cookie in the browser. Invisible, runs once."""
+    tok = st.session_state.pop("_cookie_set", None)
+    clear = st.session_state.pop("_cookie_clear", None)
+    if tok:
+        val, age = tok, SESSION_HOURS * 3600
+    elif clear:
+        val, age = "", 0
+    else:
+        return
+    components.html(
+        f"""<script>
+        try {{
+          const d = window.parent.document;
+          const sec = window.parent.location.protocol === 'https:' ? '; Secure' : '';
+          d.cookie = "{SESSION_COOKIE}={val}; path=/; max-age={age}; SameSite=Lax" + sec;
+        }} catch (e) {{}}
+        </script>""", height=0)
+
+
 def sidebar_login():
     with st.sidebar:
         st.markdown(
@@ -824,8 +902,10 @@ def sidebar_login():
                 unsafe_allow_html=True)
             if st.button("🚪 Logout", use_container_width=True, key="logout_btn"):
                 log_event("LOGOUT", f"User {st.session_state['user']} logged out.")
+                end_login_session()
                 st.session_state.pop("user", None)
                 st.session_state.pop("role", None)
+                st.session_state["_cookie_clear"] = True
                 done("Logged out successfully.")
             with st.expander("🔑 Change password"):
                 with st.form("chg_pw_form", clear_on_submit=True):
@@ -863,6 +943,9 @@ def sidebar_login():
                         else:
                             st.session_state["user"] = u.strip()
                             st.session_state["role"] = r[0]["role"]
+                            _tok = create_login_session(u.strip())
+                            if _tok:
+                                st.session_state["_cookie_set"] = _tok
                             log_event("LOGIN", f"User {u.strip()} logged in as {r[0]['role']}.")
                             done(f"Welcome, {u.strip()}!")
                     else:
@@ -3853,6 +3936,7 @@ except Exception as e:
     st.error(f"Cloud database-e connect kora jacche na: {e}")
     st.stop()
 
+restore_login_from_cookie()
 show_flash()
 sidebar_login()
 
@@ -3884,3 +3968,4 @@ if st.session_state.get(NAV_KEY) not in TAB_NAMES:
 active_tab = st.radio("Module", TAB_NAMES, key=NAV_KEY, horizontal=True, label_visibility="collapsed")
 render_header()
 RENDERERS[TAB_NAMES.index(active_tab)]()
+render_session_cookie_js()
