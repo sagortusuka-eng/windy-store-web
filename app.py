@@ -660,60 +660,39 @@ section[data-testid="stSidebar"] .brand-card .b-s { color:#FFFFFF !important; }
 </style>""", unsafe_allow_html=True)
 
 st.markdown("""<style>
-/* Sidebar section headings: explicit light text on the navy surface. */
-section[data-testid="stSidebar"] .nav-section-title {
-    color: #F8FAFC !important;
-    font-size: 13px !important;
-    font-weight: 750 !important;
-    letter-spacing: .04em !important;
-    margin: 18px 0 8px !important;
-    padding-left: 2px !important;
+/* Compact daily-entry panel so its primary save action stays above the fold on desktop. */
+.block-container { padding-top: .35rem !important; }
+.stApp h1 { margin-top: .15rem !important; margin-bottom: .25rem !important; }
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.topbar-meta) {
+    padding: 6px 12px !important; margin-bottom: 8px !important;
 }
-/* Left-align nav items and keep inactive labels legible. */
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] { width: 100% !important; }
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button {
-    display: flex !important;
-    justify-content: flex-start !important;
-    text-align: left !important;
-    width: 100% !important;
-    min-height: 42px !important;
-    padding: 8px 12px !important;
-    background: transparent !important;
-    border: 1px solid transparent !important;
-    color: #E5EDF5 !important;
-    box-shadow: none !important;
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.topbar-meta) div[data-testid="stVerticalBlock"] { gap: .25rem !important; }
+div[data-testid="stMetric"] { min-height: 76px !important; padding: 10px 14px !important; }
+.st-key-tx_form_box { padding: 7px 10px 8px !important; border-radius: 14px !important; }
+.st-key-tx_form_box div[data-testid="stVerticalBlock"] { gap: .28rem !important; }
+.st-key-tx_form_box div[data-testid="stWidgetLabel"] { margin-bottom: -4px !important; min-height: 0 !important; }
+.st-key-tx_form_box div[data-testid="stWidgetLabel"] p,
+.st-key-tx_form_box label p { font-size: 11.5px !important; line-height: 1.15 !important; }
+.st-key-tx_form_box div[data-baseweb="input"],
+.st-key-tx_form_box div[data-baseweb="base-input"],
+.st-key-tx_form_box div[data-baseweb="select"] > div { min-height: 34px !important; border-radius: 8px !important; }
+.st-key-tx_form_box div[data-baseweb="input"] input,
+.st-key-tx_form_box div[data-baseweb="base-input"] input { padding: 5px 9px !important; font-size: 13px !important; }
+.st-key-tx_form_box .stButton > button[kind="primary"] {
+    min-height: 36px !important; margin-top: 1px !important;
+    background: linear-gradient(135deg, #087E8B, #0F766E) !important;
+    color: #FFFFFF !important; border: 0 !important; border-radius: 9px !important;
+    box-shadow: 0 4px 10px rgba(8,126,139,.22) !important;
 }
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button div {
-    justify-content: flex-start !important;
-    width: 100% !important;
+@media (max-height: 900px) and (min-width: 900px) {
+    .st-key-tx_form_box div[data-testid="stVerticalBlock"] { gap: .2rem !important; }
+    .st-key-tx_form_box div[data-testid="stWidgetLabel"] p,
+    .st-key-tx_form_box label p { font-size: 11px !important; }
 }
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button p {
-    width: 100% !important;
-    text-align: left !important;
-    color: #E5EDF5 !important;
-    font-size: 14px !important;
-    font-weight: 600 !important;
+@media (max-width: 900px) {
+    .st-key-tx_form_box { padding: 9px !important; }
+    .st-key-tx_form_box div[data-testid="stHorizontalBlock"] { gap: .5rem !important; }
 }
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button:hover {
-    background: #1B334B !important;
-    border-color: #2D4963 !important;
-}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button[kind="primary"] {
-    background: #087E8B !important;
-    border-color: #1599A6 !important;
-}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button[kind="primary"] p {
-    color: #FFFFFF !important;
-    font-weight: 750 !important;
-}
-/* Premium dashboard hierarchy and readable cards. */
-.stApp h1 { color:#15243A !important; font-weight:750 !important; }
-div[data-testid="stMetric"] { min-height:112px; padding:18px !important; }
-div[data-testid="stMetricLabel"] p { color:#53657B !important; font-size:12px !important; }
-div[data-testid="stMetricValue"] { color:#0F766E !important; font-weight:800 !important; }
-.stTabs [data-baseweb="tab"] { font-size:14px !important; font-weight:700 !important; }
-.stTabs [data-baseweb="tab"] p { color:#334155 !important; }
-.stTabs [data-baseweb="tab"][aria-selected="true"] p { color:#0F766E !important; }
 </style>""", unsafe_allow_html=True)
 
 # ============================================================
@@ -2154,13 +2133,12 @@ def tab_dashboard():
     remaining = allocated - issue_value
     used_pct = (issue_value / allocated * 100.0) if allocated > 0 else 0.0
 
-    kpis = st.columns(5, gap="small")
-    kpis[0].metric("Stock items", f"{inventory_total:,}")
-    kpis[1].metric("Low stock", f"{low_stock_total:,}", help="Items at or below 5 units")
-    kpis[2].metric("Purchases", f"৳{purchase_value:,.0f}", help=f"Receipt quantity: {purchase_qty:,.0f}")
-    kpis[3].metric("Issues", f"৳{issue_value:,.0f}", help=f"Issued quantity: {issue_qty:,.0f}")
-    kpis[4].metric("Budget remaining", f"৳{remaining:,.0f}", f"{used_pct:.1f}% used")
-    st.caption(f"Management overview · {period} · Values are calculated from the selected factory's records.")
+    kpis = st.columns(4, gap="medium")
+    kpis[0].metric("Inventory items", f"{inventory_total:,}", help="Current item count in the selected factory view")
+    kpis[1].metric("Purchases · Qty / Value", f"{purchase_qty:,.0f} / ৳{purchase_value:,.0f}")
+    kpis[2].metric("Issues · Qty / Value", f"{issue_qty:,.0f} / ৳{issue_value:,.0f}")
+    kpis[3].metric("Budget remaining", f"৳{remaining:,.0f}", f"{used_pct:.1f}% used")
+    st.caption(f"Low / negative stock items (≤ 5): {low_stock_total:,} · Period: {period}")
 
     chart_col, budget_col = st.columns([1.15, 1], gap="large")
     with chart_col:
@@ -2392,36 +2370,46 @@ def tab_transactions():
             ttype = TRANS_CODES[type_label]
             supplier, challan = "", ""
             if ttype == "Supplier. Rec":
-                supplier = st.text_input("Supplier", key=f"tx_supplier_{g}", placeholder="Supplier name")
-                challan = st.text_input("Challan Number", key=f"tx_challan_{g}", placeholder="Challan / delivery note number")
+                supplier_col, challan_col = st.columns(2, gap="small")
+                supplier = supplier_col.text_input(
+                    "Supplier", key=f"tx_supplier_{g}", placeholder="Supplier name"
+                )
+                challan = challan_col.text_input(
+                    "Challan No.", key=f"tx_challan_{g}", placeholder="Delivery note number"
+                )
             # Items with stock 0 (or negative) can not be issued / reduced, so they are not offered for those types.
             # Receipts and (+) adjustments still see every item, otherwise an item at 0 could never be restocked.
             stock_only = ttype in ISSUE_TYPES or ttype == ADJ_OUT
-            search = st.text_input("🔍 Search (Serial No / Name / Size / ERP / SL)", key=f"tx_search_{g}",
-                                   placeholder="Serial No, naam, SL, ERP code...")
+            search_col, exact_col = st.columns([1.35, 1], gap="small")
+            search = search_col.text_input(
+                "🔎 Search item", key=f"tx_search_{g}",
+                placeholder="Name, serial, size or ERP code"
+            )
+            key = exact_col.text_input(
+                "SL / ERP / Serial", key=f"tx_key_{g}",
+                placeholder="Exact code or SL number"
+            )
             item, blocked, need_xfer, xfer_ok = None, False, False, False
             if search.strip():
                 cands = search_items(fac, search.strip(), stock_only)
                 if cands:
                     opts = {item_label(c): c for c in cands}
-                    item = opts[st.selectbox("Pick item", list(opts), key=f"tx_pick_{g}")]
+                    item = opts[st.selectbox("Choose matching item", list(opts), key=f"tx_pick_{g}")]
                 elif stock_only and search_items(fac, search.strip(), False):
-                    st.warning("Item paoa geche kintu current stock 0 - tai issue-r list-e dekhano hocche na.")
+                    st.warning("Item found, but current stock is 0; it cannot be issued.")
                 else:
-                    st.warning("Kichu paoa jay nai.")
-            else:
-                key = st.text_input("SL No / ERP Code / Serial No", key=f"tx_key_{g}", placeholder="SL, ERP code ba Serial No")
-                if key.strip():
-                    item, cands = resolve_item(fac, key.strip(), stock_only)
-                    if item is None:
-                        if cands:
-                            st.error(f"{len(cands)} ta item match kore - exact SL No / Serial No likhun")
+                    st.warning("No matching item found.")
+            elif key.strip():
+                item, cands = resolve_item(fac, key.strip(), stock_only)
+                if item is None:
+                    if cands:
+                        st.error(f"{len(cands)} items match; enter an exact SL or serial number.")
+                    else:
+                        alt = resolve_item(fac, key.strip(), False)[0] if stock_only else None
+                        if alt is not None:
+                            st.warning(f"{alt['item_name']} was found, but its stock is {float(alt['stock']):g}; issue is blocked.")
                         else:
-                            alt = resolve_item(fac, key.strip(), False)[0] if stock_only else None
-                            if alt is not None:
-                                st.warning(f"'{alt['item_name']}' paoa geche kintu stock {float(alt['stock']):g} - issue kora jabe na.")
-                            else:
-                                st.error("Item paoa jay nai")
+                            st.error("No item found for that SL / ERP / serial value.")
 
             qc, dc = st.columns(2)
             qty = qc.number_input("Quantity", min_value=0.0, step=1.0, key=f"tx_qty_{g}")
@@ -2431,10 +2419,14 @@ def tab_transactions():
                 need_verif, v_streak = verification_needed(fac, item["sl_no"], tx_date)
                 if need_verif:
                     st.warning(f"Physical verification required: ei product porpor {v_streak} din issue hoyeche (4th consecutive day).")
-            verified = st.checkbox("✅ Physically Verified (required today)" if need_verif else "✅ Verified",
-                                   key=f"tx_ver_{g}")
-            po_pending = st.checkbox("📌 ERP PO Pending", key=f"tx_po_{g}",
-                                     help="Tick korle ei transaction ERP PO Pending list-e record hobe (ERP Audit → ERP PO Pending) - track korar jonno.")
+            verify_col, po_col = st.columns(2, gap="small")
+            verified = verify_col.checkbox(
+                "Physically verified" if need_verif else "Verified", key=f"tx_ver_{g}"
+            )
+            po_pending = po_col.checkbox(
+                "ERP PO pending", key=f"tx_po_{g}",
+                help="Track this transaction in ERP Audit → ERP PO Pending."
+            )
             notes = st.text_input("Remarks", key=f"tx_notes_{g}", placeholder="Optional note")
 
             if item is not None:
@@ -4582,7 +4574,7 @@ with st.sidebar:
         '<div class="b-s">Smart inventory · Budget control</div></div>',
         unsafe_allow_html=True,
     )
-    st.markdown('<div class="nav-section-title">Workspace</div>', unsafe_allow_html=True)
+    st.markdown("### Workspace")
     for nav_index in range(4):
         nav_label = TAB_NAMES[nav_index]
         if st.button(
@@ -4594,7 +4586,7 @@ with st.sidebar:
             st.session_state[NAV_KEY] = nav_label
             st.rerun()
 
-    st.markdown('<div class="nav-section-title">Management</div>', unsafe_allow_html=True)
+    st.markdown("### Management")
     for nav_index in range(4, len(TAB_NAMES)):
         nav_label = TAB_NAMES[nav_index]
         if st.button(
