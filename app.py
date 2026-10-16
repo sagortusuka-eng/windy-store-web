@@ -772,6 +772,18 @@ section[data-testid="stSidebar"] .nav-section-title {
 section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button { min-height:31px !important; padding:3px 8px !important; }
 </style>""", unsafe_allow_html=True)
 
+st.markdown("""<style>
+section[data-testid="stSidebar"] .brand-card .b-t { font-size:14px !important; }
+section[data-testid="stSidebar"] .brand-card .b-s { font-size:11px !important; }
+section[data-testid="stSidebar"] div[data-testid="stCaptionContainer"] p { color:#C7D4E2 !important; }
+/* Compact clock near the top of the sidebar, so it is visible without scrolling to the last menu item. */
+section[data-testid="stSidebar"] iframe { max-height:68px !important; }
+/* Polished tabs within the Secure Login popover. */
+div[data-testid="stPopover"] .stTabs [data-baseweb="tab"] { font-size:12px !important; padding:6px 8px !important; }
+div[data-testid="stPopover"] .stTabs [data-baseweb="tab"] p { font-size:12px !important; }
+div[data-testid="stPopover"] div[data-testid="stForm"] { padding:10px !important; }
+</style>""", unsafe_allow_html=True)
+
 # ============================================================
 #  CONSTANTS
 # ============================================================
@@ -1372,7 +1384,7 @@ def render_session_cookie_js():
 
 
 def render_login_control():
-    """Sign-in and account actions in a compact top-bar popover; no public registration form."""
+    """Compact top-bar account popover with Sign in, Register and Forgot password tabs."""
     logged_in = bool(st.session_state.get("user"))
     label = f"👤 {st.session_state.get('user', 'Account')}" if logged_in else "🔐 Secure Login"
     with st.popover(label, use_container_width=True):
@@ -1404,8 +1416,10 @@ def render_login_control():
                         st.success("Password updated.")
             if st.session_state.get("role") == "Store Manager":
                 user_admin_panel()
-        else:
-            st.markdown("### Secure Login")
+            return
+
+        sign_in_tab, register_tab, forgot_tab = st.tabs(["Sign in", "Register", "Forgot password"])
+        with sign_in_tab:
             st.caption("Use your approved account to access inventory operations.")
             with st.form("login_form", clear_on_submit=False):
                 username = st.text_input("Username", placeholder="Enter your username", key="login_user")
@@ -1434,6 +1448,38 @@ def render_login_control():
                             done(f"Welcome, {username.strip()}!")
                     else:
                         st.error("Username or password is incorrect.")
+
+        with register_tab:
+            st.caption("New accounts require Store Manager approval.")
+            with st.form("reg_form", clear_on_submit=True):
+                reg_user = st.text_input("Username", key="reg_user", placeholder="3–30 letters, digits, _ . -")
+                full_name = st.text_input("Full name", key="reg_name")
+                reg_pw1 = st.text_input("Password (min 8 characters)", type="password", key="reg_pw1")
+                reg_pw2 = st.text_input("Confirm password", type="password", key="reg_pw2")
+                register_submit = st.form_submit_button("Request registration", use_container_width=True)
+            if register_submit:
+                if not USERNAME_RE.fullmatch(reg_user.strip()):
+                    st.error("Username must be 3–30 characters using letters, numbers, _ . or -.")
+                elif not full_name.strip():
+                    st.error("Enter your full name.")
+                elif len(reg_pw1) < 8:
+                    st.error("Password must be at least 8 characters.")
+                elif reg_pw1 != reg_pw2:
+                    st.error("The passwords do not match.")
+                elif register_user(reg_user.strip(), full_name.strip(), reg_pw1):
+                    st.success("Registration request sent. The Store Manager must approve it before sign-in.")
+
+        with forgot_tab:
+            st.caption("Password recovery requests are reviewed by the Store Manager.")
+            with st.form("fp_form", clear_on_submit=True):
+                reset_user = st.text_input("Username", key="fp_user")
+                reset_submit = st.form_submit_button("Request password reset", use_container_width=True)
+            if reset_submit:
+                if not reset_user.strip():
+                    st.error("Enter your username.")
+                else:
+                    request_password_reset(reset_user.strip())
+                    st.success("If the account is active, the reset request has been sent to the Store Manager.")
 
 # ============================================================
 #  HELPERS
@@ -4624,10 +4670,12 @@ with st.sidebar:
     st.markdown(
         f'<div class="brand-card">'
         f'<div class="brand-logo-wrap"><img class="brand-logo" src="data:image/png;base64,{WINDY_LOGO_B64}" alt="Windy Group logo"></div>'
-        f'<div class="b-t">KC Windy Inventory</div>'
-        f'<div class="b-s">Smart inventory · Budget control</div></div>',
+        f'<div class="b-t">KC &amp; Windy Inventory</div>'
+        f'<div class="b-s">Created by MD. Sagor Ali</div></div>',
         unsafe_allow_html=True,
     )
+
+sidebar_clock()
 
 with st.sidebar:
     st.markdown('<div class="nav-section-title">Workspace</div>', unsafe_allow_html=True)
@@ -4654,7 +4702,6 @@ with st.sidebar:
             st.session_state[NAV_KEY] = nav_label
             st.rerun()
     st.markdown("---")
-    sidebar_clock()
 
 FAC = render_header()
 FSQL, FP = fw(FAC)
