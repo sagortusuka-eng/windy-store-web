@@ -784,6 +784,21 @@ div[data-testid="stPopover"] .stTabs [data-baseweb="tab"] p { font-size:12px !im
 div[data-testid="stPopover"] div[data-testid="stForm"] { padding:10px !important; }
 </style>""", unsafe_allow_html=True)
 
+st.markdown("""<style>
+.dashboard-welcome {
+    background: linear-gradient(110deg, #FFFFFF 0%, #F0F8F8 100%);
+    border: 1px solid #D5E7E7;
+    border-left: 4px solid #0F766E;
+    border-radius: 12px;
+    padding: 11px 16px;
+    margin: 6px 0 12px;
+    box-shadow: 0 2px 8px rgba(15,23,42,.035);
+}
+.dashboard-kicker { color:#0F766E; font-size:10px; font-weight:800; letter-spacing:.12em; margin-bottom:3px; }
+.dashboard-lead { color:#172033; font-size:16px; font-weight:700; line-height:1.35; }
+.dashboard-note { color:#64748B; font-size:12px; margin-top:3px; }
+</style>""", unsafe_allow_html=True)
+
 # ============================================================
 #  CONSTANTS
 # ============================================================
@@ -2182,6 +2197,16 @@ def tab_dashboard():
     """Management dashboard: purchase, issue, inventory and budget using live database records."""
     st.title("Management Dashboard")
     st.caption("Purchases, stock issues and budget performance for the selected factory.")
+    viewer_name = html_lib.escape(str(st.session_state.get("user") or "Store team"))
+    factory_name = html_lib.escape(str(FAC))
+    st.markdown(
+        f'<div class="dashboard-welcome">'
+        f'<div class="dashboard-kicker">OPERATIONS AT A GLANCE</div>'
+        f'<div class="dashboard-lead">Welcome, {viewer_name}. Keep stock, purchasing and budget health in view.</div>'
+        f'<div class="dashboard-note">Live overview for {factory_name}. Choose a reporting period to review activity.</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
     transaction_rows = qdf(f"""SELECT t.factory_name, t.date, t.time, t.trans_type, t.qty, t.item_name,
                        t.officer_name, COALESCE(t.supplier_name,'') AS supplier_name,
@@ -4669,7 +4694,7 @@ show_flash()
 
 # Brand and account/login appear first; Workspace and Management remain clearly grouped below.
 if st.session_state.get(NAV_KEY) not in TAB_NAMES:
-    st.session_state[NAV_KEY] = TAB_NAMES[1]  # Transactions remains the default page.
+    st.session_state[NAV_KEY] = TAB_NAMES[0]  # Dashboard is the first page for new sessions.
 
 with st.sidebar:
     st.markdown(
@@ -4716,6 +4741,6 @@ autoset_uom_once()
 # Render only the selected module; the sidebar buttons update NAV_KEY.
 RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_erp_audit, tab_issue_ledger,
              tab_transfer_history, tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet]
-active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[1])
+active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
 RENDERERS[TAB_NAMES.index(active_tab)]()
 render_session_cookie_js()
