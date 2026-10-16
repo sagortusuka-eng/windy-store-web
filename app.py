@@ -848,7 +848,7 @@ VERDICT = {"FOUND": "✔ FOUND", "SIZE_MISSING": "⚠ SIZE NOT IN LIST", "CODE_M
 NAV_KEY = "main_nav"
 NAV_ERP_AUDIT = "🔍 ERP Audit"
 TAB_NAMES = [
-    "📊 Dashboard", "📝 Transactions", "📦 Inventory", NAV_ERP_AUDIT,
+    "📊 Dashboard", "📝 Transactions", "📦 Inventory", "🌐 Global Inventory", NAV_ERP_AUDIT,
     "📜 Issue Ledger", "🔁 Transfer History", "📑 Requisition", "🛠 Repair & Returns",
     "📒 Ledger", "📈 Forecast", "💰 Budget", "🗓 Daily Work Sheet",
 ]
@@ -857,7 +857,7 @@ AUD_ACT, AUD_ALL, AUD_SHORT, AUD_EXC, AUD_MATCH = "⚙️ Actions", "📋 All", 
 AUD_PEND, AUD_PO, AUD_RECV = "🟡 ERP Pending", "📌 ERP PO Pending", "📥 Product Received"
 AUD_PLAN, AUD_AGE = "📝 Correction Plan", "⏱ Receipt Aging"
 AUD_VIEWS = [AUD_ACT, AUD_ALL, AUD_SHORT, AUD_EXC, AUD_MATCH, AUD_PEND, AUD_PO, AUD_RECV, AUD_PLAN, AUD_AGE]
-VERIFY_AFTER_DAYS = 3   # same product issued on 3 consecutive days -> physical verification on the 4th day
+VERIFY_AFTER_DAYS = 3   # 3 calendar days after first unverified issue; gaps do not reset the clock
 MODULE_NAV = [("📝", "Transactions"), ("📦", "Inventory Master"), ("🔍", "ERP Audit"), ("📜", "Issue Ledger"),
               ("🔁", "Transfer History"), ("📑", "Requisition"), ("🛠", "Repair & Returns"), ("📒", "Ledger"),
               ("📈", "Forecast"), ("💵", "Budget"), ("🗓", "Daily Work Sheet")]
@@ -1809,26 +1809,41 @@ def recent_issue(fac, sl, ref_dt):
 
 
 def verification_needed(fac, sl, tx_dt):
-    """Physical-verification rule. The SAME product (factory + SL No) issued on the 3 calendar days directly
-    before tx_dt (Day 1, Day 2, Day 3) -> tx_dt is Day 4 and physical verification is required.
-    The days must be CONSECUTIVE: a missing day breaks the run. A day that was physically verified
-    starts a new run. Returns (needed, consecutive_days_found)."""
-    days = [(tx_dt - timedelta(days=k)).strftime(DATE_FMT) for k in range(1, VERIFY_AFTER_DAYS + 1)]
-    rows = q("""SELECT date, verification_status FROM transactions
-                WHERE factory_name=%s AND sl_no=%s AND trans_type IN ('Issued','Internal Issue') AND date IN %s""",
-             (fac, sl, tuple(days)))
-    by_day = {}
-    for r in rows:
-        by_day.setdefault(str(r["date"]).strip(), []).append(str(r["verification_status"] or ""))
-    streak = 0
-    for d in days:                      # D-1, D-2, D-3 : stop at the first gap / verified day
-        sts = by_day.get(d)
-        if not sts or any(s.startswith("Physically") for s in sts):
-            break
-        streak += 1
-    return streak >= VERIFY_AFTER_DAYS, streak
+    """Require physical verification on the 4th calendar day from the first unverified issue.
 
+    Missing issue days do not reset the elapsed-day clock. A physically verified issue resets
+    the cycle; the next unverified issue starts a new cycle.
+    """
+    target_date = tx_dt.date() if isinstance(tx_dt, datetime) else tx_dt
+    rows = q("""SELECT date, verification_status
+                 FROM transactions
+                 WHERE factory_name=%s AND sl_no=%s
+                   AND trans_type IN ('Issued','Internal Issue')
+                   AND date IS NOT NULL""", (fac, sl))
 
+    events = []
+    for row in rows:
+        parsed = parse_date(row.get("date"))
+        if not parsed:
+            continue
+        event_date = parsed.date()
+        if event_date < target_date:
+            status = str(row.get("verification_status") or "")
+            events.append((event_date, status))
+
+    physical_dates = [event_date for event_date, status in events if status.startswith("Physically")]
+    last_physical_date = max(physical_dates) if physical_dates else None
+    pending_issue_dates = [
+        event_date for event_date, status in events
+        if not status.startswith("Physically")
+        and (last_physical_date is None or event_date > last_physical_date)
+    ]
+    if not pending_issue_dates:
+        return False, 0
+
+    first_unverified_issue = min(pending_issue_dates)
+    elapsed_days = (target_date - first_unverified_issue).days
+    return elapsed_days >= VERIFY_AFTER_DAYS, elapsed_days
 # ============================================================
 #  IMPORT ENGINE (Master Inventory, in-memory index)
 # ============================================================
@@ -2366,7 +2381,7 @@ def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, sup
     if ttype in ISSUE_TYPES:
         needed, _streak = verification_needed(fac, sl, tx_dt)
         if needed and not verified:
-            st.error("Physical verification required: ei product porpor 3 din issue hoyeche - 4th din verification tick korun.")
+            st.error("Physical verification required: 3 calendar days have passed since the first unverified issue (gaps count). Verify before saving.")
             return False
         verif = "Physically Verified" if (needed and verified) else "Not Required"
 
@@ -2544,9 +2559,9 @@ def tab_transactions():
             tx_date = dc.date_input("Date", value=date.today(), max_value=date.today(), key="tx_date")
             verified, need_verif = False, False
             if item is not None and ttype in ISSUE_TYPES:
-                need_verif, v_streak = verification_needed(fac, item["sl_no"], tx_date)
+                need_verif, v_days = verification_needed(fac, item["sl_no"], tx_date)
                 if need_verif:
-                    st.warning(f"Physical verification required: ei product porpor {v_streak} din issue hoyeche (4th consecutive day).")
+                    st.warning(f"Physical verification required: {v_days} calendar days since the first unverified issue. Gaps count too; verify before saving.")
             verify_col, po_col = st.columns(2, gap="small")
             verified = verify_col.checkbox(
                 "Physically verified" if need_verif else "Verified", key=f"tx_ver_{g}"
@@ -3652,6 +3667,229 @@ def tab_erp_audit():
                         done("Receipt marked ERP GRN Done.")
 
 
+
+def tab_global_inventory():
+    """Read-only consolidated stock view with exact cross-factory matches and transfer suggestions."""
+    st.title("Global Inventory")
+    st.caption("One product row across KC Washing Plant and Windy Washing LTD. This view never changes stock.")
+
+    raw = qdf("""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no,
+                       COALESCE(prod_id,'') AS prod_id, COALESCE(item_name,'') AS item_name,
+                       COALESCE(size,'') AS size, COALESCE(department,'') AS department,
+                       COALESCE(category,'') AS category, COALESCE(current_stock,0) AS current_stock,
+                       COALESCE(erp_stock,0) AS erp_stock, COALESCE(unit_price,0) AS unit_price,
+                       COALESCE(NULLIF(unit_name,''),'Pcs') AS unit_name, COALESCE(erp_status,'') AS erp_status
+                FROM inventory WHERE factory_name = ANY(%s)
+                ORDER BY item_name, size, factory_name, sl_no""", (FACTORIES,))
+    if raw.empty:
+        st.info("No inventory records are available for these factories.")
+        return
+
+    low_limit = 5  # Matches the existing low-stock alert threshold.
+    groups = {}
+    for row in raw.to_dict("records"):
+        code, name, size = txt(row.get("prod_id")), txt(row.get("item_name")), txt(row.get("size"))
+        if is_blank_code(code) or code.upper().startswith("TEMP-"):
+            identity = ("NAME", norm_name(name), norm_size(size))
+        else:
+            # Only exact ERP-code + normalized-size matches are combined; no fuzzy stock merges.
+            identity = ("ERP", code.strip().upper(), norm_size(size))
+        if not name and identity[0] == "NAME":
+            continue
+        group = groups.setdefault(identity, {
+            "identity": identity, "prod_id": code, "item_name": name, "size": size,
+            "rows_by_factory": {factory: [] for factory in FACTORIES},
+        })
+        if row["factory_name"] in group["rows_by_factory"]:
+            group["rows_by_factory"][row["factory_name"]].append(row)
+
+    def sum_field(records, field):
+        return sum(float(num(record.get(field), 0) or 0) for record in records)
+
+    all_items = []
+    for identity, group in groups.items():
+        per_factory = group["rows_by_factory"]
+        kc_rows, windy_rows = per_factory[FACTORIES[0]], per_factory[FACTORIES[1]]
+        all_rows = kc_rows + windy_rows
+        units = {txt(row.get("unit_name") or "Pcs").upper() for row in all_rows}
+        unit_mismatch = len(units) > 1
+        duplicate_mapping = any(len(per_factory[factory]) > 1 for factory in FACTORIES)
+        kc_stock, windy_stock = sum_field(kc_rows, "current_stock"), sum_field(windy_rows, "current_stock")
+        kc_erp, windy_erp = sum_field(kc_rows, "erp_stock"), sum_field(windy_rows, "erp_stock")
+        value = sum(
+            float(num(row.get("current_stock"), 0) or 0) * float(num(row.get("unit_price"), 0) or 0)
+            for row in all_rows
+        )
+        total_stock = None if unit_mismatch else kc_stock + windy_stock
+        erp_total = None if unit_mismatch else kc_erp + windy_erp
+        variance = None if unit_mismatch else total_stock - erp_total
+
+        suggestion = "—"
+        transfer = None
+        if not unit_mismatch and not duplicate_mapping and kc_rows and windy_rows:
+            candidates = []
+            for destination, destination_stock, source, source_stock in (
+                (FACTORIES[0], kc_stock, FACTORIES[1], windy_stock),
+                (FACTORIES[1], windy_stock, FACTORIES[0], kc_stock),
+            ):
+                if destination_stock <= low_limit and source_stock > low_limit:
+                    needed = max((low_limit + 1) - destination_stock, 0)
+                    surplus = max(source_stock - low_limit, 0)
+                    quantity = min(needed, surplus)
+                    if quantity > 0:
+                        candidates.append((quantity, destination, source, destination_stock, source_stock))
+            if candidates:
+                quantity, destination, source, dest_stock, source_stock = max(candidates)
+                unit = next(iter(units))
+                suggestion = f"{quantity:g} {unit}: {source} → {destination}"
+                transfer = {
+                    "qty": quantity, "unit": unit, "source": source, "destination": destination,
+                    "destination_stock": dest_stock, "source_stock": source_stock,
+                }
+
+        if duplicate_mapping:
+            status = "Review duplicate mapping"
+        elif unit_mismatch:
+            status = "Unit mismatch — not combined"
+        elif any(float(num(row.get("current_stock"), 0) or 0) < 0 for row in all_rows):
+            status = "Negative stock"
+        elif transfer:
+            status = "Transfer may help"
+        elif any(float(num(row.get("current_stock"), 0) or 0) <= low_limit for row in all_rows):
+            status = "Low stock"
+        elif variance not in (None, 0):
+            status = "ERP mismatch"
+        else:
+            status = "Healthy"
+
+        departments = sorted({txt(row.get("department")) for row in all_rows if txt(row.get("department"))})
+        categories = sorted({txt(row.get("category")) for row in all_rows if txt(row.get("category"))})
+        serials = sorted({txt(row.get("serial_no")) for row in all_rows if txt(row.get("serial_no"))})
+        all_items.append({
+            "_identity": identity, "_rows": all_rows, "_rows_by_factory": per_factory,
+            "_transfer": transfer, "_departments": departments, "_categories": categories, "_serials": serials,
+            "ERP Code": group["prod_id"] or "—", "Item": group["item_name"], "Size": group["size"] or "—",
+            "Unit": ", ".join(sorted(units)) if units else "—", "Department": ", ".join(departments) or "—",
+            "Category": ", ".join(categories) or "—", "KC Stock": kc_stock if kc_rows else 0.0,
+            "Windy Stock": windy_stock if windy_rows else 0.0, "Total Stock": total_stock,
+            "ERP Total": erp_total, "Variance": variance, "Inventory Value (৳)": value,
+            "Status": status, "Transfer Suggestion": suggestion,
+        })
+
+    # Filters: selecting a factory narrows the product list but keeps both balance columns visible.
+    f1, f2, f3, f4, f5 = st.columns([1.1, 1.25, 1.4, 1.35, 2.0], gap="small")
+    factory_filter = f1.selectbox("Factory", ["All factories"] + FACTORIES, key="global_factory_filter")
+    department_options = sorted({d for item in all_items for d in item["_departments"]})
+    category_options = sorted({c for item in all_items for c in item["_categories"]})
+    department_filter = f2.selectbox("Department", ["All"] + department_options, key="global_department_filter")
+    category_filter = f3.selectbox("Category", ["All"] + category_options, key="global_category_filter")
+    status_filter = f4.selectbox(
+        "Status", ["All", "Transfer may help", "Low stock", "Negative stock", "ERP mismatch",
+                    "Unit mismatch — not combined", "Review duplicate mapping", "Healthy"],
+        key="global_status_filter"
+    )
+    search_term = f5.text_input("Search", key="global_search", placeholder="Item / ERP / Size / Serial")
+
+    visible = []
+    query = search_term.strip().casefold()
+    for item in all_items:
+        if factory_filter != "All factories" and not item["_rows_by_factory"][factory_filter]:
+            continue
+        if department_filter != "All" and department_filter not in item["_departments"]:
+            continue
+        if category_filter != "All" and category_filter not in item["_categories"]:
+            continue
+        if status_filter != "All" and item["Status"] != status_filter:
+            continue
+        if query:
+            searchable = " ".join([
+                item["ERP Code"], item["Item"], item["Size"], item["Department"], item["Category"],
+                " ".join(item["_serials"]),
+            ]).casefold()
+            if query not in searchable:
+                continue
+        visible.append(item)
+
+    total_value = sum(float(item["Inventory Value (৳)"] or 0) for item in visible)
+    transfer_count = sum(1 for item in visible if item["_transfer"])
+    low_count = sum(1 for item in visible if item["Status"] in ("Low stock", "Negative stock", "Transfer may help"))
+    metrics = st.columns(4, gap="small")
+    metrics[0].metric("Products", f"{len(visible):,}")
+    metrics[1].metric("Low / negative", f"{low_count:,}")
+    metrics[2].metric("Transfer may help", f"{transfer_count:,}")
+    metrics[3].metric("Inventory value", f"৳{total_value:,.0f}")
+    st.caption("Read-only consolidated view. Quantities are combined only when both factories use the same UOM.")
+
+    display_rows = [{column: item[column] for column in (
+        "ERP Code", "Item", "Size", "Unit", "KC Stock", "Windy Stock", "Total Stock", "ERP Total",
+        "Variance", "Inventory Value (৳)", "Status", "Transfer Suggestion"
+    )} for item in visible]
+    if display_rows:
+        display_df = pd.DataFrame(display_rows)
+        st.dataframe(
+            display_df, hide_index=True, use_container_width=True, height=520,
+            column_config={
+                "KC Stock": st.column_config.NumberColumn(format="%.2f"),
+                "Windy Stock": st.column_config.NumberColumn(format="%.2f"),
+                "Total Stock": st.column_config.NumberColumn(format="%.2f"),
+                "ERP Total": st.column_config.NumberColumn(format="%.2f"),
+                "Variance": st.column_config.NumberColumn(format="%.2f"),
+                "Inventory Value (৳)": st.column_config.NumberColumn(format="৳ %,.2f"),
+            },
+        )
+        export_buttons(display_df, "global_inventory")
+    else:
+        st.info("No products match these filters.")
+
+    if not visible:
+        return
+    detail_labels = {}
+    for item in visible:
+        label = f"{item['ERP Code']} · {item['Item']} · {item['Size']}"
+        if label in detail_labels:
+            label += f" · {item['_identity'][0]}:{item['_identity'][1]}"
+        detail_labels[label] = item
+    selected = st.selectbox("Item details", list(detail_labels), key="global_item_detail")
+    selected_item = detail_labels[selected]
+    c_kc, c_windy = st.columns(2, gap="large")
+    for detail_col, factory in ((c_kc, FACTORIES[0]), (c_windy, FACTORIES[1])):
+        factory_rows = selected_item["_rows_by_factory"][factory]
+        with detail_col:
+            st.markdown(f"**{factory}**")
+            if not factory_rows:
+                st.caption("No master item in this factory.")
+            else:
+                stock = sum_field(factory_rows, "current_stock")
+                erp = sum_field(factory_rows, "erp_stock")
+                value = sum(float(num(r.get("current_stock"), 0) or 0) * float(num(r.get("unit_price"), 0) or 0) for r in factory_rows)
+                d1, d2, d3 = st.columns(3)
+                d1.metric("Physical", f"{stock:,.2f} {txt(factory_rows[0].get('unit_name'))}")
+                d2.metric("ERP", f"{erp:,.2f}")
+                d3.metric("Value", f"৳{value:,.0f}")
+
+    transfer = selected_item["_transfer"]
+    if transfer:
+        st.info(
+            f"Transfer may help: {transfer['source']} has {transfer['source_stock']:g} {transfer['unit']}; "
+            f"{transfer['destination']} has {transfer['destination_stock']:g}. Suggested: "
+            f"{transfer['qty']:g} {transfer['unit']}. This page is read-only; use Transactions to process it."
+        )
+        if st.button("Open Transactions to process suggestion", key="global_go_transactions"):
+            st.session_state[NAV_KEY] = TAB_NAMES[1]
+            st.rerun()
+
+    pairs = [(r["factory_name"], int(r["sl_no"])) for r in selected_item["_rows"] if r.get("sl_no") is not None]
+    st.markdown('<div class="section-title">Recent stock movements · last 10</div>', unsafe_allow_html=True)
+    if pairs:
+        where = " OR ".join("(factory_name=%s AND sl_no=%s)" for _ in pairs)
+        params = [value for pair in pairs for value in pair]
+        movements = qdf(
+            f"SELECT id, factory_name, date, time, item_name, qty, trans_type, officer_name, notes "
+            f"FROM transactions WHERE {where} ORDER BY id DESC LIMIT 10", params
+        )
+        st.dataframe(movements, hide_index=True, use_container_width=True, height=300)
+    else:
+        st.caption("No stock movements recorded for this item.")
 # ============================================================
 #  TAB 4 - ISSUE LEDGER
 # ============================================================
@@ -4709,7 +4947,7 @@ sidebar_clock()
 
 with st.sidebar:
     st.markdown('<div class="nav-section-title">Workspace</div>', unsafe_allow_html=True)
-    for nav_index in range(4):
+    for nav_index in range(5):
         nav_label = TAB_NAMES[nav_index]
         if st.button(
             nav_label,
@@ -4721,7 +4959,7 @@ with st.sidebar:
             st.rerun()
 
     st.markdown('<div class="nav-section-title">Management</div>', unsafe_allow_html=True)
-    for nav_index in range(4, len(TAB_NAMES)):
+    for nav_index in range(5, len(TAB_NAMES)):
         nav_label = TAB_NAMES[nav_index]
         if st.button(
             nav_label,
@@ -4739,7 +4977,7 @@ is_cons_view = "CONSOLIDATED" in FAC
 autoset_uom_once()
 
 # Render only the selected module; the sidebar buttons update NAV_KEY.
-RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_erp_audit, tab_issue_ledger,
+RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_global_inventory, tab_erp_audit, tab_issue_ledger,
              tab_transfer_history, tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
 RENDERERS[TAB_NAMES.index(active_tab)]()
