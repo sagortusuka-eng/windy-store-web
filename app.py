@@ -629,6 +629,36 @@ section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button[kind="
 .block-container { width:100% !important; max-width:none !important; }
 </style>""", unsafe_allow_html=True)
 
+st.markdown("""<style>
+.topbar-meta { display:flex; flex-direction:column; align-items:flex-end; gap:5px; color:#475569; font-size:13px; font-weight:600; }
+section[data-testid="stSidebar"] h3,
+section[data-testid="stSidebar"] div[data-testid="stMarkdownContainer"] h3 { color:#F8FAFC !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button p { color:#D8E3EF !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button[kind="primary"] p { color:#FFFFFF !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button[kind="secondary"] {
+    background:transparent !important; border-color:transparent !important; color:#D8E3EF !important;
+}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button[kind="secondary"]:hover {
+    background:#1B334B !important; border-color:#2D4963 !important; color:#FFFFFF !important;
+}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button[kind="secondary"] p { color:#D8E3EF !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button[kind="secondary"]:hover p { color:#FFFFFF !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button[kind="primary"] {
+    background:#087E8B !important; border-color:#1599A6 !important; color:#FFFFFF !important;
+}
+section[data-testid="stSidebar"] div[data-testid="stCaptionContainer"] p { color:#C7D4E2 !important; }
+section[data-testid="stSidebar"] .brand-card .b-t,
+section[data-testid="stSidebar"] .brand-card .b-s { color:#FFFFFF !important; }
+/* Top bar selector styling */
+.stApp div[data-testid="stVerticalBlockBorderWrapper"]:has(.topbar-meta) {
+    border-color:#D8E0EA !important; box-shadow:0 2px 10px rgba(15,23,42,.05) !important;
+}
+.topbar-meta span { white-space:nowrap; }
+@media (max-width: 850px) {
+    .topbar-meta { align-items:flex-start; }
+}
+</style>""", unsafe_allow_html=True)
+
 # ============================================================
 #  CONSTANTS
 # ============================================================
@@ -1947,14 +1977,29 @@ def local_now():
 
 
 def render_header():
-    """Slim one-line strip shown at the top of every tab (tabs themselves sit above everything)."""
+    """Top bar with the active factory switcher, date and signed-in role."""
+    if st.session_state.get("factory") not in FACTORIES + [ALL_VIEW]:
+        st.session_state["factory"] = FACTORIES[0]
+    selected_factory = st.session_state.get("factory", FACTORIES[0])
     user_txt = (f"{st.session_state['user']} · {st.session_state.get('role', '')}"
-                if st.session_state.get("user") else "Guest (view only)")
-    st.markdown(
-        f'<div class="strip"><span>🏭 <b>{html_lib.escape(FAC)}</b></span>'
-        f'<span>🕒 <b>{local_now():%d %b %Y | %I:%M %p}</b></span>'
-        f'<span>👤 {html_lib.escape(user_txt)}</span></div>', unsafe_allow_html=True)
+                if st.session_state.get("user") else "Guest · view only")
 
+    with st.container(border=True):
+        left, middle, right = st.columns([1.25, 1.1, 1.65], gap="medium", vertical_alignment="center")
+        with left:
+            st.markdown("**KC Windy Inventory**")
+            st.caption("Management workspace")
+        with middle:
+            selected_factory = st.selectbox(
+                "🏭 Active factory", FACTORIES + [ALL_VIEW], key="factory"
+            )
+        with right:
+            st.markdown(
+                f'<div class="topbar-meta"><span>🕒 {local_now():%d %b %Y · %I:%M %p}</span>'
+                f'<span>👤 {html_lib.escape(user_txt)}</span></div>',
+                unsafe_allow_html=True,
+            )
+    return selected_factory
 
 def sidebar_clock():
     with st.sidebar:
@@ -4504,14 +4549,12 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("---")
-    st.markdown("### 🏭 Active Factory")
-    FAC = st.selectbox("Active factory", FACTORIES + [ALL_VIEW], key="factory", label_visibility="collapsed")
-    st.caption("📌 CONSOLIDATED view shudhu dekhar jonno. Entry-r jonno specific factory bachun.")
     sidebar_clock()
 
 # Login / profile controls now sit below Workspace and Management navigation.
 sidebar_login()
 
+FAC = render_header()
 FSQL, FP = fw(FAC)
 is_cons_view = "CONSOLIDATED" in FAC
 autoset_uom_once()
@@ -4520,6 +4563,5 @@ autoset_uom_once()
 RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_erp_audit, tab_issue_ledger,
              tab_transfer_history, tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[1])
-render_header()
 RENDERERS[TAB_NAMES.index(active_tab)]()
 render_session_cookie_js()
