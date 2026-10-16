@@ -639,6 +639,7 @@ def init_db():
             conn.commit()
         except Exception:
             conn.rollback()
+    init_master_tables()
     return True
 
 
@@ -655,6 +656,72 @@ def ensure_live_connection():
             _connect.clear()
         except Exception:
             pass
+
+
+# ============================================================
+#  UOM / CATEGORY MASTER (dynamic, DB-backed, additive only)
+# ============================================================
+DEFAULT_UOMS = ["FEET", "KG", "PCS", "YRD", "LBS", "PKT"]
+
+
+def init_master_tables():
+    """Creates the UOM and product-category lists. Only adds rows that are missing; never touches stock data."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS uom_master (
+                    id SERIAL PRIMARY KEY, uom_name TEXT UNIQUE)""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS product_category_master (
+                    id SERIAL PRIMARY KEY, category_name TEXT UNIQUE, created_by TEXT, created_at TEXT)""")
+            for u in DEFAULT_UOMS:
+                cur.execute("INSERT INTO uom_master (uom_name) VALUES (%s) ON CONFLICT (uom_name) DO NOTHING", (u,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+
+def get_uoms():
+    rows = q("SELECT uom_name FROM uom_master ORDER BY uom_name")
+    names = [r["uom_name"] for r in rows]
+    return names or list(DEFAULT_UOMS)
+
+
+def get_budget_categories(fac=None):
+    """Budget categories come straight from the existing Budget table (category_budgets)."""
+    if fac and "CONSOLIDATED" not in fac:
+        rows = q("SELECT DISTINCT category_name FROM category_budgets WHERE factory_name=%s ORDER BY category_name", (fac,))
+    else:
+        rows = q("SELECT DISTINCT category_name FROM category_budgets ORDER BY category_name")
+    return [r["category_name"] for r in rows]
+
+
+def get_product_categories():
+    rows = q("SELECT category_name FROM product_category_master ORDER BY category_name")
+    names = [r["category_name"] for r in rows]
+    # Keep the categories already used in the inventory so nothing disappears from existing data.
+    used = q("SELECT DISTINCT category FROM inventory WHERE COALESCE(category,'')<>'' ORDER BY category")
+    for r in used:
+        if r["category"] not in names:
+            names.append(r["category"])
+    return names
+
+
+@tx
+def add_uom(name):
+    name = name.strip().upper()
+    run("INSERT INTO uom_master (uom_name) VALUES (%s) ON CONFLICT (uom_name) DO NOTHING", (name,))
+    audit("ADD_UOM", f"UOM added: {name}")
+    return True
+
+
+@tx
+def add_product_category(name):
+    name = name.strip()
+    run("""INSERT INTO product_category_master (category_name, created_by, created_at) VALUES (%s,%s,%s)
+           ON CONFLICT (category_name) DO NOTHING""",
+        (name, st.session_state.get("user", ""), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    audit("ADD_PRODUCT_CATEGORY", f"Product category added: {name}")
+    return True
 
 
 # ============================================================
@@ -982,7 +1049,6 @@ def sidebar_login():
                         st.error("Username din.")
                     elif request_password_reset(fu.strip()):
                         st.success("Username thakle reset request Store Manager-er kache pathano hoyeche.")
-
 
 # ============================================================
 #  HELPERS
@@ -1694,7 +1760,6 @@ def tab_dashboard():
     else:
         st.success(f"✅ Budget safe: consumption {pct:.1f}% (alert limit {BUDGET_ALERT_PCT}%).")
 
-
 # ============================================================
 #  TAB 1 - TRANSACTIONS (daily entry, top priority)
 # ============================================================
@@ -1967,7 +2032,7 @@ def tab_transactions():
 #  TAB 2 - INVENTORY MASTER
 # ============================================================
 @tx
-def add_item(fac, code, name, size, dept, cat, stock, price, serial=""):
+def add_item(fac, code, name, size, dept, cat, stock, price, serial="", unit="PCS"):
     serial = (serial or "").strip()
     ex = find_same_item(fac, name, size)
     owner = serial_owner(fac, serial)
@@ -1994,11 +2059,11 @@ def add_item(fac, code, name, size, dept, cat, stock, price, serial=""):
         return False
     mx = q("SELECT COALESCE(MAX(sl_no),0) AS m FROM inventory WHERE factory_name=%s", (fac,))[0]["m"]
     run("""INSERT INTO inventory (sl_no, prod_id, factory_name, item_name, size, department, category,
-           erp_stock, current_stock, unit_price, erp_status, serial_no)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ERP Pending',%s)""",
-        (int(mx) + 1, code, fac, name, size, dept, cat, stock, stock, price, serial))
+           erp_stock, current_stock, unit_price, erp_status, serial_no, unit_name)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ERP Pending',%s,%s)""",
+        (int(mx) + 1, code, fac, name, size, dept, cat, stock, stock, price, serial, unit))
     mirrored = mirror_to_other(fac, code, name, size, dept, cat, price)
-    audit("ADD_ITEM", f"{fac}: {name} [{size}] [{code}]" + (f" S/N {serial}" if serial else "")
+    audit("ADD_ITEM", f"{fac}: {name} [{size}] [{code}] UOM {unit}" + (f" S/N {serial}" if serial else "")
           + (" + copied to other unit" if mirrored else ""))
     return ("new", int(mx) + 1)
 
@@ -2080,22 +2145,53 @@ def inv_master_view():
 def inv_add_import_view():
     with st.container(border=True):
         st.markdown('<div class="section-title">Add New Item</div>', unsafe_allow_html=True)
+
+        # Flow: 1. Department  2. Budget Category  3. Product Category  4. Item  5. UOM
+        # Selections 1-3 sit outside the form so the lists below update instantly when they change.
+        s1, s2, s3 = st.columns(3)
+        dept = s1.selectbox("1. Department", DEPARTMENTS, key="add_dept")
+        bud_opts = get_budget_categories(FAC) or ["(no budget category)"]
+        bud_cat = s2.selectbox("2. Budget Category (from Budget tab)", bud_opts, key="add_bud_cat")
+        prod_opts = get_product_categories() or ["Uncategorized (Edit Later)"]
+        prod_cat = s3.selectbox("3. Product Category", prod_opts, key="add_prod_cat")
+
+        with st.expander("➕ Add new Product Category"):
+            nc1, nc2 = st.columns([3, 1])
+            new_pc = nc1.text_input("New product category name", key="new_pc_name")
+            if nc2.button("Add category", key="new_pc_btn") and guard():
+                if new_pc.strip():
+                    if add_product_category(new_pc.strip()):
+                        done(f"Product category '{new_pc.strip()}' added.")
+
         with st.form("add_item_form", clear_on_submit=False):
             c1, c2, c3 = st.columns(3)
-            code = c1.text_input("ERP Code (blank = temporary)")
+            code = c1.text_input("4. ERP Code (blank = temporary)")
             name = c2.text_input("Item Name*")
             size = c3.text_input("Size*")
-            dept = c1.selectbox("Department", DEPARTMENTS)
-            cat = c2.selectbox("Category", CATEGORIES)
-            stock = c3.number_input("Initial Stock", min_value=0.0, step=1.0)
-            price = c1.number_input("Unit Price (BDT)", min_value=0.0, step=1.0)
-            serial = c2.text_input("Serial No (optional, unique per factory)")
+            uom_opts = get_uoms()
+            unit = c1.selectbox("5. UOM", uom_opts, index=uom_opts.index("PCS") if "PCS" in uom_opts else 0)
+            stock = c2.number_input("Initial Stock", min_value=0.0, step=1.0)
+            price = c3.number_input("Unit Price (BDT)", min_value=0.0, step=1.0)
+            serial = c1.text_input("Serial No (optional, unique per factory)")
             submitted = st.form_submit_button("Save Item")
+
+        with st.expander("➕ Add new UOM"):
+            nu1, nu2 = st.columns([3, 1])
+            new_uom = nu1.text_input("New UOM (e.g. PAIR, SET, ROLL)", key="new_uom_name")
+            if nu2.button("Add UOM", key="new_uom_btn") and guard():
+                if new_uom.strip():
+                    if add_uom(new_uom.strip()):
+                        done(f"UOM '{new_uom.strip().upper()}' added.")
+
         if submitted and guard():
             if not name.strip() or not size.strip():
                 st.error("Item Name ar Size mandatory.")
+            elif bud_cat == "(no budget category)":
+                st.error("Budget tab-e age category toiri korun.")
             else:
-                res = add_item(FAC, code, name.strip(), size.strip(), dept, cat, stock, price, serial.strip())
+                # Product Category is stored as the item's category (used by the existing budget join).
+                res = add_item(FAC, code, name.strip(), size.strip(), dept, prod_cat, stock, price,
+                               serial.strip(), unit)
                 if res:
                     done("Stock added to existing item (no duplicate)." if res[0] == "exists" else "New item added.")
 
@@ -2145,7 +2241,9 @@ def inv_edit_view():
         dept = c1.selectbox("Department", DEPARTMENTS,
                             index=DEPARTMENTS.index(r["department"]) if r["department"] in DEPARTMENTS else 0, key=f"e_dept_{k}")
         cat = c2.text_input("Category", r["category"] or "", key=f"e_cat_{k}")
-        unit = c3.selectbox("Unit", UOM, index=UOM.index(r["unit_name"]) if r["unit_name"] in UOM else 0, key=f"e_unit_{k}")
+        uom_list = get_uoms()
+        cur_unit = r["unit_name"] if r["unit_name"] in uom_list else uom_list[0]
+        unit = c3.selectbox("Unit", uom_list, index=uom_list.index(cur_unit), key=f"e_unit_{k}")
         erp = c1.number_input("ERP Stock", value=float(r["erp_stock"]), step=1.0, key=f"e_erp_{k}")
         phys = c2.number_input("Physical Stock", value=float(r["current_stock"]), step=1.0, key=f"e_phys_{k}")
         price = c3.number_input("Unit Price", value=float(r["unit_price"]), min_value=0.0, key=f"e_price_{k}")
@@ -3919,7 +4017,9 @@ def tab_daily_sheet():
             opts = inv_options(fac)
             if opts:
                 r = opts[st.selectbox("Item", list(opts), key="uom_item")]
-                unit = st.selectbox("UOM", UOM, index=UOM.index(r["unit_name"]) if r["unit_name"] in UOM else 0, key="uom_val")
+                uom_list = get_uoms()
+                cur_unit = r["unit_name"] if r["unit_name"] in uom_list else uom_list[0]
+                unit = st.selectbox("UOM", uom_list, index=uom_list.index(cur_unit), key="uom_val")
                 same = st.checkbox("Apply to every item with this name (both factories)", value=True, key="uom_same")
                 if st.button("Save UOM", key="uom_btn"):
                     if set_uom(fac, r["sl_no"], r["item_name"], unit, same):
