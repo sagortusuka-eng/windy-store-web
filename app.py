@@ -2136,24 +2136,29 @@ def render_header():
     return selected_factory
 
 def sidebar_clock():
+    """Compact, distinct sidebar clock; displays Bangladesh-local time and date only."""
     with st.sidebar:
         components.html("""
-        <div style="font-family:Inter,sans-serif;background:#fff;border-radius:12px;box-shadow:0 4px 10px rgba(124,45,18,.2);
-                    padding:8px 14px;">
-          <div id="clk" style="font-size:16px;font-weight:800;color:#1E293B;">--:--:--</div>
-          <div id="dt" style="font-size:11.5px;color:#64748B;margin-top:2px;">--</div>
-          <div style="font-size:10.5px;color:#C2410C;font-weight:700;margin-top:2px;">Asia/Dhaka</div>
+        <div style="font-family:Inter,system-ui,sans-serif;display:flex;align-items:center;gap:10px;
+                    background:linear-gradient(135deg,#0B1A2A 0%,#17334B 100%);
+                    border:1px solid #2D4963;border-left:4px solid #14B8A6;border-radius:10px;
+                    padding:8px 11px;box-shadow:0 4px 12px rgba(2,12,24,.16);">
+          <div style="font-size:20px;line-height:1;color:#5EEAD4;">◷</div>
+          <div style="min-width:0;">
+            <div id="clk" style="font-size:16px;font-weight:800;letter-spacing:.6px;color:#FFFFFF;line-height:1.2;">--:--:--</div>
+            <div id="dt" style="font-size:11px;color:#C7D4E2;margin-top:3px;white-space:nowrap;">--</div>
+          </div>
+          <div style="margin-left:auto;font-size:9px;font-weight:800;letter-spacing:.8px;color:#5EEAD4;">LOCAL</div>
         </div>
         <script>
           function tick(){
-            const n = new Date(); const tz = {timeZone:'Asia/Dhaka'};
+            const n = new Date();
+            const tz = {timeZone:'Asia/Dhaka'};
             document.getElementById('clk').innerText = n.toLocaleTimeString('en-GB', Object.assign({hour12:false}, tz));
             document.getElementById('dt').innerText = n.toLocaleDateString('en-GB', Object.assign({weekday:'short',day:'2-digit',month:'short',year:'numeric'}, tz));
           }
           tick(); setInterval(tick, 1000);
-        </script>""", height=82)
-
-
+        </script>""", height=62)
 # ============================================================
 #  HOME - EXECUTIVE OVERVIEW (budget metrics)
 # ============================================================
