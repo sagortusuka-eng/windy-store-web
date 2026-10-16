@@ -996,6 +996,10 @@ def init_db():
         "ALTER TABLE repair_returns ADD COLUMN IF NOT EXISTS officer_name TEXT",
         "ALTER TABLE import_queue ADD COLUMN IF NOT EXISTS size TEXT DEFAULT ''",
         "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS serial_no TEXT DEFAULT ''",
+        "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS min_stock REAL DEFAULT 0",
+        "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS lead_time_days INTEGER DEFAULT 0",
+        "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS moq REAL DEFAULT 0",
+        "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS preferred_supplier TEXT DEFAULT ''",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Active'",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TEXT",
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS supplier_name TEXT DEFAULT ''",
@@ -1005,6 +1009,7 @@ def init_db():
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS erp_sl_ref TEXT DEFAULT ''",
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS po_pending_flag TEXT DEFAULT ''",
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS po_pending_date TEXT",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS unit_price_at_tx REAL",
         """CREATE TABLE IF NOT EXISTS password_resets (
             id SERIAL PRIMARY KEY, username TEXT, requested_at TEXT, status TEXT DEFAULT 'Pending',
             handled_by TEXT, handled_at TEXT)""",
@@ -1597,13 +1602,13 @@ def next_free_temp(fac):
 
 
 def insert_tx(fac, officer, sl, pid, name, qty, ttype, day, notes, date_s, time_s, verif, grn="Not Required",
-              supplier="", challan="", po_flag="", po_date=None):
+              supplier="", challan="", po_flag="", po_date=None, unit_price_at_tx=None):
     run("""INSERT INTO transactions (factory_name, officer_name, sl_no, prod_id, item_name, qty, trans_type, day,
            notes, date, time, verification_status, erp_grn_status, supplier_name, challan_no,
-           po_pending_flag, po_pending_date)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+           po_pending_flag, po_pending_date, unit_price_at_tx)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         (fac, officer, sl, pid, name, qty, ttype, day, notes, date_s, time_s, verif, grn, supplier, challan,
-         po_flag, po_date))
+         po_flag, po_date, unit_price_at_tx))
 
 
 def export_buttons(df, name):
@@ -1653,7 +1658,7 @@ def read_any(upload):
 def backup_zip():
     """Every table as CSV inside one zip."""
     buf = io.BytesIO()
-    tables = [r["table_name"] for r in q("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")]
+    tables = [r["table_name"] for r in q("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'")]
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for t in tables:
             z.writestr(f"{t}.csv", qdf(f'SELECT * FROM "{t}"').to_csv(index=False))
@@ -2411,7 +2416,8 @@ def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, sup
         run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (qty, sl, fac))
         insert_tx(fac, user, sl, pid, name, qty, ttype, day, notes, date_s, time_s, "Verified", grn,
                   supplier if ttype == "Supplier. Rec" else "", challan if ttype == "Supplier. Rec" else "",
-                  po_flag=po_flag, po_date=po_date)
+                  po_flag=po_flag, po_date=po_date,
+                  unit_price_at_tx=float(item.get("price") or 0) if ttype == "Supplier. Rec" else None)
     else:
         if qty > stock:
             st.error(f"Available stock ({stock:g}) kom ache requested qty ({qty:g}) theke.")
@@ -3668,228 +3674,379 @@ def tab_erp_audit():
 
 
 
-def tab_global_inventory():
-    """Read-only consolidated stock view with exact cross-factory matches and transfer suggestions."""
-    st.title("Global Inventory")
-    st.caption("One product row across KC Washing Plant and Windy Washing LTD. This view never changes stock.")
+@tx
+def save_global_replenishment_settings(factory, sl_no, min_stock, lead_time_days, moq, preferred_supplier):
+    run("""UPDATE inventory SET min_stock=%s, lead_time_days=%s, moq=%s, preferred_supplier=%s
+           WHERE factory_name=%s AND sl_no=%s""",
+        (min_stock, int(lead_time_days), moq, preferred_supplier.strip(), factory, int(sl_no)))
+    audit("UPDATE_REPLENISHMENT_SETTINGS", f"{factory} SL {sl_no}: minimum={min_stock:g}, lead={int(lead_time_days)}, MOQ={moq:g}")
+    return True
 
-    raw = qdf("""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no,
-                       COALESCE(prod_id,'') AS prod_id, COALESCE(item_name,'') AS item_name,
-                       COALESCE(size,'') AS size, COALESCE(department,'') AS department,
-                       COALESCE(category,'') AS category, COALESCE(current_stock,0) AS current_stock,
-                       COALESCE(erp_stock,0) AS erp_stock, COALESCE(unit_price,0) AS unit_price,
-                       COALESCE(NULLIF(unit_name,''),'Pcs') AS unit_name, COALESCE(erp_status,'') AS erp_status
+
+def read_validated_backup_archive(archive_bytes):
+    with zipfile.ZipFile(io.BytesIO(archive_bytes), "r") as archive:
+        members = [n for n in archive.namelist() if n.lower().endswith(".csv")]
+        if not members or any("/" in n or "\\" in n or n.startswith(".") for n in members):
+            raise ValueError("Backup ZIP is empty or contains an unsafe path.")
+        tables = {r["table_name"] for r in q("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'")}
+        member_map = {os.path.splitext(os.path.basename(n))[0]: n for n in members}
+        if len(member_map) != len(members) or set(member_map) != tables:
+            raise ValueError("Backup must contain exactly the current public tables.")
+        manifest = {}
+        for table, member in member_map.items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table):
+                raise ValueError(f"Unsafe table name: {table}")
+            schema = q("SELECT column_name,data_type FROM information_schema.columns WHERE table_schema='public' AND table_name=%s ORDER BY ordinal_position", (table,))
+            cols = [r["column_name"] for r in schema]
+            types = {r["column_name"]: r["data_type"] for r in schema}
+            frame = pd.read_csv(io.BytesIO(archive.read(member)), dtype=str, keep_default_na=False)
+            if list(frame.columns) != cols:
+                raise ValueError(f"Schema mismatch in {table}; no rows restored.")
+            manifest[table] = {"frame": frame, "cols": cols, "types": types}
+    return manifest
+
+
+def restore_validated_backup(archive_bytes):
+    manifest = read_validated_backup_archive(archive_bytes)
+    conn = get_conn()
+    text_types = {"text", "character varying", "character", "USER-DEFINED"}
+    try:
+        with conn.cursor() as cur:
+            for table in manifest:
+                cur.execute(f' DELETE FROM "{table}"')
+            for table, pack in manifest.items():
+                cols = pack["cols"]
+                quoted_cols = ", ".join('"' + col + '"' for col in cols)
+                placeholders = ", ".join(["%s"] * len(cols))
+                sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'
+                rows = []
+                for record in pack["frame"].to_dict("records"):
+                    rows.append(tuple(None if record[c] == "" and pack["types"][c] not in text_types else record[c] for c in cols))
+                if rows:
+                    cur.executemany(sql, rows)
+            for table, pack in manifest.items():
+                if "id" in pack["cols"]:
+                    cur.execute("SELECT pg_get_serial_sequence(%s,%s)", (table,"id"))
+                    seq = cur.fetchone()[0]
+                    if seq:
+                        cur.execute(f'SELECT setval(%s,COALESCE((SELECT MAX(id) FROM "{table}"),1),EXISTS(SELECT 1 FROM "{table}"))',(seq,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    log_event("RESTORE_DATABASE_BACKUP", f"Restored {len(manifest)} tables from validated ZIP")
+    return {name: len(data["frame"]) for name,data in manifest.items()}
+
+
+def tab_global_inventory():
+    """Consolidated, read-only inventory overview for both factories."""
+    st.title("Global Inventory")
+    st.caption("Compare KC and Windy stock, find data issues, and review safe transfer or reorder suggestions.")
+    inv = qdf("""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, COALESCE(prod_id,'') AS prod_id,
+                       COALESCE(item_name,'') AS item_name, COALESCE(size,'') AS size,
+                       COALESCE(department,'') AS department, COALESCE(category,'') AS category,
+                       COALESCE(current_stock,0) AS current_stock, COALESCE(erp_stock,0) AS erp_stock,
+                       COALESCE(unit_price,0) AS unit_price, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit_name,
+                       COALESCE(erp_status,'') AS erp_status, COALESCE(min_stock,0) AS min_stock,
+                       COALESCE(lead_time_days,0) AS lead_time_days, COALESCE(moq,0) AS moq,
+                       COALESCE(preferred_supplier,'') AS preferred_supplier
                 FROM inventory WHERE factory_name = ANY(%s)
                 ORDER BY item_name, size, factory_name, sl_no""", (FACTORIES,))
-    if raw.empty:
-        st.info("No inventory records are available for these factories.")
+    if inv.empty:
+        st.info("No inventory records are available for these factories yet.")
         return
 
-    low_limit = 5  # Matches the existing low-stock alert threshold.
-    groups = {}
-    for row in raw.to_dict("records"):
-        code, name, size = txt(row.get("prod_id")), txt(row.get("item_name")), txt(row.get("size"))
-        if is_blank_code(code) or code.upper().startswith("TEMP-"):
-            identity = ("NAME", norm_name(name), norm_size(size))
-        else:
-            # Only exact ERP-code + normalized-size matches are combined; no fuzzy stock merges.
+    recent_usage = q("""SELECT factory_name, sl_no, date, qty FROM transactions
+                       WHERE trans_type IN ('Issued','Internal Issue') AND factory_name = ANY(%s)""", (FACTORIES,))
+    today = local_now().date()
+    usage_start = today - timedelta(days=90)
+    usage_90 = {}
+    for row in recent_usage:
+        parsed = parse_date(row.get("date"))
+        if parsed and usage_start <= parsed.date() <= today:
+            k = (row["factory_name"], row["sl_no"])
+            usage_90[k] = usage_90.get(k, 0.0) + float(row["qty"] or 0)
+
+    code_counts, groups = {}, {}
+    for row in inv.to_dict("records"):
+        code, name, size = txt(row["prod_id"]), txt(row["item_name"]), txt(row["size"])
+        if not is_blank_code(code) and not code.upper().startswith("TEMP-"):
             identity = ("ERP", code.strip().upper(), norm_size(size))
-        if not name and identity[0] == "NAME":
+            ckey = (row["factory_name"], code.strip().upper())
+            code_counts[ckey] = code_counts.get(ckey, 0) + 1
+        else:
+            identity = ("NAME", norm_name(name), norm_size(size))
+        if identity[0] == "NAME" and not name:
             continue
-        group = groups.setdefault(identity, {
-            "identity": identity, "prod_id": code, "item_name": name, "size": size,
-            "rows_by_factory": {factory: [] for factory in FACTORIES},
-        })
-        if row["factory_name"] in group["rows_by_factory"]:
-            group["rows_by_factory"][row["factory_name"]].append(row)
+        groups.setdefault(identity, {"key": identity, "rows_by_factory": {f: [] for f in FACTORIES}})["rows_by_factory"][row["factory_name"]].append(row)
 
-    def sum_field(records, field):
-        return sum(float(num(record.get(field), 0) or 0) for record in records)
+    def sum_qty(rows, field):
+        return sum(float(num(r.get(field), 0) or 0) for r in rows)
 
-    all_items = []
+    global_rows, quality = [], []
     for identity, group in groups.items():
-        per_factory = group["rows_by_factory"]
-        kc_rows, windy_rows = per_factory[FACTORIES[0]], per_factory[FACTORIES[1]]
-        all_rows = kc_rows + windy_rows
-        units = {txt(row.get("unit_name") or "Pcs").upper() for row in all_rows}
-        unit_mismatch = len(units) > 1
-        duplicate_mapping = any(len(per_factory[factory]) > 1 for factory in FACTORIES)
-        kc_stock, windy_stock = sum_field(kc_rows, "current_stock"), sum_field(windy_rows, "current_stock")
-        kc_erp, windy_erp = sum_field(kc_rows, "erp_stock"), sum_field(windy_rows, "erp_stock")
-        value = sum(
-            float(num(row.get("current_stock"), 0) or 0) * float(num(row.get("unit_price"), 0) or 0)
-            for row in all_rows
-        )
-        total_stock = None if unit_mismatch else kc_stock + windy_stock
-        erp_total = None if unit_mismatch else kc_erp + windy_erp
-        variance = None if unit_mismatch else total_stock - erp_total
+        by_factory = group["rows_by_factory"]
+        kc, windy = by_factory[FACTORIES[0]], by_factory[FACTORIES[1]]
+        records = kc + windy
+        units = {txt(r.get("unit_name") or "Pcs").upper() for r in records}
+        uom_mismatch = len(units) > 1
+        duplicate_match = any(len(by_factory[f]) > 1 for f in FACTORIES)
+        name_conflict = len({norm_name(r["item_name"]) for r in records if txt(r["item_name"])}) > 1
+        review = duplicate_match or name_conflict
+        kc_stock, windy_stock = sum_qty(kc, "current_stock"), sum_qty(windy, "current_stock")
+        kc_erp, windy_erp = sum_qty(kc, "erp_stock"), sum_qty(windy, "erp_stock")
+        value = sum(float(num(r["current_stock"], 0) or 0) * float(num(r["unit_price"], 0) or 0) for r in records)
+        if uom_mismatch or review:
+            total_stock = erp_total = variance = short_qty = excess_qty = None
+        else:
+            total_stock, erp_total = kc_stock + windy_stock, kc_erp + windy_erp
+            variance = total_stock - erp_total
+            short_qty, excess_qty = max(erp_total-total_stock, 0), max(total_stock-erp_total, 0)
 
-        suggestion = "—"
         transfer = None
-        if not unit_mismatch and not duplicate_mapping and kc_rows and windy_rows:
-            candidates = []
-            for destination, destination_stock, source, source_stock in (
-                (FACTORIES[0], kc_stock, FACTORIES[1], windy_stock),
-                (FACTORIES[1], windy_stock, FACTORIES[0], kc_stock),
-            ):
-                if destination_stock <= low_limit and source_stock > low_limit:
-                    needed = max((low_limit + 1) - destination_stock, 0)
-                    surplus = max(source_stock - low_limit, 0)
-                    quantity = min(needed, surplus)
-                    if quantity > 0:
-                        candidates.append((quantity, destination, source, destination_stock, source_stock))
-            if candidates:
-                quantity, destination, source, dest_stock, source_stock = max(candidates)
-                unit = next(iter(units))
-                suggestion = f"{quantity:g} {unit}: {source} → {destination}"
-                transfer = {
-                    "qty": quantity, "unit": unit, "source": source, "destination": destination,
-                    "destination_stock": dest_stock, "source_stock": source_stock,
-                }
+        if not uom_mismatch and not review and len(kc) == len(windy) == 1:
+            choices = []
+            for dst, dst_qty, src, src_qty in ((FACTORIES[0], kc_stock, FACTORIES[1], windy_stock),
+                                                (FACTORIES[1], windy_stock, FACTORIES[0], kc_stock)):
+                if dst_qty <= 5 and src_qty > 5:
+                    qty = min(max(6-dst_qty, 0), max(src_qty-5, 0))
+                    if qty > 0:
+                        choices.append((qty, dst, src, dst_qty, src_qty))
+            if choices:
+                qty, dst, src, dst_qty, src_qty = max(choices)
+                transfer = {"qty":qty, "dest":dst, "source":src, "dest_stock":dst_qty, "source_stock":src_qty, "unit":next(iter(units))}
 
-        if duplicate_mapping:
-            status = "Review duplicate mapping"
-        elif unit_mismatch:
+        reorder = []
+        for factory, rows in by_factory.items():
+            if len(rows) != 1:
+                continue
+            r = rows[0]
+            on_hand = float(num(r["current_stock"], 0) or 0)
+            minimum = float(num(r["min_stock"], 0) or 0)
+            lead = int(num(r["lead_time_days"], 0) or 0)
+            moq = float(num(r["moq"], 0) or 0)
+            avg_daily = usage_90.get((factory, r["sl_no"]), 0.0) / 90.0
+            qty = max(math.ceil(minimum + avg_daily*lead - on_hand), 0)
+            if qty > 0 and moq > 0:
+                qty = math.ceil(qty/moq)*moq
+            if qty > 0:
+                reorder.append(f"{factory}: {qty:g} {r['unit_name']}")
+
+        if review:
+            status = "Review match"
+        elif uom_mismatch:
             status = "Unit mismatch — not combined"
-        elif any(float(num(row.get("current_stock"), 0) or 0) < 0 for row in all_rows):
+        elif any(float(num(r["current_stock"], 0) or 0) < 0 for r in records):
             status = "Negative stock"
         elif transfer:
             status = "Transfer may help"
-        elif any(float(num(row.get("current_stock"), 0) or 0) <= low_limit for row in all_rows):
+        elif any(float(num(r["current_stock"], 0) or 0) <= 5 for r in records):
             status = "Low stock"
         elif variance not in (None, 0):
             status = "ERP mismatch"
         else:
             status = "Healthy"
 
-        departments = sorted({txt(row.get("department")) for row in all_rows if txt(row.get("department"))})
-        categories = sorted({txt(row.get("category")) for row in all_rows if txt(row.get("category"))})
-        serials = sorted({txt(row.get("serial_no")) for row in all_rows if txt(row.get("serial_no"))})
-        all_items.append({
-            "_identity": identity, "_rows": all_rows, "_rows_by_factory": per_factory,
-            "_transfer": transfer, "_departments": departments, "_categories": categories, "_serials": serials,
-            "ERP Code": group["prod_id"] or "—", "Item": group["item_name"], "Size": group["size"] or "—",
-            "Unit": ", ".join(sorted(units)) if units else "—", "Department": ", ".join(departments) or "—",
-            "Category": ", ".join(categories) or "—", "KC Stock": kc_stock if kc_rows else 0.0,
-            "Windy Stock": windy_stock if windy_rows else 0.0, "Total Stock": total_stock,
-            "ERP Total": erp_total, "Variance": variance, "Inventory Value (৳)": value,
-            "Status": status, "Transfer Suggestion": suggestion,
+        departments = sorted({txt(r["department"]) for r in records if txt(r["department"])})
+        categories = sorted({txt(r["category"]) for r in records if txt(r["category"])})
+        serials = sorted({txt(r["serial_no"]) for r in records if txt(r["serial_no"])})
+        first = records[0]
+        global_rows.append({
+            "_key":identity, "_rows":records, "_by_factory":by_factory, "_transfer":transfer,
+            "_departments":departments, "_categories":categories, "_serials":serials,
+            "ERP Code":txt(first["prod_id"]) or "—", "Item":txt(first["item_name"]), "Size":txt(first["size"]) or "—",
+            "UOM":", ".join(sorted(units)), "Department":", ".join(departments) or "—", "Category":", ".join(categories) or "—",
+            "KC Stock":kc_stock, "Windy Stock":windy_stock, "Total Stock":total_stock, "ERP Total":erp_total,
+            "Variance":variance, "Short Qty":short_qty, "Excess Qty":excess_qty, "Inventory Value (৳)":value,
+            "Status":status, "Reorder Suggestion":"; ".join(reorder) or "—",
+            "Transfer Suggestion":f"{transfer['qty']:g} {transfer['unit']} · {transfer['source']} → {transfer['dest']}" if transfer else "—",
         })
 
-    # Filters: selecting a factory narrows the product list but keeps both balance columns visible.
-    f1, f2, f3, f4, f5 = st.columns([1.1, 1.25, 1.4, 1.35, 2.0], gap="small")
-    factory_filter = f1.selectbox("Factory", ["All factories"] + FACTORIES, key="global_factory_filter")
-    department_options = sorted({d for item in all_items for d in item["_departments"]})
-    category_options = sorted({c for item in all_items for c in item["_categories"]})
-    department_filter = f2.selectbox("Department", ["All"] + department_options, key="global_department_filter")
-    category_filter = f3.selectbox("Category", ["All"] + category_options, key="global_category_filter")
-    status_filter = f4.selectbox(
-        "Status", ["All", "Transfer may help", "Low stock", "Negative stock", "ERP mismatch",
-                    "Unit mismatch — not combined", "Review duplicate mapping", "Healthy"],
-        key="global_status_filter"
-    )
-    search_term = f5.text_input("Search", key="global_search", placeholder="Item / ERP / Size / Serial")
+    for row in inv.to_dict("records"):
+        code, name, size = txt(row["prod_id"]), txt(row["item_name"]), txt(row["size"])
+        physical, erp = float(num(row["current_stock"], 0) or 0), float(num(row["erp_stock"], 0) or 0)
+        flags = []
+        if code and not is_blank_code(code) and not code.upper().startswith("TEMP-") and code_counts.get((row["factory_name"], code.strip().upper()), 0) > 1:
+            flags.append("Duplicate ERP code")
+        if not size: flags.append("Missing size")
+        if not txt(row["serial_no"]): flags.append("Missing serial (optional)")
+        if is_blank_code(code) or code.upper().startswith("TEMP-"): flags.append("Temporary / missing ERP code")
+        if physical < 0: flags.append("Negative stock")
+        if abs(physical-erp) > 1e-9: flags.append("ERP mismatch")
+        for flag in flags:
+            quality.append({"Factory":row["factory_name"], "SL No":row["sl_no"], "ERP Code":code or "—",
+                            "Item":name, "Size":size or "—", "Alert":flag, "Physical Qty":physical,
+                            "ERP Qty":erp, "Variance":physical-erp})
 
-    visible = []
-    query = search_term.strip().casefold()
-    for item in all_items:
-        if factory_filter != "All factories" and not item["_rows_by_factory"][factory_filter]:
-            continue
-        if department_filter != "All" and department_filter not in item["_departments"]:
-            continue
-        if category_filter != "All" and category_filter not in item["_categories"]:
-            continue
-        if status_filter != "All" and item["Status"] != status_filter:
-            continue
-        if query:
-            searchable = " ".join([
-                item["ERP Code"], item["Item"], item["Size"], item["Department"], item["Category"],
-                " ".join(item["_serials"]),
-            ]).casefold()
-            if query not in searchable:
-                continue
+    # Filters.
+    c1,c2,c3,c4,c5 = st.columns([1.1,1.2,1.4,1.35,2.0], gap="small")
+    fac_filter = c1.selectbox("Factory", ["All factories"]+FACTORIES, key="global_factory_filter")
+    dept_options = sorted({v for item in global_rows for v in item["_departments"]})
+    cat_options = sorted({v for item in global_rows for v in item["_categories"]})
+    dept_filter = c2.selectbox("Department", ["All"]+dept_options, key="global_department_filter")
+    cat_filter = c3.selectbox("Category", ["All"]+cat_options, key="global_category_filter")
+    status_filter = c4.selectbox("Status", ["All","Transfer may help","Low stock","Negative stock","ERP mismatch","Unit mismatch — not combined","Review match","Healthy"], key="global_status_filter")
+    search = c5.text_input("Search", key="global_search", placeholder="Item / ERP / size / serial")
+    visible=[]
+    for item in global_rows:
+        if fac_filter != "All factories" and not item["_by_factory"][fac_filter]: continue
+        if dept_filter != "All" and dept_filter not in item["_departments"]: continue
+        if cat_filter != "All" and cat_filter not in item["_categories"]: continue
+        if status_filter != "All" and item["Status"] != status_filter: continue
+        haystack = " ".join([item["ERP Code"],item["Item"],item["Size"],item["Department"],item["Category"]," ".join(item["_serials"])]).casefold()
+        if search.strip() and search.strip().casefold() not in haystack: continue
         visible.append(item)
 
-    total_value = sum(float(item["Inventory Value (৳)"] or 0) for item in visible)
-    transfer_count = sum(1 for item in visible if item["_transfer"])
-    low_count = sum(1 for item in visible if item["Status"] in ("Low stock", "Negative stock", "Transfer may help"))
-    metrics = st.columns(4, gap="small")
-    metrics[0].metric("Products", f"{len(visible):,}")
-    metrics[1].metric("Low / negative", f"{low_count:,}")
-    metrics[2].metric("Transfer may help", f"{transfer_count:,}")
-    metrics[3].metric("Inventory value", f"৳{total_value:,.0f}")
-    st.caption("Read-only consolidated view. Quantities are combined only when both factories use the same UOM.")
+    value_total=sum(float(item["Inventory Value (৳)"] or 0) for item in visible)
+    low_count=sum(item["Status"] in ("Low stock","Negative stock","Transfer may help") for item in visible)
+    xfer_count=sum(bool(item["_transfer"]) for item in visible)
+    m=st.columns(5,gap="small")
+    m[0].metric("Products",f"{len(visible):,}")
+    m[1].metric("Low / negative",f"{low_count:,}")
+    m[2].metric("Transfer may help",f"{xfer_count:,}")
+    m[3].metric("Quality alerts",f"{len(quality):,}")
+    m[4].metric("Inventory value",f"৳{value_total:,.0f}")
+    st.caption("Read-only consolidated view. Quantity totals combine only matching UOMs.")
 
-    display_rows = [{column: item[column] for column in (
-        "ERP Code", "Item", "Size", "Unit", "KC Stock", "Windy Stock", "Total Stock", "ERP Total",
-        "Variance", "Inventory Value (৳)", "Status", "Transfer Suggestion"
-    )} for item in visible]
-    if display_rows:
-        display_df = pd.DataFrame(display_rows)
-        st.dataframe(
-            display_df, hide_index=True, use_container_width=True, height=520,
-            column_config={
-                "KC Stock": st.column_config.NumberColumn(format="%.2f"),
-                "Windy Stock": st.column_config.NumberColumn(format="%.2f"),
-                "Total Stock": st.column_config.NumberColumn(format="%.2f"),
-                "ERP Total": st.column_config.NumberColumn(format="%.2f"),
-                "Variance": st.column_config.NumberColumn(format="%.2f"),
-                "Inventory Value (৳)": st.column_config.NumberColumn(format="৳ %,.2f"),
-            },
-        )
-        export_buttons(display_df, "global_inventory")
+    cols=["ERP Code","Item","Size","UOM","KC Stock","Windy Stock","Total Stock","ERP Total","Variance","Short Qty","Excess Qty","Inventory Value (৳)","Status","Reorder Suggestion","Transfer Suggestion"]
+    view=pd.DataFrame([{col:item[col] for col in cols} for item in visible])
+    if not view.empty:
+        st.dataframe(view,hide_index=True,use_container_width=True,height=520,column_config={
+            "KC Stock":st.column_config.NumberColumn(format="%.2f"),"Windy Stock":st.column_config.NumberColumn(format="%.2f"),
+            "Total Stock":st.column_config.NumberColumn(format="%.2f"),"ERP Total":st.column_config.NumberColumn(format="%.2f"),
+            "Variance":st.column_config.NumberColumn(format="%.2f"),"Short Qty":st.column_config.NumberColumn(format="%.2f"),
+            "Excess Qty":st.column_config.NumberColumn(format="%.2f"),"Inventory Value (৳)":st.column_config.NumberColumn(format="৳ %,.2f")})
+        export_buttons(view,"global_inventory")
     else:
         st.info("No products match these filters.")
 
-    if not visible:
-        return
-    detail_labels = {}
+    sync_logs=q("SELECT timestamp,username,details FROM audit_logs WHERE action_type='IMPORT_ERP_BALANCE' ORDER BY id DESC LIMIT 300")
+    sync_by_factory={}
+    for log in sync_logs:
+        details=str(log.get("details") or "")
+        for factory in FACTORIES:
+            if factory in details and factory not in sync_by_factory:
+                match=re.search(r"matched\s+(\d+),\s*queued\s+(\d+)",details,re.I)
+                sync_by_factory[factory]={"Factory":factory,"Last import":log.get("timestamp") or "—",
+                    "Matched":int(match.group(1)) if match else "—","Unmatched queued":int(match.group(2)) if match else "—",
+                    "Imported by":log.get("username") or "—"}
+    sync_df=pd.DataFrame([sync_by_factory.get(f,{"Factory":f,"Last import":"No ERP import recorded","Matched":"—","Unmatched queued":"—","Imported by":"—"}) for f in FACTORIES])
+    with st.expander(f"Data quality alerts · {len(quality):,}"):
+        if quality:
+            qdf_alert=pd.DataFrame(quality)
+            st.dataframe(qdf_alert,hide_index=True,use_container_width=True,height=320)
+            export_buttons(qdf_alert,"global_inventory_quality")
+        else: st.success("No data-quality alerts.")
+        st.markdown("**ERP sync freshness**")
+        st.dataframe(sync_df,hide_index=True,use_container_width=True)
+
+    if not visible: return
+    details={}
     for item in visible:
-        label = f"{item['ERP Code']} · {item['Item']} · {item['Size']}"
-        if label in detail_labels:
-            label += f" · {item['_identity'][0]}:{item['_identity'][1]}"
-        detail_labels[label] = item
-    selected = st.selectbox("Item details", list(detail_labels), key="global_item_detail")
-    selected_item = detail_labels[selected]
-    c_kc, c_windy = st.columns(2, gap="large")
-    for detail_col, factory in ((c_kc, FACTORIES[0]), (c_windy, FACTORIES[1])):
-        factory_rows = selected_item["_rows_by_factory"][factory]
-        with detail_col:
+        label=f"{item['ERP Code']} · {item['Item']} · {item['Size']}"
+        if label in details: label += f" · {item['_key'][0]}:{item['_key'][1]}"
+        details[label]=item
+    selected=st.selectbox("Item details",list(details),key="global_item_detail")
+    chosen=details[selected]
+    dc1,dc2=st.columns(2,gap="large")
+    for col,factory in ((dc1,FACTORIES[0]),(dc2,FACTORIES[1])):
+        rows=chosen["_by_factory"][factory]
+        with col:
             st.markdown(f"**{factory}**")
-            if not factory_rows:
-                st.caption("No master item in this factory.")
-            else:
-                stock = sum_field(factory_rows, "current_stock")
-                erp = sum_field(factory_rows, "erp_stock")
-                value = sum(float(num(r.get("current_stock"), 0) or 0) * float(num(r.get("unit_price"), 0) or 0) for r in factory_rows)
-                d1, d2, d3 = st.columns(3)
-                d1.metric("Physical", f"{stock:,.2f} {txt(factory_rows[0].get('unit_name'))}")
-                d2.metric("ERP", f"{erp:,.2f}")
-                d3.metric("Value", f"৳{value:,.0f}")
+            if not rows:
+                st.caption("No master row in this factory.")
+                continue
+            stock=sum_qty(rows,"current_stock")
+            erp=sum_qty(rows,"erp_stock")
+            worth=sum(float(num(r["current_stock"],0) or 0)*float(num(r["unit_price"],0) or 0) for r in rows)
+            a,b,c=st.columns(3)
+            a.metric("Physical",f"{stock:,.2f} {txt(rows[0]['unit_name'])}")
+            b.metric("ERP",f"{erp:,.2f}")
+            c.metric("Value",f"৳{worth:,.0f}")
+            st.markdown("**Supplier insight**")
+            for row in rows:
+                receipt=q("""SELECT t.date,COALESCE(t.supplier_name,'') AS supplier_name,t.unit_price_at_tx,
+                                   COALESCE(i.unit_price,0) AS master_price FROM transactions t
+                           LEFT JOIN inventory i ON i.factory_name=t.factory_name AND i.sl_no=t.sl_no
+                           WHERE t.factory_name=%s AND t.sl_no=%s AND t.trans_type='Supplier. Rec'
+                           ORDER BY t.id DESC LIMIT 1""",(factory,row["sl_no"]))
+                supplier=receipt[0]["supplier_name"] if receipt else "—"
+                price=(f"৳{float(receipt[0]['unit_price_at_tx']):,.2f}" if receipt and receipt[0]["unit_price_at_tx"] is not None
+                       else (f"৳{float(receipt[0]['master_price'] or 0):,.2f} · legacy/master" if receipt else "Not available"))
+                code=txt(row["prod_id"])
+                req=q("""SELECT po_date,received_date FROM requisition_tracking WHERE factory_name=%s
+                         AND COALESCE(po_date,'')<>'' AND COALESCE(received_date,'')<>''
+                         AND ((%s<>'' AND prod_id=%s) OR LOWER(TRIM(item_name))=LOWER(TRIM(%s)))""",
+                      (factory,code,code,row["item_name"]))
+                days=[]
+                for r in req:
+                    po,recv=parse_date(r["po_date"]),parse_date(r["received_date"])
+                    if po and recv and recv.date()>=po.date(): days.append((recv.date()-po.date()).days)
+                avg=f"{sum(days)/len(days):.1f} days" if days else "Not available"
+                st.caption(f"Preferred: {txt(row['preferred_supplier']) or 'Not set'} · Last supplier: {supplier or '—'} · Last purchase price: {price} · Avg PO lead: {avg} · MOQ: {float(num(row['moq'],0) or 0):g}")
 
-    transfer = selected_item["_transfer"]
+    transfer=chosen["_transfer"]
     if transfer:
-        st.info(
-            f"Transfer may help: {transfer['source']} has {transfer['source_stock']:g} {transfer['unit']}; "
-            f"{transfer['destination']} has {transfer['destination_stock']:g}. Suggested: "
-            f"{transfer['qty']:g} {transfer['unit']}. This page is read-only; use Transactions to process it."
-        )
-        if st.button("Open Transactions to process suggestion", key="global_go_transactions"):
-            st.session_state[NAV_KEY] = TAB_NAMES[1]
+        st.info(f"Transfer may help: {transfer['source']} has {transfer['source_stock']:g} {transfer['unit']}; {transfer['dest']} has {transfer['dest_stock']:g}. Suggested {transfer['qty']:g} {transfer['unit']}. No stock changes happen here.")
+        if st.button("Open Transactions to process suggestion",key="global_go_transactions"):
+            st.session_state[NAV_KEY]=TAB_NAMES[1]
             st.rerun()
-
-    pairs = [(r["factory_name"], int(r["sl_no"])) for r in selected_item["_rows"] if r.get("sl_no") is not None]
-    st.markdown('<div class="section-title">Recent stock movements · last 10</div>', unsafe_allow_html=True)
+    pairs=[(r["factory_name"],int(r["sl_no"])) for r in chosen["_rows"] if r.get("sl_no") is not None]
+    st.markdown('<div class="section-title">Recent stock movements · last 10</div>',unsafe_allow_html=True)
     if pairs:
-        where = " OR ".join("(factory_name=%s AND sl_no=%s)" for _ in pairs)
-        params = [value for pair in pairs for value in pair]
-        movements = qdf(
-            f"SELECT id, factory_name, date, time, item_name, qty, trans_type, officer_name, notes "
-            f"FROM transactions WHERE {where} ORDER BY id DESC LIMIT 10", params
-        )
-        st.dataframe(movements, hide_index=True, use_container_width=True, height=300)
-    else:
-        st.caption("No stock movements recorded for this item.")
+        condition=" OR ".join("(factory_name=%s AND sl_no=%s)" for _ in pairs)
+        params=[v for pair in pairs for v in pair]
+        history=qdf(f"SELECT id,factory_name,date,time,item_name,qty,trans_type,officer_name,notes FROM transactions WHERE {condition} ORDER BY id DESC LIMIT 10",params)
+        st.dataframe(history,hide_index=True,use_container_width=True,height=300)
+
+    with st.expander("Manager-only: replenishment settings"):
+        if st.session_state.get("role") != "Store Manager":
+            st.caption("Only a Store Manager can change minimum stock, supplier, lead time or MOQ.")
+        else:
+            available=[f for f in FACTORIES if chosen["_by_factory"][f]]
+            if available:
+                target=st.selectbox("Factory item to configure",available,key="global_restock_factory")
+                row=chosen["_by_factory"][target][0]
+                with st.form(f"global_restock_form_{target}_{row['sl_no']}"):
+                    r1,r2=st.columns(2)
+                    minimum=r1.number_input("Minimum stock",min_value=0.0,value=float(row["min_stock"] or 0),step=1.0)
+                    lead=r2.number_input("Supplier lead time (days)",min_value=0,value=int(row["lead_time_days"] or 0),step=1)
+                    r3,r4=st.columns(2)
+                    moq=r3.number_input("MOQ",min_value=0.0,value=float(row["moq"] or 0),step=1.0)
+                    preferred=r4.text_input("Preferred supplier",value=str(row["preferred_supplier"] or ""))
+                    manager_pw=st.text_input("Store Manager password",type="password",key=f"global_restock_pw_{target}_{row['sl_no']}")
+                    save_settings=st.form_submit_button("Save replenishment settings",use_container_width=True)
+                if save_settings:
+                    if not verify_manager_password(manager_pw): st.error("Store Manager password is incorrect.")
+                    elif save_global_replenishment_settings(target,row["sl_no"],minimum,lead,moq,preferred): done("Replenishment settings saved.")
+
+    with st.expander("Backup and restore · Store Manager only"):
+        st.caption("Download a full backup before restore. Restore replaces all public table contents after validation.")
+        st.download_button("Download full database backup",backup_zip(),f"inventory_backup_{datetime.now():%Y%m%d_%H%M}.zip","application/zip",key="global_db_backup")
+        upload=st.file_uploader("Upload a full backup ZIP",type=["zip"],key="global_restore_zip")
+        if upload:
+            try:
+                manifest=read_validated_backup_archive(upload.getvalue())
+                preview=pd.DataFrame([{"Table":name,"Rows":len(data["frame"])} for name,data in manifest.items()])
+                st.success(f"Backup validated against current schema: {len(manifest)} tables.")
+                st.dataframe(preview,hide_index=True,use_container_width=True,height=220)
+                if st.session_state.get("role") != "Store Manager":
+                    st.warning("Only a Store Manager can restore a backup.")
+                else:
+                    pw=st.text_input("Store Manager password",type="password",key="global_restore_pw")
+                    confirm=st.text_input("Type RESTORE to confirm",key="global_restore_confirm")
+                    backed=st.checkbox("I downloaded the current backup first.",key="global_backup_saved")
+                    if st.button("Restore backup",type="primary",key="global_restore_btn"):
+                        if not verify_manager_password(pw): st.error("Store Manager password is incorrect.")
+                        elif confirm.strip().upper()!="RESTORE": st.error("Type RESTORE exactly to confirm.")
+                        elif not backed: st.error("Download the current backup before restoring.")
+                        else:
+                            try:
+                                restored=restore_validated_backup(upload.getvalue())
+                                done(f"Backup restored: {len(restored)} tables replaced.")
+                            except Exception as exc: st.error(f"Restore failed and rolled back: {exc}")
+            except Exception as exc:
+                st.error(f"Backup validation failed: {exc}")
 # ============================================================
 #  TAB 4 - ISSUE LEDGER
 # ============================================================
