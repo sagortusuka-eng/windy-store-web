@@ -595,6 +595,40 @@ section[data-testid="stSidebar"] h3 { margin-top: 12px !important; }
 .strip { min-height: 42px; align-items: center; }
 </style>""", unsafe_allow_html=True)
 
+st.markdown("""<style>
+/* Clear module labels on the dark sidebar */
+section[data-testid="stSidebar"] h3,
+section[data-testid="stSidebar"] div[data-testid="stMarkdownContainer"] h3,
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button p {
+    color: #F8FAFC !important;
+}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button[kind="secondary"] p {
+    color: #D8E3EF !important;
+}
+/* Premium, readable in-page tabs */
+.stTabs [data-baseweb="tab-list"] { gap: 8px !important; border: 0 !important; flex-wrap: wrap !important; }
+.stTabs [data-baseweb="tab"] {
+    color: #334155 !important; background: #FFFFFF !important; border: 1px solid #D5DFEA !important;
+    border-radius: 9px !important; padding: 9px 14px !important; min-height: 40px !important;
+    font-size: 14px !important; font-weight: 650 !important; box-shadow: none !important;
+}
+.stTabs [data-baseweb="tab"] p { color: #334155 !important; }
+.stTabs [data-baseweb="tab"][aria-selected="true"] {
+    background: #E8F5F2 !important; color: #0F766E !important; border-color: #7FCFC3 !important;
+}
+.stTabs [data-baseweb="tab"][aria-selected="true"] p { color: #0F766E !important; }
+/* ERP Audit subviews: pill-like controls without radio circles */
+.st-key-aud_view div[role="radiogroup"] { display:flex !important; flex-wrap:wrap !important; gap:7px !important; }
+.st-key-aud_view label[data-baseweb="radio"] { background:#FFFFFF !important; border:1px solid #D5DFEA !important; border-radius:9px !important; padding:8px 12px !important; margin:0 !important; }
+.st-key-aud_view label[data-baseweb="radio"] > div:first-child:not(:has(p)),
+.st-key-aud_view label[data-baseweb="radio"] > span:first-child:not(:has(p)) { display:none !important; }
+.st-key-aud_view label[data-baseweb="radio"] p { color:#334155 !important; font-size:13px !important; font-weight:650 !important; margin:0 !important; }
+.st-key-aud_view label[data-baseweb="radio"]:has(input:checked) { background:#0F766E !important; border-color:#0F766E !important; }
+.st-key-aud_view label[data-baseweb="radio"]:has(input:checked) p { color:#FFFFFF !important; }
+/* Fill the available browser canvas; do not shrink dashboard/table sections */
+.block-container { width:100% !important; max-width:none !important; }
+</style>""", unsafe_allow_html=True)
+
 # ============================================================
 #  CONSTANTS
 # ============================================================
@@ -1961,42 +1995,153 @@ def load_budget_data():
 
 
 def tab_dashboard():
-    cur_label = datetime.now().strftime("%b-%Y")
-    cons, bud = load_budget_data()
-    months = {m for m in cons["month"] if m}
-    options = ["All time"] + sorted(months | {cur_label}, key=lambda s: datetime.strptime(s, "%b-%Y"), reverse=True)
+    """Management dashboard: purchase, issue, inventory and budget using live database records."""
+    st.title("Management Dashboard")
+    st.caption("Purchases, stock issues and budget performance for the selected factory.")
 
-    t_l, t_r = st.columns([3, 1])
-    with t_l:
-        st.markdown('<div class="section-title">Executive Overview · Budget Control</div>', unsafe_allow_html=True)
-    with t_r:
-        period = st.selectbox("Period", options, index=options.index(cur_label), key="dash_period",
-                              label_visibility="collapsed")
+    transaction_rows = qdf(f"""SELECT t.factory_name, t.date, t.time, t.trans_type, t.qty, t.item_name,
+                       t.officer_name, COALESCE(t.supplier_name,'') AS supplier_name,
+                       COALESCE(t.challan_no,'') AS challan_no,
+                       COALESCE(i.category,'Uncategorized') AS category,
+                       COALESCE(i.unit_price,0) AS unit_price
+                FROM transactions t
+                LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                WHERE t.trans_type IN ('Supplier. Rec','Issued','Internal Issue'){fw(FAC, 't.')[0]}
+                ORDER BY t.id DESC""", FP)
 
-    view = cons if period == "All time" else cons[cons["month"] == period]
-    total_budget = float(bud["allocated_budget"].astype(float).sum()) if not bud.empty else 0.0
-    consumption = float(view["cost"].sum()) if not view.empty else 0.0
-    remaining = total_budget - consumption
-    pct = (consumption / total_budget * 100) if total_budget > 0 else 0.0
+    budget_df = qdf(
+        f"SELECT factory_name, department_name, category_name, COALESCE(allocated_budget,0) AS allocated_budget "
+        f"FROM category_budgets WHERE 1=1{FSQL} ORDER BY department_name, category_name", FP
+    )
+    inventory_total = int(q(f"SELECT COUNT(*) AS n FROM inventory WHERE 1=1{FSQL}", FP)[0]["n"] or 0)
+    low_stock_total = int(q(f"SELECT COUNT(*) AS n FROM inventory WHERE COALESCE(current_stock,0)<=5{FSQL}", FP)[0]["n"] or 0)
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Monthly Budget", f"৳ {total_budget:,.0f}")
-    c2.metric("Total Consumption Cost", f"৳ {consumption:,.0f}")
-    c3.metric("Expense % of Budget", f"{pct:.1f}%")
-    c4.metric("Remaining Balance", f"৳ {remaining:,.0f}")
+    if transaction_rows.empty:
+        transaction_rows = pd.DataFrame(columns=[
+            "factory_name", "date", "time", "trans_type", "qty", "item_name", "officer_name",
+            "supplier_name", "challan_no", "category", "unit_price"
+        ])
+    transaction_rows["parsed_date"] = transaction_rows["date"].apply(parse_date)
+    transaction_rows["month"] = transaction_rows["parsed_date"].apply(
+        lambda value: value.strftime("%b-%Y") if value else ""
+    )
+    transaction_rows["qty"] = pd.to_numeric(transaction_rows["qty"], errors="coerce").fillna(0.0)
+    transaction_rows["unit_price"] = pd.to_numeric(transaction_rows["unit_price"], errors="coerce").fillna(0.0)
+    transaction_rows["amount"] = transaction_rows["qty"] * transaction_rows["unit_price"]
 
-    st.markdown('<div class="fin-card">' + budget_bar_html(pct) + '</div>', unsafe_allow_html=True)
+    current_month = local_now().strftime("%b-%Y")
+    available_months = sorted(
+        {value for value in transaction_rows["month"].tolist() if value},
+        key=lambda value: datetime.strptime(value, "%b-%Y"), reverse=True
+    )
+    periods = [current_month] + [value for value in available_months if value != current_month] + ["All time"]
+    p1, p2 = st.columns([3, 1])
+    with p1:
+        st.markdown(f"**{html_lib.escape(str(FAC))}** · live operational summary")
+    with p2:
+        period = st.selectbox("Reporting period", periods, key="dash_period", label_visibility="collapsed")
 
-    if total_budget <= 0:
-        st.info("Budget set kora nei. [10] BUDGET tab-e allocation dekhun.")
-    elif pct > 100:
-        st.error(f"🚨 BUDGET EXCEEDED: Consumption {pct:.1f}% - budget ৳ {abs(remaining):,.0f} beshi kharc hoyeche.")
-    elif pct > BUDGET_ALERT_PCT:
-        st.warning(f"⚠️ OPERATIONAL ALERT: Budget consumption {pct:.1f}% (limit {BUDGET_ALERT_PCT}%). "
-                   f"Baki budget ৳ {max(remaining, 0):,.0f}. Issue-er agey approval nin.")
-    else:
-        st.success(f"✅ Budget safe: consumption {pct:.1f}% (alert limit {BUDGET_ALERT_PCT}%).")
+    selected = transaction_rows if period == "All time" else transaction_rows[transaction_rows["month"] == period]
+    purchases = selected[selected["trans_type"] == "Supplier. Rec"].copy()
+    issues = selected[selected["trans_type"].isin(ISSUE_TYPES)].copy()
+    purchase_value = float(purchases["amount"].sum()) if not purchases.empty else 0.0
+    issue_value = float(issues["amount"].sum()) if not issues.empty else 0.0
+    purchase_qty = float(purchases["qty"].sum()) if not purchases.empty else 0.0
+    issue_qty = float(issues["qty"].sum()) if not issues.empty else 0.0
+    allocated = float(pd.to_numeric(budget_df["allocated_budget"], errors="coerce").fillna(0).sum()) if not budget_df.empty else 0.0
+    remaining = allocated - issue_value
+    used_pct = (issue_value / allocated * 100.0) if allocated > 0 else 0.0
 
+    kpis = st.columns(4, gap="medium")
+    kpis[0].metric("Inventory items", f"{inventory_total:,}", help="Current item count in the selected factory view")
+    kpis[1].metric("Purchases · Qty / Value", f"{purchase_qty:,.0f} / ৳{purchase_value:,.0f}")
+    kpis[2].metric("Issues · Qty / Value", f"{issue_qty:,.0f} / ৳{issue_value:,.0f}")
+    kpis[3].metric("Budget remaining", f"৳{remaining:,.0f}", f"{used_pct:.1f}% used")
+    st.caption(f"Low / negative stock items (≤ 5): {low_stock_total:,} · Period: {period}")
+
+    chart_col, budget_col = st.columns([1.15, 1], gap="large")
+    with chart_col:
+        st.markdown('<div class="section-title">Purchase vs issue trend · value</div>', unsafe_allow_html=True)
+        dated = transaction_rows[transaction_rows["month"].astype(str).str.len() > 0].copy()
+        month_sequence = sorted(
+            set(dated["month"].tolist()), key=lambda value: datetime.strptime(value, "%b-%Y")
+        )[-6:]
+        if month_sequence:
+            trend_source = dated[
+                dated["month"].isin(month_sequence)
+                & dated["trans_type"].isin(["Supplier. Rec", "Issued", "Internal Issue"])
+            ].copy()
+            trend_source["Flow"] = trend_source["trans_type"].apply(
+                lambda value: "Purchases" if value == "Supplier. Rec" else "Issues"
+            )
+            trend = trend_source.pivot_table(
+                index="month", columns="Flow", values="amount", aggfunc="sum", fill_value=0
+            ).reindex(month_sequence, fill_value=0)
+            for column in ("Purchases", "Issues"):
+                if column not in trend.columns:
+                    trend[column] = 0.0
+            st.bar_chart(trend[["Purchases", "Issues"]], use_container_width=True)
+        else:
+            st.info("There are no dated purchase or issue transactions to chart yet.")
+
+    with budget_col:
+        st.markdown('<div class="section-title">Budget by category</div>', unsafe_allow_html=True)
+        if budget_df.empty:
+            st.info("No budget lines are configured for this factory.")
+        else:
+            if issues.empty:
+                spend_by_category = pd.DataFrame(columns=["factory_name", "category", "amount"])
+            else:
+                spend_by_category = issues.groupby(
+                    ["factory_name", "category"], as_index=False
+                )["amount"].sum()
+            budget_view = budget_df.merge(
+                spend_by_category,
+                left_on=["factory_name", "category_name"],
+                right_on=["factory_name", "category"],
+                how="left",
+            )
+            budget_view["amount"] = pd.to_numeric(budget_view["amount"], errors="coerce").fillna(0.0)
+            budget_view["remaining"] = budget_view["allocated_budget"] - budget_view["amount"]
+            budget_view["used_pct"] = budget_view.apply(
+                lambda row: (row["amount"] / row["allocated_budget"] * 100)
+                if row["allocated_budget"] > 0 else 0.0, axis=1
+            )
+            budget_show = budget_view[[
+                "department_name", "category_name", "allocated_budget", "amount", "remaining", "used_pct"
+            ]].copy()
+            budget_show.columns = ["Department", "Category", "Allocated (৳)", "Used (৳)", "Remaining (৳)", "Used %"]
+            st.dataframe(
+                budget_show, hide_index=True, use_container_width=True, height=320,
+                column_config={
+                    "Allocated (৳)": st.column_config.NumberColumn(format="৳ %,.0f"),
+                    "Used (৳)": st.column_config.NumberColumn(format="৳ %,.0f"),
+                    "Remaining (৳)": st.column_config.NumberColumn(format="৳ %,.0f"),
+                    "Used %": st.column_config.NumberColumn(format="%.1f%%"),
+                },
+            )
+
+    purchase_col, issue_col = st.columns(2, gap="large")
+    with purchase_col:
+        st.markdown('<div class="section-title">Recent purchases</div>', unsafe_allow_html=True)
+        if purchases.empty:
+            st.info("No supplier receipts in this period.")
+        else:
+            purchase_show = purchases.head(8)[
+                ["date", "item_name", "qty", "unit_price", "amount", "supplier_name", "officer_name"]
+            ].copy()
+            purchase_show.columns = ["Date", "Item", "Qty", "Unit price (৳)", "Value (৳)", "Supplier", "Officer"]
+            st.dataframe(purchase_show, hide_index=True, use_container_width=True, height=300)
+    with issue_col:
+        st.markdown('<div class="section-title">Recent issues</div>', unsafe_allow_html=True)
+        if issues.empty:
+            st.info("No issue transactions in this period.")
+        else:
+            issue_show = issues.head(8)[
+                ["date", "item_name", "qty", "unit_price", "amount", "officer_name", "trans_type"]
+            ].copy()
+            issue_show.columns = ["Date", "Item", "Qty", "Unit price (৳)", "Value (৳)", "Officer", "Type"]
+            st.dataframe(issue_show, hide_index=True, use_container_width=True, height=300)
 # ============================================================
 #  TAB 1 - TRANSACTIONS (daily entry, top priority)
 # ============================================================
@@ -2353,42 +2498,79 @@ def do_import_opening(fac, rows):
 
 
 def inv_master_view():
+    st.title("Inventory Master")
+    st.caption(f"Search, filter and review stock balances · {html_lib.escape(str(FAC))}")
     inv = qdf(f"""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, prod_id, item_name,
                   COALESCE(size,'') AS size, department, category,
                   COALESCE(erp_stock,0) AS erp_stock, COALESCE(current_stock,0) AS current_stock,
                   COALESCE(unit_price,0) AS unit_price, erp_status FROM inventory WHERE 1=1{FSQL}
                   ORDER BY factory_name, sl_no""", FP)
     if inv.empty:
-        st.info("Kono item nei. ➕ Add / Import tab theke item add ba import korun.")
+        st.info("No inventory items found for this factory.")
         return
     inv["variance"] = inv.current_stock - inv.erp_stock
     inv["erp_value"] = inv.erp_stock * inv.unit_price
     inv["phys_value"] = inv.current_stock * inv.unit_price
     inv["var_value"] = inv.variance * inv.unit_price
-    c = st.columns(5)
-    c[0].metric("Total Items", len(inv))
-    c[1].metric("ERP Value", f"{inv.erp_value.sum():,.2f}")
-    c[2].metric("Physical Value", f"{inv.phys_value.sum():,.2f}")
-    c[3].metric("Variance Value", f"{inv.var_value.sum():,.2f}")
-    c[4].metric("Zero / No Stock", int((inv.current_stock <= 0).sum()))
-    a, b = st.columns([2, 1])
-    term = a.text_input("🔍 Search (Serial No / Item / Size / ERP / Dept / Category)", key="inv_search")
-    mode = b.selectbox("Show", ["All Items (incl. zero)", "Zero / No Stock Only", "In Stock Only (> 0)", "Items without Size"], key="inv_mode")
-    view = inv
-    if mode == "Zero / No Stock Only":
-        view = inv[inv.current_stock <= 0]
-    elif mode == "In Stock Only (> 0)":
-        view = inv[inv.current_stock > 0]
-    elif mode == "Items without Size":
-        view = inv[inv["size"].astype(str).str.strip() == ""]
-    if term:
-        m = view[["item_name", "size", "prod_id", "serial_no", "department", "category"]].astype(str).apply(
-            lambda col: col.str.contains(term, case=False, regex=False)).any(axis=1)
-        view = view[m]
-    st.caption(f"Showing {len(view)} items")
-    st.dataframe(view, hide_index=True, use_container_width=True, height=420)
-    export_buttons(view, "inventory")
 
+    metrics = st.columns(5, gap="small")
+    metrics[0].metric("Items", f"{len(inv):,}")
+    metrics[1].metric("Low stock (≤ 5)", f"{int((inv.current_stock <= 5).sum()):,}")
+    metrics[2].metric("ERP value", f"৳{inv.erp_value.sum():,.0f}")
+    metrics[3].metric("Physical value", f"৳{inv.phys_value.sum():,.0f}")
+    metrics[4].metric("Variance value", f"৳{inv.var_value.sum():,.0f}")
+
+    filters = st.container(border=True)
+    with filters:
+        c1, c2 = st.columns([2.2, 1], gap="medium")
+        term = c1.text_input(
+            "Search inventory", key="inv_search",
+            placeholder="Item, serial, ERP code, size, department or category"
+        )
+        mode = c2.selectbox(
+            "Stock view", ["All items", "Low / no stock", "In stock", "Missing size"], key="inv_mode"
+        )
+    view = inv.copy()
+    if mode == "Low / no stock":
+        view = view[view.current_stock <= 5]
+    elif mode == "In stock":
+        view = view[view.current_stock > 0]
+    elif mode == "Missing size":
+        view = view[view["size"].astype(str).str.strip() == ""]
+    if term.strip():
+        search_columns = ["item_name", "size", "prod_id", "serial_no", "department", "category"]
+        found = view[search_columns].fillna("").astype(str).apply(
+            lambda col: col.str.contains(term.strip(), case=False, regex=False)
+        ).any(axis=1)
+        view = view[found]
+    st.caption(f"Showing {len(view):,} of {len(inv):,} inventory items")
+
+    display = view.rename(columns={
+        "factory_name": "Factory", "sl_no": "SL No", "serial_no": "Serial No", "prod_id": "ERP Code",
+        "item_name": "Item", "size": "Size", "department": "Department", "category": "Category",
+        "erp_stock": "ERP stock", "current_stock": "Physical stock", "unit_price": "Unit price (৳)",
+        "erp_status": "ERP status", "variance": "Variance", "erp_value": "ERP value (৳)",
+        "phys_value": "Physical value (৳)", "var_value": "Variance value (৳)",
+    })
+    display_columns = [
+        "Factory", "SL No", "Serial No", "ERP Code", "Item", "Size", "Department", "Category",
+        "ERP stock", "Physical stock", "Variance", "Unit price (৳)", "ERP value (৳)",
+        "Physical value (৳)", "Variance value (৳)", "ERP status",
+    ]
+    display = display[[column for column in display_columns if column in display.columns]]
+    st.dataframe(
+        display, hide_index=True, use_container_width=True, height=560,
+        column_config={
+            "ERP stock": st.column_config.NumberColumn(format="%.2f"),
+            "Physical stock": st.column_config.NumberColumn(format="%.2f"),
+            "Variance": st.column_config.NumberColumn(format="%.2f"),
+            "Unit price (৳)": st.column_config.NumberColumn(format="৳ %,.2f"),
+            "ERP value (৳)": st.column_config.NumberColumn(format="৳ %,.2f"),
+            "Physical value (৳)": st.column_config.NumberColumn(format="৳ %,.2f"),
+            "Variance value (৳)": st.column_config.NumberColumn(format="৳ %,.2f"),
+        },
+    )
+    export_buttons(view, "inventory")
 
 def inv_add_import_view():
     with st.container(border=True):
@@ -4254,8 +4436,8 @@ def tab_daily_sheet():
                f"Items: {len(df)} | Short: {n_short} | Excess: {n_exc}")
     view = shown.copy()
     if not auto and not view.empty:
-        view["Daily Issue"] = None
-        view["Daily Received"] = None
+        view["Daily Issue"] = ""
+        view["Daily Received"] = ""
     st.dataframe(view, hide_index=True, use_container_width=True, height=420)
     export_buttons(view, f"daily_work_sheet_{d:%Y%m%d}")
     st.download_button("🖨️ Download print sheet (HTML → open & Print)", sheet_html(d, fac, df, auto),
