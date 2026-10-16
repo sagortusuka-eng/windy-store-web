@@ -423,6 +423,142 @@ div[data-testid="stAlert"], div[data-testid="stExpander"] { border-radius: 11px 
 @media (max-width: 800px) { .block-container { padding-top: 1rem !important; } }
 </style>""", unsafe_allow_html=True)
 
+# Final overrides: match the approved dark-sidebar, full-width SaaS mockup.
+st.markdown("""<style>
+.block-container {
+    width: 100% !important;
+    max-width: none !important;
+    padding: 1.45rem clamp(1rem, 2.2vw, 2.6rem) 2.4rem !important;
+}
+section[data-testid="stSidebar"] {
+    background: #102238 !important;
+    border-right: 1px solid #233A52 !important;
+}
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] h3,
+section[data-testid="stSidebar"] small,
+section[data-testid="stSidebar"] div[data-testid="stCaptionContainer"] * {
+    color: #D8E3EF !important;
+}
+section[data-testid="stSidebar"] label p,
+section[data-testid="stSidebar"] div[data-testid="stWidgetLabel"] p {
+    color: #E8EEF5 !important;
+}
+section[data-testid="stSidebar"] .brand-card {
+    background: #0B1A2A !important;
+    border: 1px solid #2D435A !important;
+}
+section[data-testid="stSidebar"] .brand-card .b-t,
+section[data-testid="stSidebar"] .brand-card .b-s { color: #FFFFFF !important; }
+section[data-testid="stSidebar"] .user-card {
+    background: #FFFFFF !important;
+    border: 1px solid #D8E0EA !important;
+}
+section[data-testid="stSidebar"] .user-card .u-lbl { color: #64748B !important; }
+section[data-testid="stSidebar"] .user-card .u-name { color: #172033 !important; }
+section[data-testid="stSidebar"] .user-card .u-role {
+    color: #0F766E !important;
+    background: #E8F5F2 !important;
+    border-color: #B7E2D8 !important;
+}
+section[data-testid="stSidebar"] div[data-testid="stForm"] {
+    background: #FFFFFF !important;
+    border: 1px solid #D8E0EA !important;
+    box-shadow: none !important;
+}
+section[data-testid="stSidebar"] div[data-testid="stForm"] label p,
+section[data-testid="stSidebar"] div[data-testid="stForm"] div[data-testid="stWidgetLabel"] p {
+    color: #334155 !important;
+}
+section[data-testid="stSidebar"] div[data-baseweb="input"] input { color: #172033 !important; }
+section[data-testid="stSidebar"] .stButton > button,
+section[data-testid="stSidebar"] div[data-testid="stForm"] button {
+    background: #0F766E !important;
+    color: #FFFFFF !important;
+    border: 0 !important;
+    box-shadow: none !important;
+}
+section[data-testid="stSidebar"] .stButton > button p,
+section[data-testid="stSidebar"] div[data-testid="stForm"] button p { color: #FFFFFF !important; }
+
+/* Remove radio circles and make the module list look like navigation links. */
+section[data-testid="stSidebar"] .st-key-main_nav {
+    width: 100% !important;
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+}
+section[data-testid="stSidebar"] .st-key-main_nav div[role="radiogroup"] {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 3px !important;
+    padding: 0 !important;
+}
+section[data-testid="stSidebar"] .st-key-main_nav div[role="radiogroup"] label {
+    display: flex !important;
+    width: 100% !important;
+    min-height: 40px !important;
+    align-items: center !important;
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    border-radius: 9px !important;
+    box-shadow: none !important;
+    padding: 8px 11px !important;
+    margin: 0 !important;
+    transform: none !important;
+}
+section[data-testid="stSidebar"] .st-key-main_nav div[role="radiogroup"] label > div:first-child:not(:has(p)),
+section[data-testid="stSidebar"] .st-key-main_nav div[role="radiogroup"] label > span:first-child:not(:has(p)) {
+    display: none !important;
+}
+section[data-testid="stSidebar"] .st-key-main_nav div[role="radiogroup"] label p {
+    color: #D8E3EF !important;
+    font-size: 14px !important;
+    font-weight: 600 !important;
+    white-space: normal !important;
+    margin: 0 !important;
+}
+section[data-testid="stSidebar"] .st-key-main_nav div[role="radiogroup"] label:hover {
+    background: #1B334B !important;
+    border-color: #2D4963 !important;
+}
+section[data-testid="stSidebar"] .st-key-main_nav div[role="radiogroup"] label:has(input:checked) {
+    background: #087E8B !important;
+    border: 1px solid #1599A6 !important;
+}
+section[data-testid="stSidebar"] .st-key-main_nav div[role="radiogroup"] label:has(input:checked) p {
+    color: #FFFFFF !important;
+    font-weight: 750 !important;
+}
+
+/* Make the application use the available content width and restore readable sizing. */
+.stApp { font-size: 15px !important; }
+.stApp h1 { font-size: clamp(1.7rem, 2vw, 2.25rem) !important; color: #172033 !important; }
+.stApp h2, .stApp h3 { color: #172033 !important; }
+.st-key-tx_form_box .stButton > button[kind="primary"] {
+    background: #087E8B !important;
+    color: #FFFFFF !important;
+    border: 0 !important;
+    box-shadow: none !important;
+}
+.st-key-tx_form_box .stButton > button[kind="primary"]:hover { background: #066A75 !important; }
+.st-key-tx_form_box { padding: 14px 16px !important; }
+div[data-testid="stColumn"]:has(.st-key-tx_recent_search),
+div[data-testid="column"]:has(.st-key-tx_recent_search) { padding: 12px 16px 16px !important; }
+.st-key-tx_form_box div[data-baseweb="input"],
+.st-key-tx_form_box div[data-baseweb="textarea"],
+.st-key-tx_form_box div[data-baseweb="select"] > div {
+    border-radius: 9px !important;
+}
+.strip { font-size: 13px !important; }
+@media (max-width: 900px) {
+    .block-container { padding-left: 1rem !important; padding-right: 1rem !important; }
+}
+</style>""", unsafe_allow_html=True)
+
 # ============================================================
 #  CONSTANTS
 # ============================================================
