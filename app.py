@@ -1092,6 +1092,26 @@ def init_db():
     return True
 
 
+def ensure_global_inventory_schema():
+    """Idempotently add columns used by Global Inventory, even if a cached DB initializer skips DDL."""
+    conn = get_conn()
+    migrations = [
+        "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS min_stock REAL DEFAULT 0",
+        "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS lead_time_days INTEGER DEFAULT 0",
+        "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS moq REAL DEFAULT 0",
+        "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS preferred_supplier TEXT DEFAULT ''",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS unit_price_at_tx REAL",
+    ]
+    try:
+        with conn.cursor() as cur:
+            for statement in migrations:
+                cur.execute(statement)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def ensure_live_connection():
     """One cheap ping per rerun: a silently dropped cloud connection is replaced at once
     instead of hanging for minutes on a dead socket."""
@@ -5080,8 +5100,11 @@ def tab_daily_sheet():
 ensure_live_connection()
 try:
     init_db()
+    if not st.session_state.get("_global_inventory_schema_ready"):
+        ensure_global_inventory_schema()
+        st.session_state["_global_inventory_schema_ready"] = True
 except Exception as e:
-    st.error(f"Cloud database-e connect kora jacche na: {e}")
+    st.error(f"Database setup/migration failed: {e}")
     st.stop()
 
 restore_login_from_cookie()
