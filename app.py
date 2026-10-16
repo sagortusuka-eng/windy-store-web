@@ -559,6 +559,42 @@ div[data-testid="column"]:has(.st-key-tx_recent_search) { padding: 12px 16px 16p
 }
 </style>""", unsafe_allow_html=True)
 
+st.markdown("""<style>
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button {
+    width: 100% !important;
+    min-height: 39px !important;
+    justify-content: flex-start !important;
+    text-align: left !important;
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    color: #D8E3EF !important;
+    box-shadow: none !important;
+    padding: 8px 12px !important;
+}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button:hover {
+    background: #1B334B !important;
+    border-color: #2D4963 !important;
+    color: #FFFFFF !important;
+}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button[kind="primary"] {
+    background: #087E8B !important;
+    border-color: #1599A6 !important;
+    color: #FFFFFF !important;
+}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button p {
+    color: inherit !important;
+    font-size: 14px !important;
+    font-weight: 600 !important;
+}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button[kind="primary"] p {
+    color: #FFFFFF !important;
+    font-weight: 750 !important;
+}
+section[data-testid="stSidebar"] .brand-card { margin-bottom: 18px !important; }
+section[data-testid="stSidebar"] h3 { margin-top: 12px !important; }
+.strip { min-height: 42px; align-items: center; }
+</style>""", unsafe_allow_html=True)
+
 # ============================================================
 #  CONSTANTS
 # ============================================================
@@ -608,9 +644,9 @@ VERDICT = {"FOUND": "✔ FOUND", "SIZE_MISSING": "⚠ SIZE NOT IN LIST", "CODE_M
 NAV_KEY = "main_nav"
 NAV_ERP_AUDIT = "🔍 ERP Audit"
 TAB_NAMES = [
-    "📝 Transactions", "📦 Inventory", NAV_ERP_AUDIT, "📜 Issue Ledger",
-    "🔁 Transfer History", "📑 Requisition", "🛠 Repair & Returns", "📒 Ledger",
-    "📈 Forecast", "💰 Budget", "🗓 Daily Work Sheet",
+    "📊 Dashboard", "📝 Transactions", "📦 Inventory", NAV_ERP_AUDIT,
+    "📜 Issue Ledger", "🔁 Transfer History", "📑 Requisition", "🛠 Repair & Returns",
+    "📒 Ledger", "📈 Forecast", "💰 Budget", "🗓 Daily Work Sheet",
 ]
 AUD_VIEW_KEY = "aud_view"
 AUD_ACT, AUD_ALL, AUD_SHORT, AUD_EXC, AUD_MATCH = "⚙️ Actions", "📋 All", "🔴 Short", "🟠 Excess", "🟢 Matched"
@@ -1160,9 +1196,6 @@ def render_session_cookie_js():
 
 def sidebar_login():
     with st.sidebar:
-        st.markdown(
-            '<div class="brand-card"><div class="b-t">📦 KC &amp; Windy Smart Inventory</div>'
-            '<div class="b-s">Budget Control · Designed by MD. Sagor Ali</div></div>', unsafe_allow_html=True)
         st.markdown("### 🔐 Secure Login")
         if st.session_state.get("user"):
             st.markdown(
@@ -4253,29 +4286,58 @@ except Exception as e:
 
 restore_login_from_cookie()
 show_flash()
-sidebar_login()
+
+# Keep navigation at the top of the sidebar, matching the selected demo.
+if st.session_state.get(NAV_KEY) not in TAB_NAMES:
+    st.session_state[NAV_KEY] = TAB_NAMES[1]  # Transactions remains the default page.
 
 with st.sidebar:
+    st.markdown(
+        '<div class="brand-card"><div class="b-t">📦 KC Windy Inventory</div>'
+        '<div class="b-s">Smart inventory · Budget control</div></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("### Workspace")
+    for nav_index in range(4):
+        nav_label = TAB_NAMES[nav_index]
+        if st.button(
+            nav_label,
+            key=f"sidebar_nav_{nav_index}",
+            type="primary" if st.session_state.get(NAV_KEY) == nav_label else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state[NAV_KEY] = nav_label
+            st.rerun()
+
+    st.markdown("### Management")
+    for nav_index in range(4, len(TAB_NAMES)):
+        nav_label = TAB_NAMES[nav_index]
+        if st.button(
+            nav_label,
+            key=f"sidebar_nav_{nav_index}",
+            type="primary" if st.session_state.get(NAV_KEY) == nav_label else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state[NAV_KEY] = nav_label
+            st.rerun()
+
+    st.markdown("---")
     st.markdown("### 🏭 Active Factory")
     FAC = st.selectbox("Active factory", FACTORIES + [ALL_VIEW], key="factory", label_visibility="collapsed")
     st.caption("📌 CONSOLIDATED view shudhu dekhar jonno. Entry-r jonno specific factory bachun.")
-    st.markdown("---")
-    st.markdown("### Workspace")
-    if st.session_state.get(NAV_KEY) not in TAB_NAMES:
-        st.session_state[NAV_KEY] = TAB_NAMES[0]
-    active_tab = st.radio(
-        "Modules", TAB_NAMES, key=NAV_KEY, label_visibility="collapsed"
-    )
-    st.markdown("---")
     sidebar_clock()
+
+# Login / profile controls now sit below Workspace and Management navigation.
+sidebar_login()
 
 FSQL, FP = fw(FAC)
 is_cons_view = "CONSOLIDATED" in FAC
 autoset_uom_once()
 
-# Render only the selected module; keep the module selector in the sidebar.
-RENDERERS = [tab_transactions, tab_inventory, tab_erp_audit, tab_issue_ledger, tab_transfer_history,
-             tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet]
+# Render only the selected module; the sidebar buttons update NAV_KEY.
+RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_erp_audit, tab_issue_ledger,
+             tab_transfer_history, tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet]
+active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[1])
 render_header()
 RENDERERS[TAB_NAMES.index(active_tab)]()
 render_session_cookie_js()
