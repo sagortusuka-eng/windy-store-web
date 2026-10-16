@@ -756,6 +756,22 @@ section[data-testid="stSidebar"] div[data-testid="stForm"] {
 }
 </style>""", unsafe_allow_html=True)
 
+st.markdown("""<style>
+/* Top-bar login button sits alongside the factory switcher. */
+div[data-testid="stPopover"] > button {
+    width:100% !important; min-height:40px !important; border-radius:9px !important;
+    background:#0F766E !important; color:#FFFFFF !important; border:0 !important;
+    font-weight:750 !important; box-shadow:0 2px 8px rgba(15,118,110,.18) !important;
+}
+div[data-testid="stPopover"] > button p { color:#FFFFFF !important; font-weight:750 !important; }
+div[data-testid="stPopover"] > button:hover { background:#115E59 !important; }
+section[data-testid="stSidebar"] .nav-section-title {
+    color:#FFFFFF !important; font-size:14px !important; font-weight:800 !important;
+    margin:13px 0 5px !important; opacity:1 !important;
+}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button { min-height:31px !important; padding:3px 8px !important; }
+</style>""", unsafe_allow_html=True)
+
 # ============================================================
 #  CONSTANTS
 # ============================================================
@@ -1355,23 +1371,21 @@ def render_session_cookie_js():
         </script>""", height=0)
 
 
-def sidebar_login():
-    with st.sidebar:
-        st.markdown("### 🔐 Secure Login")
-        if st.session_state.get("user"):
-            st.markdown(
-                f'<div class="user-card"><div class="u-lbl">Logged in as</div>'
-                f'<div class="u-name">{html_lib.escape(str(st.session_state["user"]))}</div>'
-                f'<div class="u-lbl">Role</div>'
-                f'<span class="u-role">{html_lib.escape(str(st.session_state.get("role", "-")))}</span></div>',
-                unsafe_allow_html=True)
-            if st.button("🚪 Logout", use_container_width=True, key="logout_btn"):
+def render_login_control():
+    """Sign-in and account actions in a compact top-bar popover; no public registration form."""
+    logged_in = bool(st.session_state.get("user"))
+    label = f"👤 {st.session_state.get('user', 'Account')}" if logged_in else "🔐 Secure Login"
+    with st.popover(label, use_container_width=True):
+        if logged_in:
+            st.markdown(f"**{html_lib.escape(str(st.session_state.get('user', '')))}**")
+            st.caption(html_lib.escape(str(st.session_state.get("role", ""))))
+            if st.button("🚪 Sign out", key="top_logout_btn", use_container_width=True):
                 log_event("LOGOUT", f"User {st.session_state['user']} logged out.")
                 end_login_session()
                 st.session_state.pop("user", None)
                 st.session_state.pop("role", None)
                 st.session_state["_cookie_clear"] = True
-                done("Logged out successfully.")
+                done("Signed out successfully.")
             with st.expander("🔑 Change password"):
                 with st.form("chg_pw_form", clear_on_submit=True):
                     cur_pw = st.text_input("Current password", type="password", key="cp_cur")
@@ -1381,72 +1395,45 @@ def sidebar_login():
                 if chg:
                     row = q("SELECT password FROM users WHERE username=%s", (st.session_state["user"],))
                     if not row or not verify_password(row[0]["password"], cur_pw):
-                        st.error("Current password thik nei.")
+                        st.error("Current password is incorrect.")
                     elif len(new_pw1) < 8:
-                        st.error("New password kom pokkhe 8 character hote hobe.")
+                        st.error("New password must be at least 8 characters.")
                     elif new_pw1 != new_pw2:
-                        st.error("Dui password mile ni.")
+                        st.error("The passwords do not match.")
                     elif change_password(st.session_state["user"], new_pw1):
                         st.success("Password updated.")
             if st.session_state.get("role") == "Store Manager":
                 user_admin_panel()
         else:
+            st.markdown("### Secure Login")
+            st.caption("Use your approved account to access inventory operations.")
             with st.form("login_form", clear_on_submit=False):
-                u = st.text_input("Username", placeholder="Enter your username", key="login_user")
-                p = st.text_input("Password", type="password", placeholder="Enter your password", key="login_pass")
-                submitted = st.form_submit_button("🔓 Sign in", use_container_width=True)
+                username = st.text_input("Username", placeholder="Enter your username", key="login_user")
+                password = st.text_input("Password", type="password", placeholder="Enter your password", key="login_pass")
+                submitted = st.form_submit_button("Sign in", use_container_width=True)
             if submitted:
-                if not u.strip() or not p:
-                    st.error("Username ar password dui-i din.")
+                if not username.strip() or not password:
+                    st.error("Enter both username and password.")
                 else:
-                    r = q("SELECT password, role, COALESCE(status,'Active') AS status FROM users WHERE username=%s", (u.strip(),))
-                    if r and verify_password(r[0]["password"], p):
-                        if r[0]["status"] == "Pending":
-                            st.warning("Apnar registration Store Manager-er approval-er opekkhay ache.")
-                        elif r[0]["status"] != "Active":
-                            st.error("Ei account active nei. Store Manager-er sathe jogajog korun.")
+                    rows = q(
+                        "SELECT password, role, COALESCE(status,'Active') AS status FROM users WHERE username=%s",
+                        (username.strip(),)
+                    )
+                    if rows and verify_password(rows[0]["password"], password):
+                        if rows[0]["status"] == "Pending":
+                            st.warning("Your account is waiting for manager approval.")
+                        elif rows[0]["status"] != "Active":
+                            st.error("This account is not active. Contact the Store Manager.")
                         else:
-                            st.session_state["user"] = u.strip()
-                            st.session_state["role"] = r[0]["role"]
-                            _tok = create_login_session(u.strip())
-                            if _tok:
-                                st.session_state["_cookie_set"] = _tok
-                            log_event("LOGIN", f"User {u.strip()} logged in as {r[0]['role']}.")
-                            done(f"Welcome, {u.strip()}!")
+                            st.session_state["user"] = username.strip()
+                            st.session_state["role"] = rows[0]["role"]
+                            token = create_login_session(username.strip())
+                            if token:
+                                st.session_state["_cookie_set"] = token
+                            log_event("LOGIN", f"User {username.strip()} logged in as {rows[0]['role']}.")
+                            done(f"Welcome, {username.strip()}!")
                     else:
-                        st.error("Username ba password vul.")
-
-            with st.expander("📝 Registration"):
-                st.caption("Notun account Store Manager approve korle chalu hobe.")
-                with st.form("reg_form", clear_on_submit=True):
-                    ru = st.text_input("Username*", key="reg_user", placeholder="3-30 letters / digits / _ . -")
-                    rn = st.text_input("Full name*", key="reg_name")
-                    rp1 = st.text_input("Password* (min 8 chars)", type="password", key="reg_pw1")
-                    rp2 = st.text_input("Confirm password*", type="password", key="reg_pw2")
-                    reg = st.form_submit_button("Submit registration", use_container_width=True)
-                if reg:
-                    if not USERNAME_RE.fullmatch(ru.strip()):
-                        st.error("Username 3-30 character, shudhu letter / digit / _ . - hote parbe.")
-                    elif not rn.strip():
-                        st.error("Full name din.")
-                    elif len(rp1) < 8:
-                        st.error("Password kom pokkhe 8 character hote hobe.")
-                    elif rp1 != rp2:
-                        st.error("Dui password mile ni.")
-                    elif register_user(ru.strip(), rn.strip(), rp1):
-                        st.success("Registration request pathano hoyeche. Store Manager approve korle login korte parben.")
-
-            with st.expander("🔑 Forgot Password"):
-                st.caption("Username din. Request Store Manager-er kache jabe; manager temporary password dibe, "
-                           "login-er por password change korben.")
-                with st.form("fp_form", clear_on_submit=True):
-                    fu = st.text_input("Username", key="fp_user")
-                    fps = st.form_submit_button("Send reset request", use_container_width=True)
-                if fps:
-                    if not fu.strip():
-                        st.error("Username din.")
-                    elif request_password_reset(fu.strip()):
-                        st.success("Username thakle reset request Store Manager-er kache pathano hoyeche.")
+                        st.error("Username or password is incorrect.")
 
 # ============================================================
 #  HELPERS
@@ -2074,7 +2061,7 @@ def local_now():
 
 
 def render_header():
-    """Top bar with the active factory switcher, date and signed-in role."""
+    """Compact top bar: factory switcher and sign-in/account control side by side."""
     if st.session_state.get("factory") not in FACTORIES + [ALL_VIEW]:
         st.session_state["factory"] = FACTORIES[0]
     selected_factory = st.session_state.get("factory", FACTORIES[0])
@@ -2082,15 +2069,19 @@ def render_header():
                 if st.session_state.get("user") else "Guest · view only")
 
     with st.container(border=True):
-        left, middle, right = st.columns([1.25, 1.1, 1.65], gap="medium", vertical_alignment="center")
-        with left:
+        brand_col, factory_col, login_col, meta_col = st.columns(
+            [1.15, 1.35, .9, 1.5], gap="small", vertical_alignment="center"
+        )
+        with brand_col:
             st.markdown("**KC Windy Inventory**")
             st.caption("Management workspace")
-        with middle:
+        with factory_col:
             selected_factory = st.selectbox(
                 "🏭 Active factory", FACTORIES + [ALL_VIEW], key="factory"
             )
-        with right:
+        with login_col:
+            render_login_control()
+        with meta_col:
             st.markdown(
                 f'<div class="topbar-meta"><span>🕒 {local_now():%d %b %Y · %I:%M %p}</span>'
                 f'<span>👤 {html_lib.escape(user_txt)}</span></div>',
@@ -4637,9 +4628,6 @@ with st.sidebar:
         f'<div class="b-s">Smart inventory · Budget control</div></div>',
         unsafe_allow_html=True,
     )
-
-# Keep Secure Login / account status directly under the brand, not below the long menu.
-sidebar_login()
 
 with st.sidebar:
     st.markdown('<div class="nav-section-title">Workspace</div>', unsafe_allow_html=True)
