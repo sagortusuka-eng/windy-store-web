@@ -360,6 +360,69 @@ div[data-testid="stColumn"]:has(.st-key-tx_recent_search) .section-title, div[da
 }}
 </style>""", unsafe_allow_html=True)
 
+# Professional white / navy / teal polish. Kept separate from application logic.
+st.markdown("""<style>
+:root { color-scheme: light; }
+html, body, .stApp, button, input, textarea, select { font-family: Inter, system-ui, sans-serif !important; }
+.stApp { background: #F4F7FB !important; color: #172033 !important; }
+.block-container { max-width: 1480px; padding-top: 1.35rem !important; padding-bottom: 2.25rem !important; }
+header[data-testid="stHeader"] { background: rgba(244,247,251,.96) !important; }
+#MainMenu, footer { visibility: hidden; }
+section[data-testid="stSidebar"] { background: #FFFFFF !important; border-right: 1px solid #E2E8F0; }
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] h3,
+section[data-testid="stSidebar"] span,
+section[data-testid="stSidebar"] small { color: #334155 !important; }
+.brand-card { background: #132238 !important; border: 0 !important; border-radius: 12px; padding: 13px 14px; }
+.brand-card .b-t, .brand-card .b-s { color: #FFFFFF !important; }
+.user-card { border: 1px solid #E2E8F0; box-shadow: none !important; }
+.user-card .u-name { color: #172033 !important; }
+.user-card .u-role { color: #0F766E !important; background: #E8F5F2 !important; border-color: #B7E2D8 !important; }
+section[data-testid="stSidebar"] div[data-testid="stForm"] { background: #F8FAFC !important; border: 1px solid #E2E8F0 !important; box-shadow: none !important; }
+section[data-testid="stSidebar"] .stButton > button,
+section[data-testid="stSidebar"] div[data-testid="stForm"] button { background: #0F766E !important; color: #FFFFFF !important; box-shadow: none !important; }
+section[data-testid="stSidebar"] .stButton > button p,
+section[data-testid="stSidebar"] div[data-testid="stForm"] button p { color: #FFFFFF !important; }
+section[data-testid="stSidebar"] div[data-testid="stWidgetLabel"] p { color: #334155 !important; }
+
+/* Real, vertical module navigation in the sidebar */
+section[data-testid="stSidebar"] .st-key-main_nav { background: transparent !important; border: 0 !important; box-shadow: none !important; padding: 0 !important; margin: 0 !important; }
+section[data-testid="stSidebar"] .st-key-main_nav div[role="radiogroup"] { display: flex !important; flex-direction: column !important; align-items: stretch !important; gap: 4px !important; padding: 0 !important; }
+section[data-testid="stSidebar"] .st-key-main_nav div[role="radiogroup"] label { width: 100%; min-height: 38px; background: transparent !important; border: 1px solid transparent !important; border-radius: 9px !important; box-shadow: none !important; padding: 8px 11px !important; margin: 0 !important; transform: none !important; }
+section[data-testid="stSidebar"] .st-key-main_nav div[role="radiogroup"] label p { color: #475569 !important; font-size: 13px !important; font-weight: 600 !important; white-space: normal !important; }
+section[data-testid="stSidebar"] .st-key-main_nav div[role="radiogroup"] label:hover { background: #F1F5F9 !important; border-color: #E2E8F0 !important; }
+section[data-testid="stSidebar"] .st-key-main_nav div[role="radiogroup"] label:has(input:checked) { background: #E8F5F2 !important; border-left: 3px solid #0F766E !important; border-color: #B7E2D8 !important; }
+section[data-testid="stSidebar"] .st-key-main_nav div[role="radiogroup"] label:has(input:checked) p { color: #0F766E !important; font-weight: 750 !important; }
+
+/* Consistent cards, controls and tables */
+.strip { background: #FFFFFF !important; border: 1px solid #E2E8F0 !important; box-shadow: none !important; border-radius: 12px; }
+.strip b { color: #172033 !important; }
+.section-title { color: #172033 !important; border-left-color: #0F766E !important; }
+div[data-testid="stMetric"] { background: #FFFFFF !important; border: 1px solid #E2E8F0 !important; border-top: 3px solid #0F766E !important; border-radius: 12px !important; box-shadow: 0 2px 8px rgba(15,23,42,.045) !important; }
+div[data-testid="stMetricLabel"] p { color: #64748B !important; }
+div[data-testid="stMetricValue"] { color: #172033 !important; }
+div[data-testid="stVerticalBlockBorderWrapper"], div[data-testid="stForm"] { background: #FFFFFF !important; border-color: #E2E8F0 !important; border-radius: 12px !important; box-shadow: 0 2px 8px rgba(15,23,42,.045) !important; }
+.st-key-tx_form_box { background: #FFFFFF !important; border: 1px solid #E2E8F0 !important; border-radius: 14px !important; box-shadow: 0 3px 12px rgba(15,23,42,.055) !important; }
+.st-key-tx_form_box .section-title { border-left-color: #0F766E !important; color: #172033 !important; }
+.st-key-tx_form_box label p, .st-key-tx_form_box div[data-testid="stWidgetLabel"] p { color: #334155 !important; }
+.st-key-tx_form_box .officer-pill { background: #E8F5F2 !important; color: #0F766E !important; border-color: #B7E2D8 !important; }
+div[data-testid="stColumn"]:has(.st-key-tx_recent_search), div[data-testid="column"]:has(.st-key-tx_recent_search) { background: #FFFFFF !important; border: 1px solid #E2E8F0 !important; border-radius: 14px !important; box-shadow: 0 3px 12px rgba(15,23,42,.055) !important; }
+div[data-testid="stColumn"]:has(.st-key-tx_recent_search) .section-title, div[data-testid="column"]:has(.st-key-tx_recent_search) .section-title { border-left-color: #0F766E !important; color: #172033 !important; }
+div[data-baseweb="input"], div[data-baseweb="base-input"], div[data-baseweb="textarea"] { background: #FFFFFF !important; border-color: #CBD5E1 !important; border-radius: 9px !important; }
+div[data-baseweb="input"]:focus-within, div[data-baseweb="textarea"]:focus-within { border-color: #0F766E !important; box-shadow: 0 0 0 3px rgba(15,118,110,.13) !important; }
+div[data-baseweb="select"] > div { border-color: #CBD5E1 !important; border-radius: 9px !important; }
+.stButton > button, .stDownloadButton > button { border-radius: 9px !important; min-height: 38px; }
+.stButton > button[kind="primary"] { background: #0F766E !important; border: 0 !important; color: #FFFFFF !important; box-shadow: none !important; }
+.stButton > button[kind="primary"]:hover { background: #115E59 !important; }
+div[data-testid="stDataFrame"] { background: #FFFFFF !important; border: 1px solid #D8E0EA !important; border-radius: 11px !important; box-shadow: 0 2px 8px rgba(15,23,42,.045) !important; }
+div[data-testid="stAlert"], div[data-testid="stExpander"] { border-radius: 11px !important; }
+.fin-card { border-color: #E2E8F0 !important; box-shadow: 0 2px 8px rgba(15,23,42,.045) !important; }
+.fin-card .cat-factory { color: #0F766E !important; }
+.bar-wrap { background: #E8EEF5 !important; }
+@media (max-width: 800px) { .block-container { padding-top: 1rem !important; } }
+</style>""", unsafe_allow_html=True)
+
 # ============================================================
 #  CONSTANTS
 # ============================================================
@@ -407,7 +470,12 @@ VERDICT = {"FOUND": "✔ FOUND", "SIZE_MISSING": "⚠ SIZE NOT IN LIST", "CODE_M
            "SIMILAR": "≈ SIMILAR NAME ONLY", "NOT_FOUND": "✘ NOT FOUND - NEW ITEM"}
 # Navigation state keys / ERP Audit view names (used by the clickable "ERP PO Pending" card)
 NAV_KEY = "main_nav"
-NAV_ERP_AUDIT = "🔍 [3] ERP AUDIT"
+NAV_ERP_AUDIT = "🔍 ERP Audit"
+TAB_NAMES = [
+    "📝 Transactions", "📦 Inventory", NAV_ERP_AUDIT, "📜 Issue Ledger",
+    "🔁 Transfer History", "📑 Requisition", "🛠 Repair & Returns", "📒 Ledger",
+    "📈 Forecast", "💰 Budget", "🗓 Daily Work Sheet",
+]
 AUD_VIEW_KEY = "aud_view"
 AUD_ACT, AUD_ALL, AUD_SHORT, AUD_EXC, AUD_MATCH = "⚙️ Actions", "📋 All", "🔴 Short", "🟠 Excess", "🟢 Matched"
 AUD_PEND, AUD_PO, AUD_RECV = "🟡 ERP Pending", "📌 ERP PO Pending", "📥 Product Received"
@@ -1877,6 +1945,17 @@ def tx_manager_panel(df, kp, title="🔐 Manager: Delete / Edit a transaction"):
 
 def tab_transactions():
     fac, fsql, fp = FAC, FSQL, FP
+    today_s = local_now().strftime(DATE_FMT)
+    total_items = int(q(f"SELECT COUNT(*) AS n FROM inventory WHERE 1=1{fsql}", fp)[0]["n"] or 0)
+    low_stock_items = int(q(f"SELECT COUNT(*) AS n FROM inventory WHERE COALESCE(current_stock,0) <= 5{fsql}", fp)[0]["n"] or 0)
+    today_transactions = int(q(f"SELECT COUNT(*) AS n FROM transactions WHERE date=%s{fsql}", [today_s] + fp)[0]["n"] or 0)
+
+    st.title("Transactions")
+    st.caption("Record stock movements and review recent activity.")
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Inventory items", f"{total_items:,}")
+    k2.metric("Low stock items", f"{low_stock_items:,}")
+    k3.metric("Today's transactions", f"{today_transactions:,}")
     g = st.session_state.get("tx_gen", 0)   # bumps after every successful save -> all entry widgets start fresh
     if inventory_count() == 0 and not is_cons_view:
         st.info("📦 Ei factory-r inventory khali. [2] INVENTORY → ➕ Add / Import theke opening stock upload korun.")
@@ -4045,9 +4124,12 @@ with st.sidebar:
     FAC = st.selectbox("Active factory", FACTORIES + [ALL_VIEW], key="factory", label_visibility="collapsed")
     st.caption("📌 CONSOLIDATED view shudhu dekhar jonno. Entry-r jonno specific factory bachun.")
     st.markdown("---")
-    st.markdown("### 🧭 Modules")
-    for icon, name in MODULE_NAV:
-        st.markdown(f'<div class="nav-item">{icon}&nbsp;&nbsp;{name}</div>', unsafe_allow_html=True)
+    st.markdown("### Workspace")
+    if st.session_state.get(NAV_KEY) not in TAB_NAMES:
+        st.session_state[NAV_KEY] = TAB_NAMES[0]
+    active_tab = st.radio(
+        "Modules", TAB_NAMES, key=NAV_KEY, label_visibility="collapsed"
+    )
     st.markdown("---")
     sidebar_clock()
 
@@ -4055,17 +4137,9 @@ FSQL, FP = fw(FAC)
 is_cons_view = "CONSOLIDATED" in FAC
 autoset_uom_once()
 
-# Top-level navigation: the very first element of the main page. [1] TRANSACTIONS is the default tab.
-TAB_NAMES = ["📝 [1] TRANSACTIONS", "📦 [2] INVENTORY", NAV_ERP_AUDIT, "📜 [4] ISSUE LEDGER",
-             "🔁 [5] TRANSFER HISTORY", "📑 [6] REQUISITION", "🛠 [7] REPAIR", "📒 [8] LEDGER",
-             "📈 [9] FORECAST", "💵 [10] BUDGET", "🗓 [11] DAILY WORK SHEET"]
+# Render only the selected module; keep the module selector in the sidebar.
 RENDERERS = [tab_transactions, tab_inventory, tab_erp_audit, tab_issue_ledger, tab_transfer_history,
              tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet]
-# Only the opened module is rendered. Streamlit's st.tabs() runs EVERY tab on EVERY click, which made each
-# "Save & Update Stock" re-run all 11 modules (twice, because of the refresh after save).
-if st.session_state.get(NAV_KEY) not in TAB_NAMES:
-    st.session_state[NAV_KEY] = TAB_NAMES[0]
-active_tab = st.radio("Module", TAB_NAMES, key=NAV_KEY, horizontal=True, label_visibility="collapsed")
 render_header()
 RENDERERS[TAB_NAMES.index(active_tab)]()
 render_session_cookie_js()
