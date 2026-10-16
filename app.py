@@ -659,6 +659,63 @@ section[data-testid="stSidebar"] .brand-card .b-s { color:#FFFFFF !important; }
 }
 </style>""", unsafe_allow_html=True)
 
+st.markdown("""<style>
+/* Sidebar section headings: explicit light text on the navy surface. */
+section[data-testid="stSidebar"] .nav-section-title {
+    color: #F8FAFC !important;
+    font-size: 13px !important;
+    font-weight: 750 !important;
+    letter-spacing: .04em !important;
+    margin: 18px 0 8px !important;
+    padding-left: 2px !important;
+}
+/* Left-align nav items and keep inactive labels legible. */
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] { width: 100% !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button {
+    display: flex !important;
+    justify-content: flex-start !important;
+    text-align: left !important;
+    width: 100% !important;
+    min-height: 42px !important;
+    padding: 8px 12px !important;
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    color: #E5EDF5 !important;
+    box-shadow: none !important;
+}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button div {
+    justify-content: flex-start !important;
+    width: 100% !important;
+}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button p {
+    width: 100% !important;
+    text-align: left !important;
+    color: #E5EDF5 !important;
+    font-size: 14px !important;
+    font-weight: 600 !important;
+}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button:hover {
+    background: #1B334B !important;
+    border-color: #2D4963 !important;
+}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button[kind="primary"] {
+    background: #087E8B !important;
+    border-color: #1599A6 !important;
+}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button[kind="primary"] p {
+    color: #FFFFFF !important;
+    font-weight: 750 !important;
+}
+/* Premium dashboard hierarchy and readable cards. */
+.stApp h1 { color:#15243A !important; font-weight:750 !important; }
+div[data-testid="stMetric"] { min-height:112px; padding:18px !important; }
+div[data-testid="stMetricLabel"] p { color:#53657B !important; font-size:12px !important; }
+div[data-testid="stMetricValue"] { color:#0F766E !important; font-weight:800 !important; }
+.stTabs [data-baseweb="tab"] { font-size:14px !important; font-weight:700 !important; }
+.stTabs [data-baseweb="tab"] p { color:#334155 !important; }
+.stTabs [data-baseweb="tab"][aria-selected="true"] p { color:#0F766E !important; }
+</style>""", unsafe_allow_html=True)
+
 # ============================================================
 #  CONSTANTS
 # ============================================================
@@ -2097,12 +2154,13 @@ def tab_dashboard():
     remaining = allocated - issue_value
     used_pct = (issue_value / allocated * 100.0) if allocated > 0 else 0.0
 
-    kpis = st.columns(4, gap="medium")
-    kpis[0].metric("Inventory items", f"{inventory_total:,}", help="Current item count in the selected factory view")
-    kpis[1].metric("Purchases · Qty / Value", f"{purchase_qty:,.0f} / ৳{purchase_value:,.0f}")
-    kpis[2].metric("Issues · Qty / Value", f"{issue_qty:,.0f} / ৳{issue_value:,.0f}")
-    kpis[3].metric("Budget remaining", f"৳{remaining:,.0f}", f"{used_pct:.1f}% used")
-    st.caption(f"Low / negative stock items (≤ 5): {low_stock_total:,} · Period: {period}")
+    kpis = st.columns(5, gap="small")
+    kpis[0].metric("Stock items", f"{inventory_total:,}")
+    kpis[1].metric("Low stock", f"{low_stock_total:,}", help="Items at or below 5 units")
+    kpis[2].metric("Purchases", f"৳{purchase_value:,.0f}", help=f"Receipt quantity: {purchase_qty:,.0f}")
+    kpis[3].metric("Issues", f"৳{issue_value:,.0f}", help=f"Issued quantity: {issue_qty:,.0f}")
+    kpis[4].metric("Budget remaining", f"৳{remaining:,.0f}", f"{used_pct:.1f}% used")
+    st.caption(f"Management overview · {period} · Values are calculated from the selected factory's records.")
 
     chart_col, budget_col = st.columns([1.15, 1], gap="large")
     with chart_col:
@@ -4524,7 +4582,7 @@ with st.sidebar:
         '<div class="b-s">Smart inventory · Budget control</div></div>',
         unsafe_allow_html=True,
     )
-    st.markdown("### Workspace")
+    st.markdown('<div class="nav-section-title">Workspace</div>', unsafe_allow_html=True)
     for nav_index in range(4):
         nav_label = TAB_NAMES[nav_index]
         if st.button(
@@ -4536,7 +4594,7 @@ with st.sidebar:
             st.session_state[NAV_KEY] = nav_label
             st.rerun()
 
-    st.markdown("### Management")
+    st.markdown('<div class="nav-section-title">Management</div>', unsafe_allow_html=True)
     for nav_index in range(4, len(TAB_NAMES)):
         nav_label = TAB_NAMES[nav_index]
         if st.button(
