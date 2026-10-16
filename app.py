@@ -700,6 +700,62 @@ div[data-testid="stMetric"] { min-height: 76px !important; padding: 10px 14px !i
 .brand-logo { display:block; width:100%; height:auto; max-height:118px; object-fit:contain; border-radius:5px; }
 </style>""", unsafe_allow_html=True)
 
+st.markdown("""<style>
+/* Ensure all three key sidebar labels remain readable on the navy surface. */
+section[data-testid="stSidebar"] .nav-section-title {
+    display:block !important;
+    color:#FFFFFF !important;
+    font-size:14px !important;
+    font-weight:800 !important;
+    line-height:1.25 !important;
+    letter-spacing:.04em !important;
+    margin:12px 0 5px !important;
+    padding:3px 0 !important;
+    opacity:1 !important;
+}
+section[data-testid="stSidebar"] div[data-testid="stMarkdownContainer"] h3 {
+    color:#FFFFFF !important;
+    opacity:1 !important;
+}
+section[data-testid="stSidebar"] .brand-card {
+    padding:8px 10px !important;
+    margin-bottom:7px !important;
+}
+section[data-testid="stSidebar"] .brand-logo-wrap {
+    padding:4px !important;
+    margin-bottom:6px !important;
+}
+section[data-testid="stSidebar"] .brand-logo {
+    max-height:64px !important;
+}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button {
+    min-height:32px !important;
+    padding:4px 8px !important;
+    justify-content:flex-start !important;
+    text-align:left !important;
+}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button div {
+    justify-content:flex-start !important;
+    width:100% !important;
+}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button p {
+    text-align:left !important;
+    color:#EAF1F8 !important;
+    font-size:13px !important;
+    font-weight:650 !important;
+}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button[kind="primary"] p {
+    color:#FFFFFF !important;
+}
+section[data-testid="stSidebar"] h3 { color:#FFFFFF !important; }
+section[data-testid="stSidebar"] div[data-testid="stExpander"] summary p {
+    color:#FFFFFF !important;
+}
+section[data-testid="stSidebar"] div[data-testid="stForm"] {
+    padding:8px !important;
+}
+</style>""", unsafe_allow_html=True)
+
 # ============================================================
 #  CONSTANTS
 # ============================================================
@@ -4569,7 +4625,7 @@ except Exception as e:
 restore_login_from_cookie()
 show_flash()
 
-# Keep navigation at the top of the sidebar, matching the selected demo.
+# Brand and account/login appear first; Workspace and Management remain clearly grouped below.
 if st.session_state.get(NAV_KEY) not in TAB_NAMES:
     st.session_state[NAV_KEY] = TAB_NAMES[1]  # Transactions remains the default page.
 
@@ -4581,7 +4637,12 @@ with st.sidebar:
         f'<div class="b-s">Smart inventory · Budget control</div></div>',
         unsafe_allow_html=True,
     )
-    st.markdown("### Workspace")
+
+# Keep Secure Login / account status directly under the brand, not below the long menu.
+sidebar_login()
+
+with st.sidebar:
+    st.markdown('<div class="nav-section-title">Workspace</div>', unsafe_allow_html=True)
     for nav_index in range(4):
         nav_label = TAB_NAMES[nav_index]
         if st.button(
@@ -4593,7 +4654,7 @@ with st.sidebar:
             st.session_state[NAV_KEY] = nav_label
             st.rerun()
 
-    st.markdown("### Management")
+    st.markdown('<div class="nav-section-title">Management</div>', unsafe_allow_html=True)
     for nav_index in range(4, len(TAB_NAMES)):
         nav_label = TAB_NAMES[nav_index]
         if st.button(
@@ -4604,12 +4665,8 @@ with st.sidebar:
         ):
             st.session_state[NAV_KEY] = nav_label
             st.rerun()
-
     st.markdown("---")
     sidebar_clock()
-
-# Login / profile controls now sit below Workspace and Management navigation.
-sidebar_login()
 
 FAC = render_header()
 FSQL, FP = fw(FAC)
