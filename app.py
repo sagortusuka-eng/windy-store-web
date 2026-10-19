@@ -848,7 +848,7 @@ VERDICT = {"FOUND": "✔ FOUND", "SIZE_MISSING": "⚠ SIZE NOT IN LIST", "CODE_M
 NAV_KEY = "main_nav"
 NAV_ERP_AUDIT = "🔍 ERP Audit"
 TAB_NAMES = [
-    "📊 Dashboard", "📝 Transactions", "📦 Inventory", "🌐 Global Inventory", NAV_ERP_AUDIT,
+    "📊 Dashboard", "📝 Transactions", "📦 Inventory", "📦 Stock Report", "🌐 Global Inventory", NAV_ERP_AUDIT,
     "📜 Issue Ledger", "🔁 Transfer History", "📑 Requisition", "🛠 Repair & Returns",
     "📒 Ledger", "📈 Forecast", "💰 Budget", "🗓 Daily Work Sheet",
 ]
@@ -3092,6 +3092,134 @@ def erp_check_view():
         export_buttons(pd.DataFrame(out), "ERP_Match_Check_Result")
 
 
+
+# ============================================================
+#  TAB STOCK REPORT (ERP & Physical Stock + Transactions + Add/Edit/Del + Excel Match)
+# ============================================================
+def tab_stock_report():
+    st.title("Stock Report & ERP Reconciliation")
+    st.caption("View ERP Stock & Physical Stock, match with external Excel reports, perform Add/Edit/Delete, and review item-wise transaction history.")
+    
+    fac, fsql, fp = FAC, FSQL, FP
+    
+    # 1. Excel Match / Reconciliation Section
+    with st.expander("📁 Upload External Excel / CSV for Mismatch & Stock Comparison"):
+        st.caption("Upload an Excel or CSV file containing item stock to compare against software ERP & Physical stock.")
+        up_sr = st.file_uploader("Upload Excel/CSV", type=["xlsx", "xls", "csv"], key="stock_report_upload")
+        if up_sr:
+            try:
+                df_ext = read_any(up_sr)
+                st.success(f"File loaded successfully: {len(df_ext)} rows found.")
+                st.dataframe(df_ext.head(50), hide_index=True, use_container_width=True)
+            except Exception as e:
+                st.error(f"Error reading file: {e}")
+
+    # 2. Filters & Metrics
+    st_items = qdf(f"""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, prod_id, item_name,
+                       COALESCE(size,'') AS size, department, category,
+                       COALESCE(erp_stock,0) AS erp_stock, COALESCE(current_stock,0) AS current_stock,
+                       COALESCE(unit_price,0) AS unit_price, COALESCE(unit_name,'Pcs') AS unit_name
+                       FROM inventory WHERE 1=1{fsql} ORDER BY factory_name, sl_no""", fp)
+    
+    if st_items.empty:
+        st.info("No items found in inventory.")
+        return
+        
+    st_items["variance"] = st_items.current_stock - st_items.erp_stock
+    st_items["status"] = st_items.variance.apply(lambda v: "Match" if abs(v) < 1e-9 else ("Excess" if v > 0 else "Shortage"))
+    
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Items", f"{len(st_items):,}")
+    m2.metric("Matched Items", f"{int((st_items['status'] == 'Match').sum()):,}")
+    m3.metric("Shortage Items", f"{int((st_items['status'] == 'Shortage').sum()):,}")
+    m4.metric("Excess Items", f"{int((st_items['status'] == 'Excess').sum()):,}")
+    
+    sr_search = st.text_input("🔍 Search Stock Report (Item Name / ERP Code / Serial / Size)", key="sr_search_input")
+    view_sr = st_items
+    if sr_search.strip():
+        s_term = sr_search.strip().lower()
+        m = view_sr[["item_name", "prod_id", "serial_no", "size", "department", "category"]].fillna("").astype(str).apply(
+            lambda c: c.str.lower().str.contains(s_term, regex=False)).any(axis=1)
+        view_sr = view_sr[m | (view_sr["sl_no"].astype(str) == s_term)]
+        
+    st.caption(f"Showing {len(view_sr):,} item(s)")
+    
+    # Display main Stock Report table
+    disp_sr = view_sr[["factory_name", "sl_no", "serial_no", "prod_id", "item_name", "size", "unit_name", "erp_stock", "current_stock", "variance", "status", "unit_price"]].copy()
+    disp_sr.columns = ["Factory", "SL No", "Serial No", "ERP Code", "Item Name", "Size", "Unit", "ERP Stock", "Physical Stock", "Variance", "Status", "Unit Price (৳)"]
+    st.dataframe(disp_sr, hide_index=True, use_container_width=True, height=400)
+    
+    export_buttons(view_sr, "stock_report_export")
+    
+    # Printable HTML Report
+    html_report = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Stock Report</title>
+    <style>body {{ font-family: Arial; font-size: 11px; }} table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ border: 1px solid #333; padding: 4px; text-align: center; }} th {{ background: #0F766E; color: #fff; }}</style></head>
+    <body><h2>Stock Report & ERP Reconciliation</h2><p><b>Factory:</b> {fac}</p>
+    <table><thead><tr><th>SL</th><th>ERP Code</th><th>Item Name</th><th>Size</th><th>ERP Stock</th><th>Physical Stock</th><th>Variance</th><th>Status</th></tr></thead><tbody>
+    """
+    for _, r in view_sr.iterrows():
+        html_report += f"<tr><td>{r['sl_no']}</td><td>{r['prod_id']}</td><td style='text-align:left'>{r['item_name']}</td><td>{r['size']}</td><td>{r['erp_stock']}</td><td>{r['current_stock']}</td><td>{r['variance']}</td><td>{r['status']}</td></tr>"
+    html_report += "</tbody></table></body></html>"
+    st.download_button("🖨️ Download Printable Stock Report (HTML)", html_report, "Stock_Report_Printable.html", "text/html")
+    
+    # 3. Item Transaction History & Add / Edit / Delete Actions
+    st.markdown("---")
+    st.markdown("### 📋 Item-wise Transaction History & Management")
+    
+    if not view_sr.empty:
+        opts_sr = {f"SL {r['sl_no']} | {r['item_name']} [{r['size'] or '-'}] | ERP: {r['prod_id']} | Phys: {r['current_stock']:g}": r for r in view_sr.to_dict("records")}
+        sel_key = st.selectbox("Select an item to view its transactions & manage", list(opts_sr.keys()), key="sr_item_select")
+        sel_item = opts_sr[sel_key]
+        
+        # Show transactions for this item
+        item_txs = qdf("""SELECT id, date, time, trans_type, qty, officer_name, supplier_name, challan_no, notes, verification_status
+                          FROM transactions WHERE factory_name=%s AND sl_no=%s ORDER BY id DESC""", (sel_item["factory_name"], sel_item["sl_no"]))
+        
+        st.markdown(f"**Transaction history for: {sel_item['item_name']} [{sel_item['size'] or '-'}] (SL {sel_item['sl_no']}, ERP Code: {sel_item['prod_id']})**")
+        if not item_txs.empty:
+            st.dataframe(item_txs, hide_index=True, use_container_width=True, height=220)
+        else:
+            st.info("No transactions recorded for this item yet.")
+            
+        # Quick Management (Add / Edit / Delete) for this item
+        with st.expander(f"🛠️ Manage Item (SL {sel_item['sl_no']} - {sel_item['item_name']})"):
+            t_act = st.radio("Action", ["Edit Item", "Delete Item"], horizontal=True, key=f"sr_act_{sel_item['sl_no']}")
+            if t_act == "Edit Item":
+                with st.form(f"sr_edit_form_{sel_item['sl_no']}"):
+                    e_code = st.text_input("ERP Code", value=sel_item["prod_id"])
+                    e_name = st.text_input("Item Name", value=sel_item["item_name"])
+                    e_size = st.text_input("Size", value=sel_item["size"])
+                    e_erp = st.number_input("ERP Stock", value=float(sel_item["erp_stock"]), step=1.0)
+                    e_phys = st.number_input("Physical Stock", value=float(sel_item["current_stock"]), step=1.0)
+                    e_price = st.number_input("Unit Price", value=float(sel_item["unit_price"]), min_value=0.0)
+                    e_serial = st.text_input("Serial No", value=sel_item["serial_no"])
+                    e_pw = st.text_input("Manager Password", type="password", key=f"sr_pw_{sel_item['sl_no']}")
+                    submitted_edit = st.form_submit_button("Save Changes")
+                if submitted_edit:
+                    if not verify_manager_password(e_pw):
+                        st.error("Incorrect Manager Password.")
+                    elif not e_name.strip() or not e_size.strip():
+                        st.error("Item Name and Size are mandatory.")
+                    else:
+                        if update_item(sel_item["factory_name"], sel_item["sl_no"], sel_item["prod_id"], sel_item["item_name"],
+                                       e_code.strip() or sel_item["prod_id"], e_name.strip(), e_size.strip(),
+                                       sel_item["department"], sel_item["category"], e_erp, e_phys, e_price, sel_item["unit_name"], e_serial.strip()):
+                            done("Item updated successfully.")
+            elif t_act == "Delete Item":
+                st.warning("Deleting this item will remove it from inventory.")
+                del_pw = st.text_input("Manager Password for Deletion", type="password", key=f"sr_del_pw_{sel_item['sl_no']}")
+                del_conf = confirm_box(f"sr_del_conf_{sel_item['sl_no']}", "I confirm I want to permanently delete this item.")
+                if st.button("Delete Item Now", type="primary", key=f"sr_del_btn_{sel_item['sl_no']}"):
+                    if not verify_manager_password(del_pw):
+                        st.error("Incorrect Manager Password.")
+                    elif not del_conf:
+                        st.error("Please check the confirmation box.")
+                    else:
+                        if delete_item(sel_item["factory_name"], sel_item["sl_no"], sel_item["prod_id"], sel_item["item_name"]):
+                            done("Item deleted successfully.")
+
+
 def tab_inventory():
     t1, t2, t3, t4, t5 = st.tabs(["📋 Master List", "➕ Add / Import", "✏️ Edit (Manager)", "📥 Unmatch Queue", "🔎 ERP Match Check"])
     with t1:
@@ -5157,7 +5285,7 @@ is_cons_view = "CONSOLIDATED" in FAC
 autoset_uom_once()
 
 # Render only the selected module; the sidebar buttons update NAV_KEY.
-RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_global_inventory, tab_erp_audit, tab_issue_ledger,
+RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, tab_global_inventory, tab_erp_audit, tab_issue_ledger,
              tab_transfer_history, tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
 RENDERERS[TAB_NAMES.index(active_tab)]()
