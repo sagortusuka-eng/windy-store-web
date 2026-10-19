@@ -1150,9 +1150,8 @@ def init_master_tables():
 
 
 def get_uoms():
-    rows = q("SELECT uom_name FROM uom_master ORDER BY uom_name")
-    names = [r["uom_name"] for r in rows]
-    return names or list(DEFAULT_UOMS)
+    """Enforced UOM list: exactly DEFAULT_UOMS, in this order."""
+    return list(DEFAULT_UOMS)
 
 
 def get_budget_categories(fac=None):
@@ -3094,11 +3093,7 @@ def erp_check_view():
 
 
 # ============================================================
-#  TAB STOCK REPORT (ERP & Physical Stock + Transactions + Add/Edit/Del + Excel Match)
-# ============================================================
-
-# ============================================================
-#  TAB STOCK REPORT (ERP & Physical Stock + Values + Zero Stock Option)
+#  TAB STOCK REPORT - ERP / Physical reconciliation + Opening / Closing file reconciliation
 # ============================================================
 @tx
 def reset_all_stock_to_zero(fac):
@@ -3107,32 +3102,302 @@ def reset_all_stock_to_zero(fac):
     return True
 
 
-# ============================================================
-#  TAB STOCK REPORT (ERP Stock QTY & Physical Stock QTY + Values)
-# ============================================================
+def ensure_recon_table():
+    """Creates the discrepancy tracker table. Additive only; never touches inventory data."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS stock_reconciliation (
+                id SERIAL PRIMARY KEY, factory_name TEXT, recon_type TEXT, file_name TEXT, recon_date TEXT,
+                sl_no INTEGER, prod_id TEXT, item_name TEXT, size TEXT, uom TEXT, file_qty REAL,
+                software_physical REAL, software_erp REAL, variance REAL, result TEXT, match_method TEXT,
+                status TEXT DEFAULT 'Open', created_by TEXT, created_at TEXT, resolved_by TEXT, resolved_at TEXT)""")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+RECON_COLS = {
+    "code": ["erp code", "erp_code", "prod_id", "item code", "code"],
+    "name": ["item name", "item_name", "description", "product name", "item"],
+    "size": ["size", "item size"],
+    "qty": ["closing physical stock", "opening physical stock", "physical stock", "closing stock", "closing qty",
+            "opening stock", "opening qty", "current stock", "quantity", "qty", "stock"],
+    "unit": ["unit", "uom"],
+}
+
+
+def _nf(v):
+    try:
+        return None if v is None or pd.isna(v) else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _nint(v):
+    f = _nf(v)
+    return None if f is None else int(f)
+
+
+def recon_detect(df):
+    cols = {k: find_col(df, v) for k, v in RECON_COLS.items()}
+    if not cols["qty"] or (not cols["code"] and not cols["name"]):
+        return None
+    return cols
+
+
+def recon_file_rows(df, c):
+    rows, skipped = [], 0
+    for _, r in df.iterrows():
+        code = txt(r[c["code"]]) if c["code"] else ""
+        name = txt(r[c["name"]]) if c["name"] else ""
+        raw = r[c["qty"]]
+        qty = num(raw) if txt(raw) != "" else None
+        if (is_blank_code(code) and not name) or qty is None:
+            skipped += 1
+            continue
+        rows.append({
+            "code": code, "name": name,
+            "size": txt(r[c["size"]]) if c["size"] else "",
+            "qty": qty,
+            "unit": txt(r[c["unit"]]) if c["unit"] else "",
+        })
+    return rows, skipped
+
+
+def recon_db_rows(fac):
+    return q("""SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size,
+                COALESCE(NULLIF(unit_name,''),'Pcs') AS unit,
+                COALESCE(current_stock,0) AS phys, COALESCE(erp_stock,0) AS erp
+                FROM inventory WHERE factory_name=%s ORDER BY sl_no""", (fac,))
+
+
+def recon_match(file_rows, db_rows):
+    """Each file row is matched to one software item: ERP code first, then name; size narrows the choice.
+    An item already matched by an earlier file row is not matched again."""
+    by_code, by_name = {}, {}
+    for r in db_rows:
+        code = str(r["prod_id"] or "").strip().lower()
+        if not is_blank_code(code):
+            by_code.setdefault(code, []).append(r)
+        by_name.setdefault(norm_name(r["item_name"]), []).append(r)
+    used, results = set(), []
+    for fr in file_rows:
+        ns = norm_size(fr["size"])
+        code = fr["code"].strip().lower()
+        cands, method = [], ""
+        if not is_blank_code(code) and code in by_code:
+            cands, method = by_code[code], "ERP code"
+        if not cands and fr["name"]:
+            cands, method = by_name.get(norm_name(fr["name"]), []), "Name"
+        if cands and ns:
+            sized = [c for c in cands if norm_size(c["size"]) == ns]
+            if sized:
+                cands, method = sized, method + " + size"
+        free = [c for c in cands if c["sl_no"] not in used]
+        match = (free or cands or [None])[0]
+        if match is not None:
+            used.add(match["sl_no"])
+        results.append((fr, match, method if match is not None else ""))
+    leftover = [r for r in db_rows if r["sl_no"] not in used]
+    return results, leftover
+
+
+def recon_build_report(fac, file_rows):
+    db_rows = recon_db_rows(fac)
+    matched, leftover = recon_match(file_rows, db_rows)
+    out = []
+    for fr, m, method in matched:
+        if m is None:
+            out.append({"Result": "Not in software", "SL No": None, "ERP Code": fr["code"] or "-",
+                        "Item": fr["name"], "Size": fr["size"], "UOM": fr["unit"] or "-",
+                        "File Qty": fr["qty"], "Software Physical": None, "Software ERP": None,
+                        "Variance (Software − File)": None, "Match method": "-"})
+            continue
+        sp, se = float(m["phys"]), float(m["erp"])
+        diff = sp - fr["qty"]
+        if abs(diff) < 1e-6:
+            result = "Match"
+        elif diff < 0:
+            result = "Software short"
+        else:
+            result = "Software excess"
+        out.append({"Result": result, "SL No": int(m["sl_no"]), "ERP Code": m["prod_id"], "Item": m["item_name"],
+                    "Size": m["size"], "UOM": fr["unit"] or m["unit"], "File Qty": fr["qty"],
+                    "Software Physical": sp, "Software ERP": se, "Variance (Software − File)": diff,
+                    "Match method": method})
+    for r in leftover:
+        sp, se = float(r["phys"]), float(r["erp"])
+        if abs(sp) < 1e-9 and abs(se) < 1e-9:
+            continue
+        out.append({"Result": "Not in file", "SL No": int(r["sl_no"]), "ERP Code": r["prod_id"],
+                    "Item": r["item_name"], "Size": r["size"], "UOM": r["unit"], "File Qty": None,
+                    "Software Physical": sp, "Software ERP": se, "Variance (Software − File)": sp,
+                    "Match method": "-"})
+    return pd.DataFrame(out)
+
+
 @tx
-def reset_all_stock_to_zero(fac):
-    run("UPDATE inventory SET current_stock=0, erp_stock=0 WHERE factory_name=%s", (fac,))
-    audit("RESET_STOCK_ZERO", f"Reset all stock to zero for {fac}")
+def save_recon_discrepancies(fac, recon_type, file_name, df):
+    user = st.session_state.get("user", "")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows = df[df["Result"] != "Match"]
+    for r in rows.to_dict("records"):
+        run("""INSERT INTO stock_reconciliation (factory_name, recon_type, file_name, recon_date, sl_no, prod_id,
+               item_name, size, uom, file_qty, software_physical, software_erp, variance, result, match_method,
+               status, created_by, created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'Open',%s,%s)""",
+            (fac, recon_type, file_name, datetime.now().strftime(DATE_FMT), _nint(r["SL No"]),
+             txt(r["ERP Code"]), txt(r["Item"]), txt(r["Size"]), txt(r["UOM"]), _nf(r["File Qty"]),
+             _nf(r["Software Physical"]), _nf(r["Software ERP"]), _nf(r["Variance (Software − File)"]),
+             r["Result"], r["Match method"], user, now))
+    audit("STOCK_RECON_SAVE", f"{fac}: {recon_type} '{file_name}' saved {len(rows)} discrepancy row(s)")
+    return len(rows)
+
+
+@tx
+def recon_set_status(ids, status):
+    user = st.session_state.get("user", "")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for i in ids:
+        if status == "Resolved":
+            run("UPDATE stock_reconciliation SET status='Resolved', resolved_by=%s, resolved_at=%s WHERE id=%s",
+                (user, now, int(i)))
+        else:
+            run("UPDATE stock_reconciliation SET status='Open', resolved_by=NULL, resolved_at=NULL WHERE id=%s",
+                (int(i),))
+    audit("STOCK_RECON_STATUS", f"Discrepancy IDs {sorted(int(i) for i in ids)} -> {status}")
     return True
 
 
-# ============================================================
-#  TAB STOCK REPORT (ERP Stock QTY & Physical Stock QTY + UOM Edit + Values)
-# ============================================================
-@tx
-def reset_all_stock_to_zero(fac):
-    run("UPDATE inventory SET current_stock=0, erp_stock=0 WHERE factory_name=%s", (fac,))
-    audit("RESET_STOCK_ZERO", f"Reset all stock to zero for {fac}")
-    return True
+def recon_tracker(fac):
+    st.markdown('<div class="section-title">Discrepancy Tracker (saved from reconciliation)</div>',
+                unsafe_allow_html=True)
+    f1, f2 = st.columns([1, 2])
+    status = f1.selectbox("Status", ["Open", "Resolved", "All"], key="rt_status")
+    term = f2.text_input("🔍 Search tracker (Item / ERP Code / SL / File)", key="rt_search")
+    sql = "SELECT * FROM stock_reconciliation WHERE factory_name=%s"
+    params = [fac]
+    if status != "All":
+        sql += " AND status=%s"
+        params.append(status)
+    sql += " ORDER BY id DESC LIMIT 1000"
+    tr = qdf(sql, params)
+    if term.strip() and not tr.empty:
+        t = term.strip().lower()
+        m = tr[["item_name", "prod_id", "file_name", "size"]].fillna("").astype(str).apply(
+            lambda c: c.str.lower().str.contains(t, regex=False)).any(axis=1)
+        tr = tr[m | (tr["sl_no"].astype(str).str.strip() == t)]
+    if tr.empty:
+        st.info("Ei filter-e kono discrepancy nei.")
+        return
+    mc = st.columns(3)
+    mc[0].metric("Discrepancies", len(tr))
+    mc[1].metric("Open", int((tr["status"] == "Open").sum()))
+    mc[2].metric("Resolved", int((tr["status"] == "Resolved").sum()))
+    show = tr[["id", "recon_date", "file_name", "recon_type", "factory_name", "sl_no", "prod_id", "item_name",
+               "size", "uom", "file_qty", "software_physical", "software_erp", "variance", "result",
+               "status", "created_by", "resolved_by", "resolved_at"]].copy()
+    show.columns = ["ID", "Date", "File", "Type", "Factory", "SL No", "ERP Code", "Item", "Size", "UOM",
+                    "File Qty", "Software Physical", "Software ERP", "Variance (Software − File)", "Result",
+                    "Status", "Saved by", "Resolved by", "Resolved at"]
+    st.dataframe(show, hide_index=True, use_container_width=True, height=340)
+    export_buttons(show, "stock_discrepancy_tracker")
+
+    with st.expander("🔐 Manager: mark discrepancy Resolved / Reopen"):
+        rows = {int(r["id"]): r for r in tr.head(500).to_dict("records")}
+        sel = st.multiselect("Discrepancy ID(s)", list(rows), key="rt_sel",
+                             format_func=lambda i: f"ID {i} | {rows[i]['item_name']} | {rows[i]['result']} | "
+                                                   f"var {float(rows[i]['variance'] or 0):g}")
+        pw_ok = mgr_check("rt_pw")
+        c1, c2 = st.columns(2)
+        if c1.button("✔ Mark Resolved", key="rt_resolve", disabled=not sel):
+            if not pw_ok:
+                st.error("Manager password thik nei.")
+            elif recon_set_status(sel, "Resolved"):
+                done(f"{len(sel)} discrepancy resolved.")
+        if c2.button("↺ Reopen", key="rt_reopen", disabled=not sel):
+            if not pw_ok:
+                st.error("Manager password thik nei.")
+            elif recon_set_status(sel, "Open"):
+                done(f"{len(sel)} discrepancy reopened.")
+
+
+RECON_FILTERS = ["All discrepancies", "Match", "Software short", "Software excess", "Not in software", "Not in file"]
+
+
+def recon_panel(default_fac):
+    with st.expander("📁 Opening / Closing File Reconciliation (Excel / CSV)", expanded=True):
+        c1, c2 = st.columns(2)
+        rec_fac = c1.selectbox("Factory to reconcile", FACTORIES,
+                               index=FACTORIES.index(default_fac) if default_fac in FACTORIES else 0,
+                               key="rc_fac")
+        rtype = c2.radio("File type", ["Opening file", "Closing file"], horizontal=True, key="rc_type")
+        up = st.file_uploader("Upload opening / closing file", type=["xlsx", "xls", "csv"], key="rc_file")
+        if not up:
+            st.caption("File upload korle software stock-er sathe quantity compare hobe. "
+                       "File-er quantity-r sathe software Physical stock match kora hobe.")
+            recon_tracker(rec_fac)
+            return
+        raw = read_any(up)
+        cols = recon_detect(raw)
+        if cols is None:
+            st.error("Quantity column ar ERP Code / Item Name column paoa jay nai.")
+            st.write("Columns found:", list(raw.columns))
+            recon_tracker(rec_fac)
+            return
+        found = {k: (v if v else "not found") for k, v in cols.items()}
+        st.caption(f"Auto-detected columns → ERP code: {found['code']} | Item: {found['name']} | "
+                   f"Size: {found['size']} | Quantity: {found['qty']} | UOM: {found['unit']}")
+        file_rows, skipped = recon_file_rows(raw, cols)
+        st.caption(f"File rows usable: {len(file_rows)} | Skipped: {skipped}")
+
+        if st.button("▶ Run reconciliation", type="primary", key="rc_run", disabled=not file_rows):
+            st.session_state["rc_result"] = {"fac": rec_fac, "type": rtype, "file": up.name,
+                                             "df": recon_build_report(rec_fac, file_rows)}
+        res = st.session_state.get("rc_result")
+        if not res or res["fac"] != rec_fac:
+            st.info("Upore 'Run reconciliation' click korun.")
+            recon_tracker(rec_fac)
+            return
+        df = res["df"]
+        st.caption(f"Result: {res['file']} ({res['type']}) · {res['fac']}")
+        if df.empty:
+            st.success("Software ar file-er sob quantity milche.")
+        else:
+            counts = df["Result"].value_counts()
+            mc = st.columns(5)
+            mc[0].metric("Match", int(counts.get("Match", 0)))
+            mc[1].metric("Software short", int(counts.get("Software short", 0)))
+            mc[2].metric("Software excess", int(counts.get("Software excess", 0)))
+            mc[3].metric("Not in software", int(counts.get("Not in software", 0)))
+            mc[4].metric("Not in file", int(counts.get("Not in file", 0)))
+            pick = st.selectbox("Show", RECON_FILTERS, key="rc_filter")
+            if pick == "All discrepancies":
+                view = df[df["Result"] != "Match"]
+            else:
+                view = df[df["Result"] == pick]
+            st.dataframe(view, hide_index=True, use_container_width=True, height=360, column_config={
+                "File Qty": st.column_config.NumberColumn(format="%.2f"),
+                "Software Physical": st.column_config.NumberColumn(format="%.2f"),
+                "Software ERP": st.column_config.NumberColumn(format="%.2f"),
+                "Variance (Software − File)": st.column_config.NumberColumn(format="%.2f"),
+            })
+            export_buttons(df, "stock_reconciliation_result")
+            if guard():
+                disc = int((df["Result"] != "Match").sum())
+                if st.button(f"💾 Save {disc} discrepancy row(s) to tracker", key="rc_save", disabled=disc == 0):
+                    if save_recon_discrepancies(res["fac"], res["type"], res["file"], df):
+                        done(f"{disc} discrepancy row(s) tracker-e save hoyeche.")
+        recon_tracker(rec_fac)
+
 
 def tab_stock_report():
     st.title("Stock Report & ERP Reconciliation")
-    st.caption("Compare ERP Stock QTY, Physical Stock QTY, Stock Balance, and Total Values to verify against your Excel records.")
-    
+    st.caption("ERP Stock QTY, Physical Stock QTY, Stock Balance and values for the selected factory.")
     fac, fsql, fp = FAC, FSQL, FP
-    
-    # 0. Reset Stock to Zero Option (if user wants to start fresh and entry 1 by 1)
+
     with st.expander("⚠️ Reset All Stock to Zero (Fresh Start for 1-by-1 Entry)"):
         st.warning("This will set ERP Stock and Physical Stock to 0 for all items in this factory. Item names will remain intact.")
         reset_pw = st.text_input("Store Manager Password", type="password", key="sr_reset_pw")
@@ -3142,152 +3407,134 @@ def tab_stock_report():
                 st.error("Incorrect Manager Password.")
             elif not reset_conf:
                 st.error("Please confirm by checking the box.")
-            else:
-                if reset_all_stock_to_zero(fac):
-                    done("All stock balances have been reset to Zero.")
+            elif reset_all_stock_to_zero(fac):
+                done("All stock balances have been reset to Zero.")
 
-    # 1. Excel Match / Reconciliation Section
-    with st.expander("📁 Upload External Excel / CSV for Mismatch & Stock Comparison"):
-        st.caption("Upload your Excel or CSV file containing item stock to compare against software ERP & Physical stock.")
-        up_sr = st.file_uploader("Upload Excel/CSV", type=["xlsx", "xls", "csv"], key="stock_report_upload")
-        if up_sr:
-            try:
-                df_ext = read_any(up_sr)
-                st.success(f"File loaded successfully: {len(df_ext)} rows found.")
-                st.dataframe(df_ext.head(50), hide_index=True, use_container_width=True)
-            except Exception as e:
-                st.error(f"Error reading file: {e}")
-
-    # 2. Fetch inventory and calculate requested quantities and values
     st_items = qdf(f"""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, prod_id, item_name,
                        COALESCE(size,'') AS size, department, category,
                        COALESCE(erp_stock,0) AS erp_stock, COALESCE(current_stock,0) AS current_stock,
                        COALESCE(unit_price,0) AS unit_price, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit_name
                        FROM inventory WHERE 1=1{fsql} ORDER BY factory_name, sl_no""", fp)
-    
+
     if st_items.empty:
         st.info("No items found in inventory.")
-        return
-        
-    st_items["ERP Stock QTY"] = st_items["erp_stock"]
-    st_items["Physical Stock QTY"] = st_items["current_stock"]
-    st_items["Stock Balance"] = st_items["current_stock"]
-    st_items["Stock Value"] = st_items["current_stock"] * st_items["unit_price"]
-    st_items["ERP Balance Value"] = st_items["erp_stock"] * st_items["unit_price"]
-    st_items["Physical Balance Value"] = st_items["current_stock"] * st_items["unit_price"]
-    
-    st_items["variance"] = st_items["Physical Stock QTY"] - st_items["ERP Stock QTY"]
-    st_items["Status"] = st_items.variance.apply(lambda v: "Match" if abs(v) < 1e-9 else ("Excess" if v > 0 else "Shortage"))
-    
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Items", f"{len(st_items):,}")
-    m2.metric("Total Stock Value", f"৳{st_items['Stock Value'].sum():,.0f}")
-    m3.metric("Total ERP Value", f"৳{st_items['ERP Balance Value'].sum():,.0f}")
-    m4.metric("Total Physical Value", f"৳{st_items['Physical Balance Value'].sum():,.0f}")
-    
-    sr_search = st.text_input("🔍 Search Stock Report (Item Name / ERP Code / Serial / Size)", key="sr_search_input")
-    view_sr = st_items
-    if sr_search.strip():
-        s_term = sr_search.strip().lower()
-        m = view_sr[["item_name", "prod_id", "serial_no", "size", "department", "category"]].fillna("").astype(str).apply(
-            lambda c: c.str.lower().str.contains(s_term, regex=False)).any(axis=1)
-        view_sr = view_sr[m | (view_sr["sl_no"].astype(str) == s_term)]
-        
-    st.caption(f"Showing {len(view_sr):,} item(s)")
-    
-    # Display main Stock Report table with explicit ERP Stock QTY & Physical Stock QTY & UOM
-    disp_cols = ["factory_name", "sl_no", "prod_id", "item_name", "size", "unit_name", 
-                 "ERP Stock QTY", "Physical Stock QTY", "Stock Balance", "Stock Value", 
-                 "ERP Balance Value", "Physical Balance Value", "Status", "unit_price"]
-    disp_sr = view_sr[disp_cols].copy()
-    disp_sr.columns = ["Factory", "SL No", "ERP Code", "Item Name", "Size", "UOM", 
-                       "ERP Stock QTY", "Physical Stock QTY", "Stock Balance", "Stock Value", 
-                       "ERP Balance Value", "Physical Balance Value", "Status", "Unit Price"]
-                       
-    st.dataframe(disp_sr, hide_index=True, use_container_width=True, height=420,
-                 column_config={
-                     "ERP Stock QTY": st.column_config.NumberColumn(format="%.2f"),
-                     "Physical Stock QTY": st.column_config.NumberColumn(format="%.2f"),
-                     "Stock Balance": st.column_config.NumberColumn(format="%.2f"),
-                     "Stock Value": st.column_config.NumberColumn(format="৳ %,.2f"),
-                     "ERP Balance Value": st.column_config.NumberColumn(format="৳ %,.2f"),
-                     "Physical Balance Value": st.column_config.NumberColumn(format="৳ %,.2f"),
-                     "Unit Price": st.column_config.NumberColumn(format="৳ %,.2f"),
-                 })
-    
-    export_buttons(view_sr, "stock_report_export")
-    
-    # Printable HTML Report
-    html_report = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Stock Report</title>
-    <style>body {{ font-family: Arial; font-size: 11px; }} table {{ width: 100%; border-collapse: collapse; }}
-    th, td {{ border: 1px solid #333; padding: 4px; text-align: center; }} th {{ background: #0F766E; color: #fff; }}</style></head>
-    <body><h2>Stock Report & ERP Reconciliation</h2><p><b>Factory:</b> {fac}</p>
-    <table><thead><tr><th>SL</th><th>ERP Code</th><th>Item Name</th><th>Size</th><th>UOM</th><th>ERP Stock QTY</th><th>Physical Stock QTY</th><th>Stock Balance</th><th>Stock Value</th><th>ERP Value</th><th>Physical Value</th><th>Status</th></tr></thead><tbody>
-    """
-    for _, r in view_sr.iterrows():
-        html_report += f"<tr><td>{r['sl_no']}</td><td>{r['prod_id']}</td><td style='text-align:left'>{r['item_name']}</td><td>{r['size']}</td><td>{r['unit_name']}</td><td>{r['ERP Stock QTY']}</td><td>{r['Physical Stock QTY']}</td><td>{r['Stock Balance']}</td><td>{r['Stock Value']}</td><td>{r['ERP Balance Value']}</td><td>{r['Physical Balance Value']}</td><td>{r['Status']}</td></tr>"
-    html_report += "</tbody></table></body></html>"
-    st.download_button("🖨️ Download Printable Stock Report (HTML)", html_report, "Stock_Report_Printable.html", "text/html")
-    
-    # 3. Item Transaction History & Add / Edit / Delete Actions
-    st.markdown("---")
-    st.markdown("### 📋 Item-wise Transaction History & Management")
-    
-    if not view_sr.empty:
-        opts_sr = {f"SL {r['sl_no']} | {r['item_name']} [{r['size'] or '-'}] | ERP QTY: {r['ERP Stock QTY']:g} | Phys QTY: {r['Physical Stock QTY']:g}": r for r in view_sr.to_dict("records")}
-        sel_key = st.selectbox("Select an item to view its transactions & manage", list(opts_sr.keys()), key="sr_item_select")
-        sel_item = opts_sr[sel_key]
-        
-        # Show transactions for this item
-        item_txs = qdf("""SELECT id, date, time, trans_type, qty, officer_name, supplier_name, challan_no, notes, verification_status
-                          FROM transactions WHERE factory_name=%s AND sl_no=%s ORDER BY id DESC""", (sel_item["factory_name"], sel_item["sl_no"]))
-        
-        st.markdown(f"**Transaction history for: {sel_item['item_name']} [{sel_item['size'] or '-'}] (SL {sel_item['sl_no']}, ERP Code: {sel_item['prod_id']})**")
-        if not item_txs.empty:
-            st.dataframe(item_txs, hide_index=True, use_container_width=True, height=220)
-        else:
-            st.info("No transactions recorded for this item yet.")
-            
-        # Quick Management (Add / Edit / Delete) for this item
-        with st.expander(f"🛠️ Manage Item (SL {sel_item['sl_no']} - {sel_item['item_name']})"):
-            t_act = st.radio("Action", ["Edit Item", "Delete Item"], horizontal=True, key=f"sr_act_{sel_item['sl_no']}")
-            if t_act == "Edit Item":
-                uom_opts = get_uoms()
-                cur_uom = sel_item["unit_name"] if sel_item["unit_name"] in uom_opts else uom_opts[0]
-                with st.form(f"sr_edit_form_{sel_item['sl_no']}"):
-                    e_code = st.text_input("ERP Code", value=sel_item["prod_id"])
-                    e_name = st.text_input("Item Name", value=sel_item["item_name"])
-                    e_size = st.text_input("Size", value=sel_item["size"])
-                    e_uom = st.selectbox("UOM", uom_opts, index=uom_opts.index(cur_uom) if cur_uom in uom_opts else 0)
-                    e_erp = st.number_input("ERP Stock QTY", value=float(sel_item["erp_stock"]), step=1.0)
-                    e_phys = st.number_input("Physical Stock QTY", value=float(sel_item["current_stock"]), step=1.0)
-                    e_price = st.number_input("Unit Price", value=float(sel_item["unit_price"]), min_value=0.0)
-                    e_serial = st.text_input("Serial No", value=sel_item["serial_no"])
-                    e_pw = st.text_input("Manager Password", type="password", key=f"sr_pw_{sel_item['sl_no']}")
-                    submitted_edit = st.form_submit_button("Save Changes")
-                if submitted_edit:
-                    if not verify_manager_password(e_pw):
-                        st.error("Incorrect Manager Password.")
-                    elif not e_name.strip() or not e_size.strip():
-                        st.error("Item Name and Size are mandatory.")
-                    else:
-                        if update_item(sel_item["factory_name"], sel_item["sl_no"], sel_item["prod_id"], sel_item["item_name"],
-                                       e_code.strip() or sel_item["prod_id"], e_name.strip(), e_size.strip(),
-                                       sel_item["department"], sel_item["category"], e_erp, e_phys, e_price, e_uom, e_serial.strip()):
+    else:
+        st_items["ERP Stock QTY"] = st_items["erp_stock"]
+        st_items["Physical Stock QTY"] = st_items["current_stock"]
+        st_items["Stock Balance"] = st_items["current_stock"]
+        st_items["Stock Value"] = st_items["current_stock"] * st_items["unit_price"]
+        st_items["ERP Balance Value"] = st_items["erp_stock"] * st_items["unit_price"]
+        st_items["Physical Balance Value"] = st_items["current_stock"] * st_items["unit_price"]
+        st_items["variance"] = st_items["Physical Stock QTY"] - st_items["ERP Stock QTY"]
+        st_items["Status"] = st_items.variance.apply(
+            lambda v: "Match" if abs(v) < 1e-9 else ("Excess" if v > 0 else "Shortage"))
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Items", f"{len(st_items):,}")
+        m2.metric("Total Stock Value", f"৳{st_items['Stock Value'].sum():,.0f}")
+        m3.metric("Total ERP Value", f"৳{st_items['ERP Balance Value'].sum():,.0f}")
+        m4.metric("Total Physical Value", f"৳{st_items['Physical Balance Value'].sum():,.0f}")
+
+        sr_search = st.text_input("🔍 Search Stock Report (Item Name / ERP Code / Serial / Size)", key="sr_search_input")
+        view_sr = st_items
+        if sr_search.strip():
+            s_term = sr_search.strip().lower()
+            m = view_sr[["item_name", "prod_id", "serial_no", "size", "department", "category"]].fillna("").astype(str).apply(
+                lambda c: c.str.lower().str.contains(s_term, regex=False)).any(axis=1)
+            view_sr = view_sr[m | (view_sr["sl_no"].astype(str) == s_term)]
+        st.caption(f"Showing {len(view_sr):,} item(s)")
+
+        disp_cols = ["factory_name", "sl_no", "prod_id", "item_name", "size", "unit_name",
+                     "ERP Stock QTY", "Physical Stock QTY", "Stock Balance", "Stock Value",
+                     "ERP Balance Value", "Physical Balance Value", "Status", "unit_price"]
+        disp_sr = view_sr[disp_cols].copy()
+        disp_sr.columns = ["Factory", "SL No", "ERP Code", "Item Name", "Size", "UOM",
+                           "ERP Stock QTY", "Physical Stock QTY", "Stock Balance", "Stock Value",
+                           "ERP Balance Value", "Physical Balance Value", "Status", "Unit Price"]
+        st.dataframe(disp_sr, hide_index=True, use_container_width=True, height=420, column_config={
+            "ERP Stock QTY": st.column_config.NumberColumn(format="%.2f"),
+            "Physical Stock QTY": st.column_config.NumberColumn(format="%.2f"),
+            "Stock Balance": st.column_config.NumberColumn(format="%.2f"),
+            "Stock Value": st.column_config.NumberColumn(format="৳ %,.2f"),
+            "ERP Balance Value": st.column_config.NumberColumn(format="৳ %,.2f"),
+            "Physical Balance Value": st.column_config.NumberColumn(format="৳ %,.2f"),
+            "Unit Price": st.column_config.NumberColumn(format="৳ %,.2f"),
+        })
+        export_buttons(view_sr, "stock_report_export")
+
+        html_report = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Stock Report</title>
+        <style>body {{ font-family: Arial; font-size: 11px; }} table {{ width: 100%; border-collapse: collapse; }}
+        th, td {{ border: 1px solid #333; padding: 4px; text-align: center; }} th {{ background: #0F766E; color: #fff; }}</style></head>
+        <body><h2>Stock Report & ERP Reconciliation</h2><p><b>Factory:</b> {html_lib.escape(str(fac))}</p>
+        <table><thead><tr><th>SL</th><th>ERP Code</th><th>Item Name</th><th>Size</th><th>UOM</th><th>ERP Stock QTY</th>
+        <th>Physical Stock QTY</th><th>Stock Balance</th><th>Stock Value</th><th>ERP Value</th><th>Physical Value</th><th>Status</th></tr></thead><tbody>"""
+        for _, r in view_sr.iterrows():
+            html_report += (f"<tr><td>{r['sl_no']}</td><td>{html_lib.escape(str(r['prod_id']))}</td>"
+                            f"<td style='text-align:left'>{html_lib.escape(str(r['item_name']))}</td>"
+                            f"<td>{html_lib.escape(str(r['size']))}</td><td>{html_lib.escape(str(r['unit_name']))}</td>"
+                            f"<td>{r['ERP Stock QTY']:g}</td><td>{r['Physical Stock QTY']:g}</td>"
+                            f"<td>{r['Stock Balance']:g}</td><td>{r['Stock Value']:,.2f}</td>"
+                            f"<td>{r['ERP Balance Value']:,.2f}</td><td>{r['Physical Balance Value']:,.2f}</td>"
+                            f"<td>{r['Status']}</td></tr>")
+        html_report += "</tbody></table></body></html>"
+        st.download_button("🖨️ Download Printable Stock Report (HTML)", html_report,
+                           "Stock_Report_Printable.html", "text/html")
+
+        st.markdown("---")
+        st.markdown("### 📋 Item-wise Transaction History & Management")
+        if not view_sr.empty:
+            opts_sr = {f"SL {r['sl_no']} | {r['item_name']} [{r['size'] or '-'}] | ERP QTY: {r['ERP Stock QTY']:g} | Phys QTY: {r['Physical Stock QTY']:g}": r
+                       for r in view_sr.to_dict("records")}
+            sel_key = st.selectbox("Select an item to view its transactions & manage", list(opts_sr.keys()), key="sr_item_select")
+            sel_item = opts_sr[sel_key]
+            item_txs = qdf("""SELECT id, date, time, trans_type, qty, officer_name, supplier_name, challan_no, notes, verification_status
+                              FROM transactions WHERE factory_name=%s AND sl_no=%s ORDER BY id DESC""",
+                           (sel_item["factory_name"], sel_item["sl_no"]))
+            st.markdown(f"**Transaction history for: {sel_item['item_name']} [{sel_item['size'] or '-'}] (SL {sel_item['sl_no']}, ERP Code: {sel_item['prod_id']})**")
+            if not item_txs.empty:
+                st.dataframe(item_txs, hide_index=True, use_container_width=True, height=220)
+            else:
+                st.info("No transactions recorded for this item yet.")
+
+            with st.expander(f"🛠️ Manage Item (SL {sel_item['sl_no']} - {sel_item['item_name']})"):
+                t_act = st.radio("Action", ["Edit Item", "Delete Item"], horizontal=True, key=f"sr_act_{sel_item['sl_no']}")
+                if t_act == "Edit Item":
+                    uom_opts = get_uoms()
+                    cur_uom = sel_item["unit_name"] if sel_item["unit_name"] in uom_opts else uom_opts[0]
+                    with st.form(f"sr_edit_form_{sel_item['sl_no']}"):
+                        e_code = st.text_input("ERP Code", value=sel_item["prod_id"])
+                        e_name = st.text_input("Item Name", value=sel_item["item_name"])
+                        e_size = st.text_input("Size", value=sel_item["size"])
+                        e_uom = st.selectbox("UOM", uom_opts, index=uom_opts.index(cur_uom))
+                        e_erp = st.number_input("ERP Stock QTY", value=float(sel_item["erp_stock"]), step=1.0)
+                        e_phys = st.number_input("Physical Stock QTY", value=float(sel_item["current_stock"]), step=1.0)
+                        e_price = st.number_input("Unit Price", value=float(sel_item["unit_price"]), min_value=0.0)
+                        e_serial = st.text_input("Serial No", value=sel_item["serial_no"])
+                        e_pw = st.text_input("Manager Password", type="password", key=f"sr_pw_{sel_item['sl_no']}")
+                        submitted_edit = st.form_submit_button("Save Changes")
+                    if submitted_edit:
+                        if not verify_manager_password(e_pw):
+                            st.error("Incorrect Manager Password.")
+                        elif not e_name.strip() or not e_size.strip():
+                            st.error("Item Name and Size are mandatory.")
+                        elif update_item(sel_item["factory_name"], sel_item["sl_no"], sel_item["prod_id"], sel_item["item_name"],
+                                         e_code.strip() or sel_item["prod_id"], e_name.strip(), e_size.strip(),
+                                         sel_item["department"], sel_item["category"], e_erp, e_phys, e_price, e_uom, e_serial.strip()):
                             done("Item updated successfully.")
-            elif t_act == "Delete Item":
-                st.warning("Deleting this item will remove it from inventory.")
-                del_pw = st.text_input("Manager Password for Deletion", type="password", key=f"sr_del_pw_{sel_item['sl_no']}")
-                del_conf = confirm_box(f"sr_del_conf_{sel_item['sl_no']}", "I confirm I want to permanently delete this item.")
-                if st.button("Delete Item Now", type="primary", key=f"sr_del_btn_{sel_item['sl_no']}"):
-                    if not verify_manager_password(del_pw):
-                        st.error("Incorrect Manager Password.")
-                    elif not del_conf:
-                        st.error("Please check the confirmation box.")
-                    else:
-                        if delete_item(sel_item["factory_name"], sel_item["sl_no"], sel_item["prod_id"], sel_item["item_name"]):
+                elif t_act == "Delete Item":
+                    st.warning("Deleting this item will remove it from inventory.")
+                    del_pw = st.text_input("Manager Password for Deletion", type="password", key=f"sr_del_pw_{sel_item['sl_no']}")
+                    del_conf = confirm_box(f"sr_del_conf_{sel_item['sl_no']}", "I confirm I want to permanently delete this item.")
+                    if st.button("Delete Item Now", type="primary", key=f"sr_del_btn_{sel_item['sl_no']}"):
+                        if not verify_manager_password(del_pw):
+                            st.error("Incorrect Manager Password.")
+                        elif not del_conf:
+                            st.error("Please check the confirmation box.")
+                        elif delete_item(sel_item["factory_name"], sel_item["sl_no"], sel_item["prod_id"], sel_item["item_name"]):
                             done("Item deleted successfully.")
 
+    st.markdown("---")
+    recon_panel(fac)
 
 
 def tab_inventory():
@@ -5298,6 +5545,7 @@ def tab_daily_sheet():
 ensure_live_connection()
 try:
     init_db()
+    ensure_recon_table()
     if not st.session_state.get("_global_inventory_schema_ready"):
         ensure_global_inventory_schema()
         st.session_state["_global_inventory_schema_ready"] = True
