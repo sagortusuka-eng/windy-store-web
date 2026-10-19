@@ -1130,7 +1130,7 @@ def ensure_live_connection():
 # ============================================================
 #  UOM / CATEGORY MASTER (dynamic, DB-backed, additive only)
 # ============================================================
-DEFAULT_UOMS = ["FEET", "KG", "PCS", "YRD", "LBS", "PKT"]
+DEFAULT_UOMS = ["PCS", "PACKET", "FEET", "COIL", "LBS", "GALLON", "KG", "PAIR", "BOX", "BOOK", "PACK", "MTR", "SET", "LTR", "ROLL"]
 
 
 def init_master_tables():
@@ -3106,9 +3106,29 @@ def reset_all_stock_to_zero(fac):
     audit("RESET_STOCK_ZERO", f"Reset all stock to zero for {fac}")
     return True
 
+
+# ============================================================
+#  TAB STOCK REPORT (ERP Stock QTY & Physical Stock QTY + Values)
+# ============================================================
+@tx
+def reset_all_stock_to_zero(fac):
+    run("UPDATE inventory SET current_stock=0, erp_stock=0 WHERE factory_name=%s", (fac,))
+    audit("RESET_STOCK_ZERO", f"Reset all stock to zero for {fac}")
+    return True
+
+
+# ============================================================
+#  TAB STOCK REPORT (ERP Stock QTY & Physical Stock QTY + UOM Edit + Values)
+# ============================================================
+@tx
+def reset_all_stock_to_zero(fac):
+    run("UPDATE inventory SET current_stock=0, erp_stock=0 WHERE factory_name=%s", (fac,))
+    audit("RESET_STOCK_ZERO", f"Reset all stock to zero for {fac}")
+    return True
+
 def tab_stock_report():
     st.title("Stock Report & ERP Reconciliation")
-    st.caption("View ERP Stock, Physical Stock, Stock Balance, Stock Value, ERP Balance Value & Physical Balance Value.")
+    st.caption("Compare ERP Stock QTY, Physical Stock QTY, Stock Balance, and Total Values to verify against your Excel records.")
     
     fac, fsql, fp = FAC, FSQL, FP
     
@@ -3128,7 +3148,7 @@ def tab_stock_report():
 
     # 1. Excel Match / Reconciliation Section
     with st.expander("📁 Upload External Excel / CSV for Mismatch & Stock Comparison"):
-        st.caption("Upload an Excel or CSV file containing item stock to compare against software ERP & Physical stock.")
+        st.caption("Upload your Excel or CSV file containing item stock to compare against software ERP & Physical stock.")
         up_sr = st.file_uploader("Upload Excel/CSV", type=["xlsx", "xls", "csv"], key="stock_report_upload")
         if up_sr:
             try:
@@ -3138,32 +3158,25 @@ def tab_stock_report():
             except Exception as e:
                 st.error(f"Error reading file: {e}")
 
-    # 2. Fetch inventory and calculate requested values
+    # 2. Fetch inventory and calculate requested quantities and values
     st_items = qdf(f"""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, prod_id, item_name,
                        COALESCE(size,'') AS size, department, category,
                        COALESCE(erp_stock,0) AS erp_stock, COALESCE(current_stock,0) AS current_stock,
-                       COALESCE(unit_price,0) AS unit_price, COALESCE(unit_name,'Pcs') AS unit_name
+                       COALESCE(unit_price,0) AS unit_price, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit_name
                        FROM inventory WHERE 1=1{fsql} ORDER BY factory_name, sl_no""", fp)
     
     if st_items.empty:
         st.info("No items found in inventory.")
         return
         
-    # Required Headings calculations:
-    # - Stock Balance (Current Stock)
-    # - Stock Value (Current Stock * Unit Price)
-    # - ERP Balance (ERP Stock)
-    # - Physical Balance (Current Stock)
-    # - ERP Balance Value (ERP Stock * Unit Price)
-    # - Physical Balance Value (Current Stock * Unit Price)
+    st_items["ERP Stock QTY"] = st_items["erp_stock"]
+    st_items["Physical Stock QTY"] = st_items["current_stock"]
     st_items["Stock Balance"] = st_items["current_stock"]
     st_items["Stock Value"] = st_items["current_stock"] * st_items["unit_price"]
-    st_items["ERP Balance"] = st_items["erp_stock"]
-    st_items["Physical Balance"] = st_items["current_stock"]
     st_items["ERP Balance Value"] = st_items["erp_stock"] * st_items["unit_price"]
     st_items["Physical Balance Value"] = st_items["current_stock"] * st_items["unit_price"]
     
-    st_items["variance"] = st_items.current_stock - st_items.erp_stock
+    st_items["variance"] = st_items["Physical Stock QTY"] - st_items["ERP Stock QTY"]
     st_items["Status"] = st_items.variance.apply(lambda v: "Match" if abs(v) < 1e-9 else ("Excess" if v > 0 else "Shortage"))
     
     m1, m2, m3, m4 = st.columns(4)
@@ -3182,21 +3195,21 @@ def tab_stock_report():
         
     st.caption(f"Showing {len(view_sr):,} item(s)")
     
-    # Display main Stock Report table with requested headings
+    # Display main Stock Report table with explicit ERP Stock QTY & Physical Stock QTY & UOM
     disp_cols = ["factory_name", "sl_no", "prod_id", "item_name", "size", "unit_name", 
-                 "Stock Balance", "Stock Value", "ERP Balance", "Physical Balance", 
+                 "ERP Stock QTY", "Physical Stock QTY", "Stock Balance", "Stock Value", 
                  "ERP Balance Value", "Physical Balance Value", "Status", "unit_price"]
     disp_sr = view_sr[disp_cols].copy()
-    disp_sr.columns = ["Factory", "SL No", "ERP Code", "Item Name", "Size", "Unit", 
-                       "Stock Balance", "Stock Value", "ERP Balance", "Physical Balance", 
+    disp_sr.columns = ["Factory", "SL No", "ERP Code", "Item Name", "Size", "UOM", 
+                       "ERP Stock QTY", "Physical Stock QTY", "Stock Balance", "Stock Value", 
                        "ERP Balance Value", "Physical Balance Value", "Status", "Unit Price"]
                        
     st.dataframe(disp_sr, hide_index=True, use_container_width=True, height=420,
                  column_config={
+                     "ERP Stock QTY": st.column_config.NumberColumn(format="%.2f"),
+                     "Physical Stock QTY": st.column_config.NumberColumn(format="%.2f"),
                      "Stock Balance": st.column_config.NumberColumn(format="%.2f"),
                      "Stock Value": st.column_config.NumberColumn(format="৳ %,.2f"),
-                     "ERP Balance": st.column_config.NumberColumn(format="%.2f"),
-                     "Physical Balance": st.column_config.NumberColumn(format="%.2f"),
                      "ERP Balance Value": st.column_config.NumberColumn(format="৳ %,.2f"),
                      "Physical Balance Value": st.column_config.NumberColumn(format="৳ %,.2f"),
                      "Unit Price": st.column_config.NumberColumn(format="৳ %,.2f"),
@@ -3209,10 +3222,10 @@ def tab_stock_report():
     <style>body {{ font-family: Arial; font-size: 11px; }} table {{ width: 100%; border-collapse: collapse; }}
     th, td {{ border: 1px solid #333; padding: 4px; text-align: center; }} th {{ background: #0F766E; color: #fff; }}</style></head>
     <body><h2>Stock Report & ERP Reconciliation</h2><p><b>Factory:</b> {fac}</p>
-    <table><thead><tr><th>SL</th><th>ERP Code</th><th>Item Name</th><th>Size</th><th>Stock Balance</th><th>Stock Value</th><th>ERP Balance</th><th>Physical Balance</th><th>ERP Value</th><th>Physical Value</th><th>Status</th></tr></thead><tbody>
+    <table><thead><tr><th>SL</th><th>ERP Code</th><th>Item Name</th><th>Size</th><th>UOM</th><th>ERP Stock QTY</th><th>Physical Stock QTY</th><th>Stock Balance</th><th>Stock Value</th><th>ERP Value</th><th>Physical Value</th><th>Status</th></tr></thead><tbody>
     """
     for _, r in view_sr.iterrows():
-        html_report += f"<tr><td>{r['sl_no']}</td><td>{r['prod_id']}</td><td style='text-align:left'>{r['item_name']}</td><td>{r['size']}</td><td>{r['Stock Balance']}</td><td>{r['Stock Value']}</td><td>{r['ERP Balance']}</td><td>{r['Physical Balance']}</td><td>{r['ERP Balance Value']}</td><td>{r['Physical Balance Value']}</td><td>{r['Status']}</td></tr>"
+        html_report += f"<tr><td>{r['sl_no']}</td><td>{r['prod_id']}</td><td style='text-align:left'>{r['item_name']}</td><td>{r['size']}</td><td>{r['unit_name']}</td><td>{r['ERP Stock QTY']}</td><td>{r['Physical Stock QTY']}</td><td>{r['Stock Balance']}</td><td>{r['Stock Value']}</td><td>{r['ERP Balance Value']}</td><td>{r['Physical Balance Value']}</td><td>{r['Status']}</td></tr>"
     html_report += "</tbody></table></body></html>"
     st.download_button("🖨️ Download Printable Stock Report (HTML)", html_report, "Stock_Report_Printable.html", "text/html")
     
@@ -3221,7 +3234,7 @@ def tab_stock_report():
     st.markdown("### 📋 Item-wise Transaction History & Management")
     
     if not view_sr.empty:
-        opts_sr = {f"SL {r['sl_no']} | {r['item_name']} [{r['size'] or '-'}] | ERP: {r['prod_id']} | Stock: {r['Stock Balance']:g}": r for r in view_sr.to_dict("records")}
+        opts_sr = {f"SL {r['sl_no']} | {r['item_name']} [{r['size'] or '-'}] | ERP QTY: {r['ERP Stock QTY']:g} | Phys QTY: {r['Physical Stock QTY']:g}": r for r in view_sr.to_dict("records")}
         sel_key = st.selectbox("Select an item to view its transactions & manage", list(opts_sr.keys()), key="sr_item_select")
         sel_item = opts_sr[sel_key]
         
@@ -3239,12 +3252,15 @@ def tab_stock_report():
         with st.expander(f"🛠️ Manage Item (SL {sel_item['sl_no']} - {sel_item['item_name']})"):
             t_act = st.radio("Action", ["Edit Item", "Delete Item"], horizontal=True, key=f"sr_act_{sel_item['sl_no']}")
             if t_act == "Edit Item":
+                uom_opts = get_uoms()
+                cur_uom = sel_item["unit_name"] if sel_item["unit_name"] in uom_opts else uom_opts[0]
                 with st.form(f"sr_edit_form_{sel_item['sl_no']}"):
                     e_code = st.text_input("ERP Code", value=sel_item["prod_id"])
                     e_name = st.text_input("Item Name", value=sel_item["item_name"])
                     e_size = st.text_input("Size", value=sel_item["size"])
-                    e_erp = st.number_input("ERP Stock", value=float(sel_item["erp_stock"]), step=1.0)
-                    e_phys = st.number_input("Physical Stock", value=float(sel_item["current_stock"]), step=1.0)
+                    e_uom = st.selectbox("UOM", uom_opts, index=uom_opts.index(cur_uom) if cur_uom in uom_opts else 0)
+                    e_erp = st.number_input("ERP Stock QTY", value=float(sel_item["erp_stock"]), step=1.0)
+                    e_phys = st.number_input("Physical Stock QTY", value=float(sel_item["current_stock"]), step=1.0)
                     e_price = st.number_input("Unit Price", value=float(sel_item["unit_price"]), min_value=0.0)
                     e_serial = st.text_input("Serial No", value=sel_item["serial_no"])
                     e_pw = st.text_input("Manager Password", type="password", key=f"sr_pw_{sel_item['sl_no']}")
@@ -3257,7 +3273,7 @@ def tab_stock_report():
                     else:
                         if update_item(sel_item["factory_name"], sel_item["sl_no"], sel_item["prod_id"], sel_item["item_name"],
                                        e_code.strip() or sel_item["prod_id"], e_name.strip(), e_size.strip(),
-                                       sel_item["department"], sel_item["category"], e_erp, e_phys, e_price, sel_item["unit_name"], e_serial.strip()):
+                                       sel_item["department"], sel_item["category"], e_erp, e_phys, e_price, e_uom, e_serial.strip()):
                             done("Item updated successfully.")
             elif t_act == "Delete Item":
                 st.warning("Deleting this item will remove it from inventory.")
