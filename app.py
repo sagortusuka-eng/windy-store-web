@@ -1130,7 +1130,7 @@ def ensure_live_connection():
 # ============================================================
 #  UOM / CATEGORY MASTER (dynamic, DB-backed, additive only)
 # ============================================================
-DEFAULT_UOMS = ["PCS", "PACKET", "FEET", "COIL", "LBS", "GALLON", "KG", "PAIR", "BOX", "BOOK", "PACK", "MTR", "SET", "LTR", "ROLL"]
+DEFAULT_UOMS = ["Pcs", "Packet", "Feet", "Coil", "Lbs", "Gallon", "Kg", "Pair", "Box", "Book", "Pack", "Mtr", "Set", "Ltr", "Roll"]
 
 
 def init_master_tables():
