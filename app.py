@@ -2924,7 +2924,17 @@ def inv_edit_view():
     if not opts:
         st.info("Item nei.")
         return
-    r = opts[st.selectbox("Select item", list(opts), key="edit_sel")]
+    search_term = st.text_input("🔍 Search item (Name / ERP Code / Size / Serial / SL No)", key="edit_search",
+                                placeholder="Type to narrow the list, then pick an item")
+    keys = list(opts)
+    if search_term.strip():
+        t = search_term.strip().lower()
+        keys = [k_ for k_ in keys if t in k_.lower()]
+    if not keys:
+        st.warning("Ei search-e kono item paoa jay nai.")
+        return
+    st.caption(f"Matching items: {len(keys):,} of {len(opts):,}")
+    r = opts[st.selectbox("Select item", keys, key="edit_sel")]
     k = f"{r['factory_name']}_{r['sl_no']}"
     with st.form(f"edit_item_{k}"):
         c1, c2, c3 = st.columns(3)
