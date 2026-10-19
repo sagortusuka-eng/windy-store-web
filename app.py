@@ -808,6 +808,7 @@ DATE_FMT = "%d-%b-%Y"
 ISSUE_TYPES = ("Issued", "Internal Issue")
 RECEIPT_TYPES = ("Supplier. Rec", "Internal Rec", "Stock Adjustment (+)")
 ADJ_OUT = "Stock Adjustment (-)"
+OPENING_TYPE = "Opening Balance"   # sets Physical + ERP stock together; always written to transactions
 COOLDOWN_DAYS = 3
 PO_ALERT_DAYS = 7
 BUDGET_ALERT_PCT = 85
@@ -826,6 +827,7 @@ TRANS_LABELS = {
     "Internal Issue": "🔄 Internal Issue (to other unit)",
     "Stock Adjustment (+)": "➕ Stock Adjustment (Increase)",
     "Stock Adjustment (-)": "➖ Stock Adjustment (Decrease)",
+    "Opening Balance": "🧾 Opening Balance / Stock Set (Physical + ERP)",
 }
 TRANS_CODES = {v: k for k, v in TRANS_LABELS.items()}   # label -> code
 DS_KG_KEYWORDS = ("super enamel wire", "enamel paint", "anamel paint", "weather coat", "plastic paint", "thinner",
@@ -2394,13 +2396,31 @@ def tab_dashboard():
 #  TAB 1 - TRANSACTIONS (daily entry, top priority)
 # ============================================================
 @tx
-def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, supplier="", challan="", po_pending=False):
+def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, supplier="", challan="", po_pending=False,
+                     erp_open=None, price_open=None):
     user = st.session_state.get("user", "")
     sl, pid, name = item["sl_no"], item["prod_id"], item["item_name"]
     stock = float(item["stock"] or 0)
     date_s, time_s, day = tx_dt.strftime(DATE_FMT), datetime.now().strftime("%I:%M %p"), tx_dt.day
     verif = "Verified"
     po_flag, po_date = ("Pending", date_s) if po_pending else ("", None)   # "ERP PO Pending" box ticked at entry
+
+    if ttype == OPENING_TYPE:
+        # Sets physical (qty) and ERP stock together and always leaves a transaction row with old -> new values.
+        old_phys, old_erp = stock, float(item.get("erp") or 0)
+        new_erp = float(erp_open or 0)
+        old_price = float(item.get("price") or 0)
+        new_price = float(price_open) if price_open else old_price
+        if new_price > 0:
+            run("UPDATE inventory SET unit_price=%s WHERE sl_no=%s AND factory_name=%s", (new_price, sl, fac))
+        run("UPDATE inventory SET current_stock=%s, erp_stock=%s WHERE sl_no=%s AND factory_name=%s",
+            (float(qty), new_erp, sl, fac))
+        insert_tx(fac, user, sl, pid, name, qty, ttype, day,
+                  f"{notes} | Opening set: Physical {old_phys:g}->{qty:g}, ERP {old_erp:g}->{new_erp:g}, "
+                  f"Price {old_price:g}->{new_price:g}".strip(" |"),
+                  date_s, time_s, "Verified")
+        audit("OPENING_BALANCE", f"{fac}: {pid} ({name}) Physical {old_phys:g}->{qty:g}, ERP {old_erp:g}->{new_erp:g}")
+        return True
 
     if ttype in ISSUE_TYPES:
         needed, _streak = verification_needed(fac, sl, tx_dt)
@@ -2580,7 +2600,21 @@ def tab_transactions():
                             st.error("No item found for that SL / ERP / serial value.")
 
             qc, dc = st.columns(2)
-            qty = qc.number_input("Quantity", min_value=0.0, step=1.0, key=f"tx_qty_{g}")
+            qty = qc.number_input("Physical Stock" if ttype == OPENING_TYPE else "Quantity",
+                                  min_value=0.0, step=1.0, key=f"tx_qty_{g}")
+            erp_open, price_open = None, None
+            if ttype == OPENING_TYPE:
+                # Shown ONLY for Opening Balance - Issue / Receipt forms never see these boxes.
+                sl_key = item["sl_no"] if item is not None else 0
+                ob1, ob2 = st.columns(2, gap="small")
+                erp_open = ob1.number_input("ERP Stock", min_value=0.0, step=1.0,
+                                            value=float(item["erp"]) if item is not None else 0.0,
+                                            key=f"tx_erp_open_{g}_{sl_key}")
+                price_open = ob2.number_input("Unit Price (BDT)", min_value=0.0, step=1.0,
+                                              value=float(item["price"]) if item is not None else 0.0,
+                                              key=f"tx_price_open_{g}_{sl_key}")
+                st.caption("Physical Stock = hate thaka poriman. ERP Stock = ERP-er balance. "
+                           "Unit Price = proti ekok-er dam (khali/purono rakhle ager dam thakbe).")
             tx_date = dc.date_input("Date", value=date.today(), max_value=date.today(), key="tx_date")
             verified, need_verif = False, False
             if item is not None and ttype in ISSUE_TYPES:
@@ -2616,12 +2650,13 @@ def tab_transactions():
                         else:
                             st.error(f"Shortage {shortage:g} - other unit-e enough stock/same item nei.")
                             blocked = True
-                    elif qty > float(item["stock"]) and ttype not in RECEIPT_TYPES:
+                    elif qty > float(item["stock"]) and ttype not in RECEIPT_TYPES and ttype != OPENING_TYPE:
                         st.error("Stock kom ache.")
                         blocked = True
 
             can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor" and not is_cons_view
-            disabled = item is None or blocked or qty <= 0 or (need_xfer and not xfer_ok) or not can_write
+            disabled = (item is None or blocked or (qty <= 0 and ttype != OPENING_TYPE)
+                        or (need_xfer and not xfer_ok) or not can_write)
             if not can_write:
                 st.caption("Save korte login + specific factory + non-Auditor role lage.")
             if st.button("💾 Save & Update Stock", type="primary", disabled=disabled, use_container_width=True, key="tx_save"):
@@ -2639,7 +2674,8 @@ def tab_transactions():
                             st.error("🚫 Duplicate block: ekdom ek-i transaction ei matro save hoyeche. "
                                      "Quantity / remarks bodle ba kichukkhon por abar korun.")
                         elif save_transaction(fac, item, qty, ttype, tx_date, notes, verified, xfer_ok,
-                                              supplier.strip(), challan.strip(), po_pending):
+                                              supplier.strip(), challan.strip(), po_pending, erp_open=erp_open,
+                                              price_open=price_open):
                             st.session_state["tx_saved_gen"] = g
                             st.session_state["tx_gen"] = g + 1
                             done("✅ Transaction saved, stock updated. Form reset hoyeche - porer transaction-er jonno ready.")
@@ -3547,8 +3583,79 @@ def tab_stock_report():
     recon_panel(fac)
 
 
+@tx
+def bulk_update_stock(fac, changes):
+    """changes: list of (sl_no, prod_id, item_name, old_erp, old_phys, new_erp, new_phys).
+    Every changed item is written to inventory AND recorded as an 'Opening Balance' transaction."""
+    user = st.session_state.get("user", "")
+    now = datetime.now()
+    for sl, pid, name, o_erp, o_phys, n_erp, n_phys in changes:
+        run("UPDATE inventory SET erp_stock=%s, current_stock=%s WHERE sl_no=%s AND factory_name=%s",
+            (float(n_erp), float(n_phys), int(sl), fac))
+        insert_tx(fac, user, int(sl), pid, name, float(n_phys), OPENING_TYPE, now.day,
+                  f"Bulk grid | Physical {o_phys:g}->{n_phys:g}, ERP {o_erp:g}->{n_erp:g}",
+                  now.strftime(DATE_FMT), now.strftime("%I:%M %p"), "Verified")
+    audit("BULK_STOCK_UPDATE", f"{fac}: {len(changes)} item(s) ERP/Physical stock set in bulk grid (recorded as transactions)")
+    return True
+
+
+def bulk_stock_entry_view():
+    """One screen for many items: type ERP / Physical stock in the grid, then save everything once."""
+    if not guard():
+        return
+    st.caption("Ekhane sob item ek tebil-e thake. ERP Stock ar Physical Stock-er ghor-e sankhya likhun, "
+               "tarpor niche 'Save all changes' click korun. Shudhu stock dui column badle; onno kichu badle na.")
+    search_term = st.text_input("🔍 Search (Item / ERP Code / Size / Serial / SL No)", key="bulk_search",
+                                placeholder="Filter kore chhoto list-e kaj korun (khali rakhle sob item)")
+    df = qdf(f"""SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size, COALESCE(serial_no,'') AS serial_no,
+                 COALESCE(erp_stock,0) AS erp_stock, COALESCE(current_stock,0) AS current_stock
+                 FROM inventory WHERE 1=1{FSQL} ORDER BY sl_no""", FP)
+    if df.empty:
+        st.info("Ei factory-te kono item nei.")
+        return
+    view = df
+    if search_term.strip():
+        t = search_term.strip().lower()
+        mask = df[["item_name", "size", "prod_id", "serial_no"]].astype(str).apply(
+            lambda c: c.str.lower().str.contains(t, regex=False)).any(axis=1)
+        view = df[mask | (df["sl_no"].astype(str) == t)]
+    st.caption(f"Showing {len(view):,} of {len(df):,} items")
+    if view.empty:
+        st.warning("Ei search-e kono item paoa jay nai.")
+        return
+
+    shown = view.rename(columns={"sl_no": "SL No", "prod_id": "ERP Code", "item_name": "Item Name",
+                                 "size": "Size", "serial_no": "Serial No",
+                                 "erp_stock": "ERP Stock", "current_stock": "Physical Stock"}).reset_index(drop=True)
+    edit_key = "bulk_editor_" + hashlib.md5((search_term.strip().lower() + str(len(df))).encode()).hexdigest()[:8]
+    edited = st.data_editor(
+        shown, hide_index=True, use_container_width=True, height=520, key=edit_key,
+        disabled=["SL No", "ERP Code", "Item Name", "Size", "Serial No"],
+        column_config={
+            "ERP Stock": st.column_config.NumberColumn("ERP Stock", format="%.2f", step=1.0),
+            "Physical Stock": st.column_config.NumberColumn("Physical Stock", format="%.2f", step=1.0),
+        },
+    )
+
+    changes = []
+    for orig, new in zip(shown.itertuples(index=False), edited.itertuples(index=False)):
+        o_erp, o_phys = float(orig[5] or 0), float(orig[6] or 0)
+        n_erp, n_phys = float(new[5] or 0), float(new[6] or 0)
+        if abs(o_erp - n_erp) > 1e-9 or abs(o_phys - n_phys) > 1e-9:
+            changes.append((int(orig[0]), str(orig[1]), str(orig[2]), o_erp, o_phys, n_erp, n_phys))
+    st.info(f"Change hoyeche: {len(changes)} item")
+
+    pw_ok = mgr_check("bulk_pw")
+    if st.button("💾 Save all changes", type="primary", key="bulk_save", disabled=not changes):
+        if not pw_ok:
+            st.error("Manager password thik nei.")
+        elif bulk_update_stock(FAC, changes):
+            done(f"{len(changes)} item-er stock save hoyeche.")
+
+
 def tab_inventory():
-    t1, t2, t3, t4, t5 = st.tabs(["📋 Master List", "➕ Add / Import", "✏️ Edit (Manager)", "📥 Unmatch Queue", "🔎 ERP Match Check"])
+    t1, t2, t3, t4, t5, t6 = st.tabs(["📋 Master List", "➕ Add / Import", "✏️ Edit (Manager)",
+                                     "⚡ Bulk Stock Entry", "📥 Unmatch Queue", "🔎 ERP Match Check"])
     with t1:
         inv_master_view()
     with t2:
@@ -3556,8 +3663,10 @@ def tab_inventory():
     with t3:
         inv_edit_view()
     with t4:
-        inv_queue_view()
+        bulk_stock_entry_view()
     with t5:
+        inv_queue_view()
+    with t6:
         erp_check_view()
 
 
