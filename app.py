@@ -13,6 +13,7 @@ import math
 import os
 import re
 import secrets
+import threading
 import zipfile
 from datetime import date, datetime, timedelta, timezone
 
@@ -868,6 +869,9 @@ MODULE_NAV = [("📝", "Transactions"), ("📦", "Inventory Master"), ("🔍", "
 # ============================================================
 #  DATABASE
 # ============================================================
+# One shared DB connection is used by every browser session. Without this lock, another session's
+# rollback()/commit() could land in the middle of "Add Item" and silently wipe or half-save it.
+_DB_LOCK = threading.RLock()
 @st.cache_resource(show_spinner=False)
 def _connect():
     conn = psycopg2.connect(st.secrets["DB_URL"], connect_timeout=10, keepalives=1, keepalives_idle=30,
@@ -886,18 +890,17 @@ def get_conn():
 
 
 def fetch(sql, params=None):
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
-            if not cur.description:
-                return [], []
-            return [d[0] for d in cur.description], cur.fetchall()
-    except Exception:
-        conn.rollback()
-        raise
-
-
+    with _DB_LOCK:
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                if not cur.description:
+                    return [], []
+                return [d[0] for d in cur.description], cur.fetchall()
+        except Exception:
+            conn.rollback()
+            raise
 def q(sql, params=None):
     cols, rows = fetch(sql, params)
     return [dict(zip(cols, r)) for r in rows]
@@ -909,32 +912,33 @@ def qdf(sql, params=None):
 
 
 def run(sql, params=None):
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
-            return cur.fetchall() if cur.description else None
-    except Exception:
-        conn.rollback()
-        raise
-
-
-def tx(fn):
-    """Database write: commit on success, rollback on any error."""
-    @functools.wraps(fn)
-    def inner(*a, **k):
+    with _DB_LOCK:
         conn = get_conn()
         try:
-            res = fn(*a, **k)
-            conn.commit()
-            return True if res is None else res
-        except Exception as e:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall() if cur.description else None
+        except Exception:
             conn.rollback()
-            st.error(f"❌ Database error (rollback kora holo): {e}")
-            return None
+            raise
+def tx(fn):
+    """Database write: commit on success, rollback on any error. The whole write holds the DB lock."""
+    @functools.wraps(fn)
+    def inner(*a, **k):
+        with _DB_LOCK:
+            conn = get_conn()
+            try:
+                res = fn(*a, **k)
+                conn.commit()
+                return True if res is None else res
+            except Exception as e:
+                conn.rollback()
+                st.error(f"❌ Database error (rollback kora holo): {e}")
+                return None
+            except BaseException:      # script stopped / rerun in the middle of a write
+                conn.rollback()
+                raise
     return inner
-
-
 def fw(fac, alias=""):
     """Factory filter. CONSOLIDATED / None = no filter."""
     if not fac or "CONSOLIDATED" in fac:
@@ -1118,113 +1122,77 @@ def ensure_live_connection():
     """One cheap ping per rerun: a silently dropped cloud connection is replaced at once
     instead of hanging for minutes on a dead socket."""
     try:
-        conn = get_conn()
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1")
-        conn.rollback()
+        with _DB_LOCK:
+            conn = get_conn()
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            conn.rollback()
     except Exception:
         try:
             _connect.clear()
         except Exception:
             pass
 
-
 # ============================================================
 #  UOM / CATEGORY MASTER (dynamic, DB-backed, additive only)
 # ============================================================
-SEL = "— Select —"   # placeholder for required dropdowns in Add New Item
 DEFAULT_UOMS = ["Pcs", "Packet", "Feet", "Coil", "Lbs", "Gallon", "Kg", "Pair", "Box", "Book", "Pack", "Mtr", "Set", "Ltr", "Roll"]
 
 
 def init_master_tables():
-    """Creates the UOM / product-category lists and the inventory.product_category column.
-    Additive only: missing rows/columns are added, existing data is never changed."""
+    """Creates the UOM and product-category lists. Only adds rows that are missing; never touches stock data."""
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("CREATE TABLE IF NOT EXISTS uom_master (id SERIAL PRIMARY KEY, uom_name TEXT)")
+            cur.execute("""CREATE TABLE IF NOT EXISTS uom_master (
+                    id SERIAL PRIMARY KEY, uom_name TEXT UNIQUE)""")
             cur.execute("""CREATE TABLE IF NOT EXISTS product_category_master (
-                    id SERIAL PRIMARY KEY, category_name TEXT, created_by TEXT, created_at TEXT)""")
-            cur.execute("ALTER TABLE product_category_master ADD COLUMN IF NOT EXISTS created_by TEXT")
-            cur.execute("ALTER TABLE product_category_master ADD COLUMN IF NOT EXISTS created_at TEXT")
-            cur.execute("ALTER TABLE inventory ADD COLUMN IF NOT EXISTS product_category TEXT DEFAULT ''")
-            for u in DEFAULT_UOMS:   # no ON CONFLICT: works even if an older table has no UNIQUE constraint
-                cur.execute("""INSERT INTO uom_master (uom_name) SELECT %s
-                               WHERE NOT EXISTS (SELECT 1 FROM uom_master WHERE UPPER(TRIM(uom_name))=UPPER(%s))""", (u, u))
+                    id SERIAL PRIMARY KEY, category_name TEXT UNIQUE, created_by TEXT, created_at TEXT)""")
+            for u in DEFAULT_UOMS:
+                cur.execute("INSERT INTO uom_master (uom_name) VALUES (%s) ON CONFLICT (uom_name) DO NOTHING", (u,))
         conn.commit()
     except Exception:
         conn.rollback()
 
 
-def ensure_master_tables():
-    """Self-healing: runs once per browser session so Add Item works even if the cached DB initializer skipped it."""
-    if not st.session_state.get("_master_tables_ready"):
-        init_master_tables()
-        st.session_state["_master_tables_ready"] = True
-
-
-def _clean(s):
-    return re.sub(r"\s+", " ", str(s or "")).strip()
-
-
 def get_uoms():
-    """Default UOMs (fixed order) followed by any UOM added later from Inventory -> Add / Import."""
-    out = list(DEFAULT_UOMS)
-    try:
-        for r in q("SELECT uom_name FROM uom_master ORDER BY id"):
-            n = _clean(r["uom_name"])
-            if n and n.upper() not in {x.upper() for x in out}:
-                out.append(n)
-    except Exception:
-        pass
-    return out
+    """Enforced UOM list: exactly DEFAULT_UOMS, in this order."""
+    return list(DEFAULT_UOMS)
 
 
-def get_budget_categories(fac=None, dept=None):
-    """Budget categories come straight from the existing Budget table (category_budgets),
-    for the selected Department (and factory). Falls back to the factory's full list if the department has none."""
-    fsql, fp = fw(fac)
-    rows = []
-    if dept:
-        rows = q(f"SELECT DISTINCT category_name FROM category_budgets WHERE department_name=%s{fsql} ORDER BY category_name",
-                 [dept] + fp)
-    if not rows:
-        rows = q(f"SELECT DISTINCT category_name FROM category_budgets WHERE 1=1{fsql} ORDER BY category_name", fp)
-    return [r["category_name"] for r in rows if _clean(r["category_name"])]
+def get_budget_categories(fac=None):
+    """Budget categories come straight from the existing Budget table (category_budgets)."""
+    if fac and "CONSOLIDATED" not in fac:
+        rows = q("SELECT DISTINCT category_name FROM category_budgets WHERE factory_name=%s ORDER BY category_name", (fac,))
+    else:
+        rows = q("SELECT DISTINCT category_name FROM category_budgets ORDER BY category_name")
+    return [r["category_name"] for r in rows]
 
 
 def get_product_categories():
-    """Product categories added from Inventory (separate from Budget categories)."""
-    try:
-        return [r["category_name"] for r in q("SELECT category_name FROM product_category_master ORDER BY LOWER(category_name)")]
-    except Exception:
-        return []
+    rows = q("SELECT category_name FROM product_category_master ORDER BY category_name")
+    names = [r["category_name"] for r in rows]
+    # Keep the categories already used in the inventory so nothing disappears from existing data.
+    used = q("SELECT DISTINCT category FROM inventory WHERE COALESCE(category,'')<>'' ORDER BY category")
+    for r in used:
+        if r["category"] not in names:
+            names.append(r["category"])
+    return names
 
 
 @tx
 def add_uom(name):
-    name = _clean(name).upper()
-    if not re.fullmatch(r"[A-Z0-9][A-Z0-9 ./\-]{0,19}", name):
-        st.error("UOM max 20 character; shudhu letter / digit / space / . / - hote parbe.")
-        return False
-    if name in {u.upper() for u in get_uoms()}:
-        st.error(f"UOM '{name}' already ache.")
-        return False
-    run("INSERT INTO uom_master (uom_name) VALUES (%s)", (name,))
+    name = name.strip().upper()
+    run("INSERT INTO uom_master (uom_name) VALUES (%s) ON CONFLICT (uom_name) DO NOTHING", (name,))
     audit("ADD_UOM", f"UOM added: {name}")
     return True
 
 
 @tx
 def add_product_category(name):
-    name = _clean(name)
-    if len(name) < 2 or len(name) > 60:
-        st.error("Product Category 2 theke 60 character-er moddhe hote hobe.")
-        return False
-    if name.casefold() in {c.casefold() for c in get_product_categories()}:
-        st.error(f"Product Category '{name}' already ache.")
-        return False
-    run("INSERT INTO product_category_master (category_name, created_by, created_at) VALUES (%s,%s,%s)",
+    name = name.strip()
+    run("""INSERT INTO product_category_master (category_name, created_by, created_at) VALUES (%s,%s,%s)
+           ON CONFLICT (category_name) DO NOTHING""",
         (name, st.session_state.get("user", ""), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     audit("ADD_PRODUCT_CATEGORY", f"Product category added: {name}")
     return True
@@ -1990,25 +1958,25 @@ def temp_code(idx):
     return f"TEMP-{n:04d}"
 
 
-def idx_insert(fac, idx, code, name, size, dept, cat, erp, stock, price, unit, serial="", product_cat=""):
+def idx_insert(fac, idx, code, name, size, dept, cat, erp, stock, price, unit, serial=""):
     final = temp_code(idx) if is_blank_code(code) else unique_code(idx, code, size)
     idx["max_sl"] += 1
     sl = idx["max_sl"]
     run("""INSERT INTO inventory (sl_no, prod_id, factory_name, item_name, size, department, category,
-           erp_stock, current_stock, unit_price, erp_status, unit_name, serial_no, product_category)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ERP Pending',%s,%s,%s)""",
+           erp_stock, current_stock, unit_price, erp_status, unit_name, serial_no)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ERP Pending',%s,%s)""",
         (sl, final, fac, name, size or "", dept or "Maintenance", cat or "Uncategorized (Edit Later)",
-         erp, stock, price or 0.0, unit or "Pcs", (serial or "").strip(), product_cat or ""))
+         erp, stock, price or 0.0, unit or "Pcs", (serial or "").strip()))
     idx_add(idx, sl, final, name, size, serial)
     return final
 
 
-def mirror_to_other(fac, code, name, size, dept, cat, price, unit="Pcs", product_cat=""):
+def mirror_to_other(fac, code, name, size, dept, cat, price):
     """New product is also created in the other unit with stock 0."""
     other = other_factory(fac)
     if find_same_item(other, name, size):
         return False
-    idx_insert(other, load_index(other), code, name, size, dept, cat, 0.0, 0.0, price, unit or "Pcs", "", product_cat)
+    idx_insert(other, load_index(other), code, name, size, dept, cat, 0.0, 0.0, price, "Pcs")
     return True
 
 
@@ -2759,23 +2727,100 @@ def tab_transactions():
 # ============================================================
 #  TAB 2 - INVENTORY MASTER
 # ============================================================
+def _squash(s):
+    """Same rule as the unique index: lower-case, no spaces, no dots."""
+    return re.sub(r"[ .]", "", str(s or "").lower())
+
+
+def _same_item_sql(name, size):
+    """SQL condition equal to find_same_item() (norm_name + norm_size) but evaluated inside the database,
+    so the whole inventory table is NOT downloaded for every save."""
+    ns = norm_size(size)
+    size_sql = "regexp_replace(lower(COALESCE(size,'')),'[^a-z0-9.]','',  'g')=%s"
+    nn = norm_name(name)
+    if nn:
+        return ("regexp_replace(lower(COALESCE(item_name,'')),'[^a-z0-9]','','g')=%s AND " + size_sql), [nn, ns]
+    # name has no latin letters/digits (e.g. Bangla) -> compare the same way the unique index does
+    return ("lower(replace(replace(COALESCE(item_name,''),' ',''),'.',''))=%s AND " + size_sql), [_squash(name), ns]
+
+
+def _is_same_item(r, name, size):
+    nn = norm_name(name)
+    if nn:
+        same_name = norm_name(r["item_name"]) == nn
+    else:
+        same_name = _squash(r["item_name"]) == _squash(name)
+    return same_name and norm_size(r["size"]) == norm_size(size)
+
+
+def _free_code(base, size, taken):
+    """Same result as unique_code(): BASE, BASE-SIZE, BASE-SIZE-2 ... (taken = lower-case codes in use)."""
+    base = str(base).strip()
+    if base.lower() not in taken:
+        return base
+    s = str(size or "").strip()
+    cand = f"{base}-{s}" if s else base
+    n = 1
+    while cand.lower() in taken:
+        n += 1
+        cand = f"{base}-{s}-{n}" if s else f"{base}-{n}"
+    return cand
+
+
+def _like_prefix(s):
+    return str(s).lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _mirror_new_item(fac, code, name, size, dept, cat, price, unit):
+    """New product is also created in the other unit with stock 0 (2 queries instead of loading its whole table)."""
+    other = other_factory(fac)
+    same_sql, same_p = _same_item_sql(name, size)
+    rows = q(f"""SELECT item_name, COALESCE(size,'') AS size, prod_id FROM inventory
+                 WHERE factory_name=%s AND (({same_sql}) OR lower(prod_id) LIKE %s)""",
+             [other] + same_p + [_like_prefix(code)])
+    if any(_is_same_item(r, name, size) for r in rows):
+        return False
+    final = _free_code(code, size, {str(r["prod_id"]).lower() for r in rows})
+    run("""INSERT INTO inventory (sl_no, prod_id, factory_name, item_name, size, department, category,
+           erp_stock, current_stock, unit_price, erp_status, unit_name, serial_no)
+           VALUES (GREATEST((SELECT COALESCE(MAX(sl_no),0) FROM inventory WHERE factory_name=%s),
+                            (SELECT COALESCE(MAX(sl_no),0) FROM import_queue WHERE factory_name=%s)) + 1,
+                   %s,%s,%s,%s,%s,%s,0,0,%s,'ERP Pending',%s,'')""",
+        (other, other, final, other, name, size or "", dept or "Maintenance",
+         cat or "Uncategorized (Edit Later)", price or 0.0, unit or "Pcs"))
+    return True
+
+
 @tx
-def add_item(fac, code, name, size, dept, cat, stock, price, serial="", unit="Pcs", product_cat=""):
-    """cat = Budget Category (kept in inventory.category exactly as before, so Budget logic is unchanged);
-    product_cat = separate Product Category (inventory.product_category)."""
+def add_item(fac, code, name, size, dept, cat, stock, price, serial="", unit="PCS"):
     serial = (serial or "").strip()
-    ex = find_same_item(fac, name, size)
-    owner = serial_owner(fac, serial)
+    name, size = (name or "").strip(), (size or "").strip()
+    code_in = "" if is_blank_code(code) else str(code).strip()
+
+    # ONE query finds: same item (name+size) / same serial / same ERP code.
+    same_sql, same_p = _same_item_sql(name, size)
+    cond, params = f"({same_sql})", list(same_p)
+    if serial:
+        cond += " OR LOWER(TRIM(COALESCE(serial_no,'')))=LOWER(%s)"
+        params.append(serial)
+    if code_in:
+        cond += " OR prod_id=%s"
+        params.append(code_in)
+    rows = q(f"""SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size, COALESCE(serial_no,'') AS serial_no
+                 FROM inventory WHERE factory_name=%s AND ({cond})""", [fac] + params)
+
+    ex = next((r for r in rows if _is_same_item(r, name, size)), None)
+    owner = next((r for r in rows if serial and r["serial_no"].strip().lower() == serial.lower()), None)
     if owner and (not ex or owner["sl_no"] != ex["sl_no"]):
         st.error(f"Serial '{serial}' already used: SL {owner['sl_no']} ({owner['item_name']} [{owner['size'] or '-'}]).")
         return False
+
     if ex:  # same name + size already exists -> stock add, no duplicate
         run("""UPDATE inventory SET current_stock=COALESCE(current_stock,0)+%s,
-               unit_price=CASE WHEN %s>0 THEN %s ELSE unit_price END WHERE sl_no=%s AND factory_name=%s""",
-            (stock, price, price, ex["sl_no"], fac))
-        if serial:
-            run("UPDATE inventory SET serial_no=%s WHERE sl_no=%s AND factory_name=%s AND COALESCE(serial_no,'')=''",
-                (serial, ex["sl_no"], fac))
+               unit_price=CASE WHEN %s>0 THEN %s ELSE unit_price END,
+               serial_no=CASE WHEN %s<>'' AND COALESCE(serial_no,'')='' THEN %s ELSE serial_no END
+               WHERE sl_no=%s AND factory_name=%s""",
+            (stock, price, price, serial, serial, ex["sl_no"], fac))
         if stock > 0:
             now = datetime.now()
             insert_tx(fac, st.session_state["user"], ex["sl_no"], ex["prod_id"], name, stock, "Stock Adjustment (+)",
@@ -2783,20 +2828,28 @@ def add_item(fac, code, name, size, dept, cat, stock, price, serial="", unit="Pc
                       now.strftime("%I:%M %p"), "Verified")
         audit("ADD_STOCK_EXISTING", f"{fac}: {name} [{size}] +{stock:g}")
         return ("exists", ex["sl_no"])
-    code = next_free_temp(fac) if is_blank_code(code) else code.strip()
-    if q("SELECT 1 AS x FROM inventory WHERE prod_id=%s AND factory_name=%s", (code, fac)):
-        st.error(f"ERP Code '{code}' already exists in {fac}!")
-        return False
-    mx = q("SELECT COALESCE(MAX(sl_no),0) AS m FROM inventory WHERE factory_name=%s", (fac,))[0]["m"]
-    run("""INSERT INTO inventory (sl_no, prod_id, factory_name, item_name, size, department, category,
-           erp_stock, current_stock, unit_price, erp_status, serial_no, unit_name, product_category)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ERP Pending',%s,%s,%s)""",
-        (int(mx) + 1, code, fac, name, size, dept, cat, stock, stock, price, serial, unit, product_cat or ""))
-    mirrored = mirror_to_other(fac, code, name, size, dept, cat, price, unit, product_cat)
-    audit("ADD_ITEM", f"{fac}: {name} [{size}] [{code}] dept={dept} budget_cat={cat} product_cat={product_cat or '-'} UOM {unit}"
-          + (f" S/N {serial}" if serial else "")
+
+    if code_in:
+        if any(str(r["prod_id"]) == code_in for r in rows):
+            st.error(f"ERP Code '{code_in}' already exists in {fac}!")
+            return False
+        code = code_in
+    else:   # next free TEMP-0001, TEMP-0002 ...
+        used = {str(r["prod_id"]) for r in q("SELECT prod_id FROM inventory WHERE factory_name=%s AND prod_id LIKE 'TEMP-%%'", (fac,))}
+        n = 1
+        while f"TEMP-{n:04d}" in used:
+            n += 1
+        code = f"TEMP-{n:04d}"
+
+    new_sl = int(run("""INSERT INTO inventory (sl_no, prod_id, factory_name, item_name, size, department, category,
+                        erp_stock, current_stock, unit_price, erp_status, serial_no, unit_name)
+                        VALUES ((SELECT COALESCE(MAX(sl_no),0)+1 FROM inventory WHERE factory_name=%s),
+                                %s,%s,%s,%s,%s,%s,%s,%s,%s,'ERP Pending',%s,%s) RETURNING sl_no""",
+                     (fac, code, fac, name, size, dept, cat, stock, stock, price, serial, unit))[0][0])
+    mirrored = _mirror_new_item(fac, code, name, size, dept, cat, price, unit)
+    audit("ADD_ITEM", f"{fac}: {name} [{size}] [{code}] UOM {unit}" + (f" S/N {serial}" if serial else "")
           + (" + copied to other unit" if mirrored else ""))
-    return ("new", int(mx) + 1)
+    return ("new", new_sl)
 
 
 @tx
@@ -2910,81 +2963,87 @@ def inv_master_view():
     )
     export_buttons(view, "inventory")
 
-def inv_add_import_view():
+# Fragment = only this panel reruns when a dropdown / button inside it is used (not the whole app with all 6 inventory
+# sub-tabs), so Department / Category / Save respond fast. Falls back to a normal function on very old Streamlit.
+_fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None) or (lambda f: f)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_budget_cats(fac):
+    return get_budget_categories(fac)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_product_cats():
+    return get_product_categories()
+
+
+_ADD_FORM_KEYS = ("add_code", "add_name", "add_size", "add_stock", "add_price", "add_serial")
+
+
+@_fragment
+def _add_item_panel():
+    if st.session_state.pop("_add_item_reset", False):      # clear the form only after a successful save
+        for k in _ADD_FORM_KEYS:
+            st.session_state.pop(k, None)
+
     with st.container(border=True):
         st.markdown('<div class="section-title">Add New Item</div>', unsafe_allow_html=True)
 
-        ensure_master_tables()
-        # Reset the text fields after a successful save (must happen before the widgets are created).
-        if st.session_state.pop("_add_item_reset", False):
-            for _k in ("add_code", "add_name", "add_size", "add_serial", "add_stock", "add_price"):
-                st.session_state.pop(_k, None)
-
-        def _dept_changed():   # Budget Category depends on Department
-            st.session_state["add_bud_cat"] = SEL
-
-        depts = list(DEPARTMENTS)
-        uoms = get_uoms()
-        prod_cats = get_product_categories()
-
-        # Field order: ERP Code, Item Name, Size | Department, Budget Category, Product Category |
-        #              UOM, Initial Stock, Unit Price | Serial No
-        c1, c2, c3 = st.columns(3)
-        code = c1.text_input("ERP Code (blank = temporary)", key="add_code")
-        name = c2.text_input("Item Name*", key="add_name")
-        size = c3.text_input("Size*", key="add_size")
-
-        d1, d2, d3 = st.columns(3)
-        dept = d1.selectbox("Department*", depts, key="add_dept", on_change=_dept_changed)
-        bud_opts = [SEL] + get_budget_categories(FAC, dept)
-        bud_cat = d2.selectbox("Budget Category* (from Budget tab)", bud_opts, key="add_bud_cat")
-        prod_cat = d3.selectbox("Product Category*", [SEL] + prod_cats, key="add_prod_cat")
-
-        u1, u2, u3 = st.columns(3)
-        unit = u1.selectbox("UOM*", [SEL] + uoms, key="add_uom")
-        stock = u2.number_input("Initial Stock", min_value=0.0, step=1.0, key="add_stock")
-        price = u3.number_input("Unit Price (BDT)", min_value=0.0, step=1.0, key="add_price")
-
-        s1, _s2, _s3 = st.columns(3)
-        serial = s1.text_input("Serial No (optional, unique per factory)", key="add_serial")
-
-        if st.button("Save Item", key="add_item_save") and guard():
-            missing = []
-            if not name.strip():
-                missing.append("Item Name")
-            if not size.strip():
-                missing.append("Size")
-            if bud_cat == SEL:
-                missing.append("Budget Category")
-            if prod_cat == SEL:
-                missing.append("Product Category")
-            if unit == SEL:
-                missing.append("UOM")
-            if missing:
-                st.error("Required: " + ", ".join(missing) + ". Please fill / select these before saving.")
-            else:
-                res = add_item(FAC, code, name.strip(), size.strip(), dept, bud_cat, stock, price,
-                               serial.strip(), unit, prod_cat)
-                if res:
-                    st.session_state["_add_item_reset"] = True
-                    done("Stock added to existing item (no duplicate)." if res[0] == "exists"
-                         else f"New item added: {name.strip()} [{size.strip()}] · {unit}")
+        # Flow: 1. Department  2. Budget Category  3. Product Category  4. Item  5. UOM
+        s1, s2, s3 = st.columns(3)
+        dept = s1.selectbox("1. Department", DEPARTMENTS, key="add_dept")
+        bud_opts = _cached_budget_cats(FAC) or ["(no budget category)"]
+        bud_cat = s2.selectbox("2. Budget Category (from Budget tab)", bud_opts, key="add_bud_cat")
+        prod_opts = _cached_product_cats() or ["Uncategorized (Edit Later)"]
+        prod_cat = s3.selectbox("3. Product Category", prod_opts, key="add_prod_cat")
 
         with st.expander("➕ Add new Product Category"):
             nc1, nc2 = st.columns([3, 1])
             new_pc = nc1.text_input("New product category name", key="new_pc_name")
             if nc2.button("Add category", key="new_pc_btn") and guard():
-                if new_pc.strip() and add_product_category(new_pc.strip()):
-                    st.session_state["new_pc_name"] = ""
-                    done(f"Product category '{_clean(new_pc)}' added.")
+                if new_pc.strip():
+                    if add_product_category(new_pc.strip()):
+                        _cached_product_cats.clear()
+                        done(f"Product category '{new_pc.strip()}' added.")
+
+        with st.form("add_item_form", clear_on_submit=False):
+            c1, c2, c3 = st.columns(3)
+            code = c1.text_input("4. ERP Code (blank = temporary)", key="add_code")
+            name = c2.text_input("Item Name*", key="add_name")
+            size = c3.text_input("Size*", key="add_size")
+            uom_opts = get_uoms()
+            unit = c1.selectbox("5. UOM", uom_opts, index=uom_opts.index("Pcs") if "Pcs" in uom_opts else 0, key="add_uom")
+            stock = c2.number_input("Initial Stock", min_value=0.0, step=1.0, key="add_stock")
+            price = c3.number_input("Unit Price (BDT)", min_value=0.0, step=1.0, key="add_price")
+            serial = c1.text_input("Serial No (optional, unique per factory)", key="add_serial")
+            submitted = st.form_submit_button("Save Item")
 
         with st.expander("➕ Add new UOM"):
             nu1, nu2 = st.columns([3, 1])
-            new_uom = nu1.text_input("New UOM (e.g. DOZEN, MTR)", key="new_uom_name")
+            new_uom = nu1.text_input("New UOM (e.g. PAIR, SET, ROLL)", key="new_uom_name")
             if nu2.button("Add UOM", key="new_uom_btn") and guard():
-                if new_uom.strip() and add_uom(new_uom.strip()):
-                    st.session_state["new_uom_name"] = ""
-                    done(f"UOM '{_clean(new_uom).upper()}' added.")
+                if new_uom.strip():
+                    if add_uom(new_uom.strip()):
+                        done(f"UOM '{new_uom.strip().upper()}' added.")
+
+        if submitted and guard():
+            if not name.strip() or not size.strip():
+                st.error("Item Name ar Size mandatory.")
+            elif bud_cat == "(no budget category)":
+                st.error("Budget tab-e age category toiri korun.")
+            else:
+                with st.spinner("Saving item..."):
+                    # Product Category is stored as the item's category (used by the existing budget join).
+                    res = add_item(FAC, code, name.strip(), size.strip(), dept, prod_cat, stock, price,
+                                   serial.strip(), unit)
+                if res:
+                    st.session_state["_add_item_reset"] = True
+                    done("Stock added to existing item (no duplicate)." if res[0] == "exists" else "New item added.")
+
+
+def inv_add_import_view():
+    _add_item_panel()
 
     with st.container(border=True):
         st.markdown('<div class="section-title">Import Opening Physical Stock</div>', unsafe_allow_html=True)
@@ -5726,7 +5785,9 @@ def tab_daily_sheet():
 ensure_live_connection()
 try:
     init_db()
-    ensure_recon_table()
+    if not st.session_state.get("_recon_table_ready"):
+        ensure_recon_table()
+        st.session_state["_recon_table_ready"] = True
     if not st.session_state.get("_global_inventory_schema_ready"):
         ensure_global_inventory_schema()
         st.session_state["_global_inventory_schema_ready"] = True
