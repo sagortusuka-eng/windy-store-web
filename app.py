@@ -1132,63 +1132,99 @@ def ensure_live_connection():
 # ============================================================
 #  UOM / CATEGORY MASTER (dynamic, DB-backed, additive only)
 # ============================================================
+SEL = "— Select —"   # placeholder for required dropdowns in Add New Item
 DEFAULT_UOMS = ["Pcs", "Packet", "Feet", "Coil", "Lbs", "Gallon", "Kg", "Pair", "Box", "Book", "Pack", "Mtr", "Set", "Ltr", "Roll"]
 
 
 def init_master_tables():
-    """Creates the UOM and product-category lists. Only adds rows that are missing; never touches stock data."""
+    """Creates the UOM / product-category lists and the inventory.product_category column.
+    Additive only: missing rows/columns are added, existing data is never changed."""
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("""CREATE TABLE IF NOT EXISTS uom_master (
-                    id SERIAL PRIMARY KEY, uom_name TEXT UNIQUE)""")
+            cur.execute("CREATE TABLE IF NOT EXISTS uom_master (id SERIAL PRIMARY KEY, uom_name TEXT)")
             cur.execute("""CREATE TABLE IF NOT EXISTS product_category_master (
-                    id SERIAL PRIMARY KEY, category_name TEXT UNIQUE, created_by TEXT, created_at TEXT)""")
-            for u in DEFAULT_UOMS:
-                cur.execute("INSERT INTO uom_master (uom_name) VALUES (%s) ON CONFLICT (uom_name) DO NOTHING", (u,))
+                    id SERIAL PRIMARY KEY, category_name TEXT, created_by TEXT, created_at TEXT)""")
+            cur.execute("ALTER TABLE product_category_master ADD COLUMN IF NOT EXISTS created_by TEXT")
+            cur.execute("ALTER TABLE product_category_master ADD COLUMN IF NOT EXISTS created_at TEXT")
+            cur.execute("ALTER TABLE inventory ADD COLUMN IF NOT EXISTS product_category TEXT DEFAULT ''")
+            for u in DEFAULT_UOMS:   # no ON CONFLICT: works even if an older table has no UNIQUE constraint
+                cur.execute("""INSERT INTO uom_master (uom_name) SELECT %s
+                               WHERE NOT EXISTS (SELECT 1 FROM uom_master WHERE UPPER(TRIM(uom_name))=UPPER(%s))""", (u, u))
         conn.commit()
     except Exception:
         conn.rollback()
 
 
+def ensure_master_tables():
+    """Self-healing: runs once per browser session so Add Item works even if the cached DB initializer skipped it."""
+    if not st.session_state.get("_master_tables_ready"):
+        init_master_tables()
+        st.session_state["_master_tables_ready"] = True
+
+
+def _clean(s):
+    return re.sub(r"\s+", " ", str(s or "")).strip()
+
+
 def get_uoms():
-    """Enforced UOM list: exactly DEFAULT_UOMS, in this order."""
-    return list(DEFAULT_UOMS)
+    """Default UOMs (fixed order) followed by any UOM added later from Inventory -> Add / Import."""
+    out = list(DEFAULT_UOMS)
+    try:
+        for r in q("SELECT uom_name FROM uom_master ORDER BY id"):
+            n = _clean(r["uom_name"])
+            if n and n.upper() not in {x.upper() for x in out}:
+                out.append(n)
+    except Exception:
+        pass
+    return out
 
 
-def get_budget_categories(fac=None):
-    """Budget categories come straight from the existing Budget table (category_budgets)."""
-    if fac and "CONSOLIDATED" not in fac:
-        rows = q("SELECT DISTINCT category_name FROM category_budgets WHERE factory_name=%s ORDER BY category_name", (fac,))
-    else:
-        rows = q("SELECT DISTINCT category_name FROM category_budgets ORDER BY category_name")
-    return [r["category_name"] for r in rows]
+def get_budget_categories(fac=None, dept=None):
+    """Budget categories come straight from the existing Budget table (category_budgets),
+    for the selected Department (and factory). Falls back to the factory's full list if the department has none."""
+    fsql, fp = fw(fac)
+    rows = []
+    if dept:
+        rows = q(f"SELECT DISTINCT category_name FROM category_budgets WHERE department_name=%s{fsql} ORDER BY category_name",
+                 [dept] + fp)
+    if not rows:
+        rows = q(f"SELECT DISTINCT category_name FROM category_budgets WHERE 1=1{fsql} ORDER BY category_name", fp)
+    return [r["category_name"] for r in rows if _clean(r["category_name"])]
 
 
 def get_product_categories():
-    rows = q("SELECT category_name FROM product_category_master ORDER BY category_name")
-    names = [r["category_name"] for r in rows]
-    # Keep the categories already used in the inventory so nothing disappears from existing data.
-    used = q("SELECT DISTINCT category FROM inventory WHERE COALESCE(category,'')<>'' ORDER BY category")
-    for r in used:
-        if r["category"] not in names:
-            names.append(r["category"])
-    return names
+    """Product categories added from Inventory (separate from Budget categories)."""
+    try:
+        return [r["category_name"] for r in q("SELECT category_name FROM product_category_master ORDER BY LOWER(category_name)")]
+    except Exception:
+        return []
 
 
 @tx
 def add_uom(name):
-    name = name.strip().upper()
-    run("INSERT INTO uom_master (uom_name) VALUES (%s) ON CONFLICT (uom_name) DO NOTHING", (name,))
+    name = _clean(name).upper()
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9 ./\-]{0,19}", name):
+        st.error("UOM max 20 character; shudhu letter / digit / space / . / - hote parbe.")
+        return False
+    if name in {u.upper() for u in get_uoms()}:
+        st.error(f"UOM '{name}' already ache.")
+        return False
+    run("INSERT INTO uom_master (uom_name) VALUES (%s)", (name,))
     audit("ADD_UOM", f"UOM added: {name}")
     return True
 
 
 @tx
 def add_product_category(name):
-    name = name.strip()
-    run("""INSERT INTO product_category_master (category_name, created_by, created_at) VALUES (%s,%s,%s)
-           ON CONFLICT (category_name) DO NOTHING""",
+    name = _clean(name)
+    if len(name) < 2 or len(name) > 60:
+        st.error("Product Category 2 theke 60 character-er moddhe hote hobe.")
+        return False
+    if name.casefold() in {c.casefold() for c in get_product_categories()}:
+        st.error(f"Product Category '{name}' already ache.")
+        return False
+    run("INSERT INTO product_category_master (category_name, created_by, created_at) VALUES (%s,%s,%s)",
         (name, st.session_state.get("user", ""), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     audit("ADD_PRODUCT_CATEGORY", f"Product category added: {name}")
     return True
@@ -1954,25 +1990,25 @@ def temp_code(idx):
     return f"TEMP-{n:04d}"
 
 
-def idx_insert(fac, idx, code, name, size, dept, cat, erp, stock, price, unit, serial=""):
+def idx_insert(fac, idx, code, name, size, dept, cat, erp, stock, price, unit, serial="", product_cat=""):
     final = temp_code(idx) if is_blank_code(code) else unique_code(idx, code, size)
     idx["max_sl"] += 1
     sl = idx["max_sl"]
     run("""INSERT INTO inventory (sl_no, prod_id, factory_name, item_name, size, department, category,
-           erp_stock, current_stock, unit_price, erp_status, unit_name, serial_no)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ERP Pending',%s,%s)""",
+           erp_stock, current_stock, unit_price, erp_status, unit_name, serial_no, product_category)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ERP Pending',%s,%s,%s)""",
         (sl, final, fac, name, size or "", dept or "Maintenance", cat or "Uncategorized (Edit Later)",
-         erp, stock, price or 0.0, unit or "Pcs", (serial or "").strip()))
+         erp, stock, price or 0.0, unit or "Pcs", (serial or "").strip(), product_cat or ""))
     idx_add(idx, sl, final, name, size, serial)
     return final
 
 
-def mirror_to_other(fac, code, name, size, dept, cat, price):
+def mirror_to_other(fac, code, name, size, dept, cat, price, unit="Pcs", product_cat=""):
     """New product is also created in the other unit with stock 0."""
     other = other_factory(fac)
     if find_same_item(other, name, size):
         return False
-    idx_insert(other, load_index(other), code, name, size, dept, cat, 0.0, 0.0, price, "Pcs")
+    idx_insert(other, load_index(other), code, name, size, dept, cat, 0.0, 0.0, price, unit or "Pcs", "", product_cat)
     return True
 
 
@@ -2724,7 +2760,9 @@ def tab_transactions():
 #  TAB 2 - INVENTORY MASTER
 # ============================================================
 @tx
-def add_item(fac, code, name, size, dept, cat, stock, price, serial="", unit="PCS"):
+def add_item(fac, code, name, size, dept, cat, stock, price, serial="", unit="Pcs", product_cat=""):
+    """cat = Budget Category (kept in inventory.category exactly as before, so Budget logic is unchanged);
+    product_cat = separate Product Category (inventory.product_category)."""
     serial = (serial or "").strip()
     ex = find_same_item(fac, name, size)
     owner = serial_owner(fac, serial)
@@ -2751,11 +2789,12 @@ def add_item(fac, code, name, size, dept, cat, stock, price, serial="", unit="PC
         return False
     mx = q("SELECT COALESCE(MAX(sl_no),0) AS m FROM inventory WHERE factory_name=%s", (fac,))[0]["m"]
     run("""INSERT INTO inventory (sl_no, prod_id, factory_name, item_name, size, department, category,
-           erp_stock, current_stock, unit_price, erp_status, serial_no, unit_name)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ERP Pending',%s,%s)""",
-        (int(mx) + 1, code, fac, name, size, dept, cat, stock, stock, price, serial, unit))
-    mirrored = mirror_to_other(fac, code, name, size, dept, cat, price)
-    audit("ADD_ITEM", f"{fac}: {name} [{size}] [{code}] UOM {unit}" + (f" S/N {serial}" if serial else "")
+           erp_stock, current_stock, unit_price, erp_status, serial_no, unit_name, product_category)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ERP Pending',%s,%s,%s)""",
+        (int(mx) + 1, code, fac, name, size, dept, cat, stock, stock, price, serial, unit, product_cat or ""))
+    mirrored = mirror_to_other(fac, code, name, size, dept, cat, price, unit, product_cat)
+    audit("ADD_ITEM", f"{fac}: {name} [{size}] [{code}] dept={dept} budget_cat={cat} product_cat={product_cat or '-'} UOM {unit}"
+          + (f" S/N {serial}" if serial else "")
           + (" + copied to other unit" if mirrored else ""))
     return ("new", int(mx) + 1)
 
@@ -2875,54 +2914,77 @@ def inv_add_import_view():
     with st.container(border=True):
         st.markdown('<div class="section-title">Add New Item</div>', unsafe_allow_html=True)
 
-        # Flow: 1. Department  2. Budget Category  3. Product Category  4. Item  5. UOM
-        # Selections 1-3 sit outside the form so the lists below update instantly when they change.
-        s1, s2, s3 = st.columns(3)
-        dept = s1.selectbox("1. Department", DEPARTMENTS, key="add_dept")
-        bud_opts = get_budget_categories(FAC) or ["(no budget category)"]
-        bud_cat = s2.selectbox("2. Budget Category (from Budget tab)", bud_opts, key="add_bud_cat")
-        prod_opts = get_product_categories() or ["Uncategorized (Edit Later)"]
-        prod_cat = s3.selectbox("3. Product Category", prod_opts, key="add_prod_cat")
+        ensure_master_tables()
+        # Reset the text fields after a successful save (must happen before the widgets are created).
+        if st.session_state.pop("_add_item_reset", False):
+            for _k in ("add_code", "add_name", "add_size", "add_serial", "add_stock", "add_price"):
+                st.session_state.pop(_k, None)
+
+        def _dept_changed():   # Budget Category depends on Department
+            st.session_state["add_bud_cat"] = SEL
+
+        depts = list(DEPARTMENTS)
+        uoms = get_uoms()
+        prod_cats = get_product_categories()
+
+        # Field order: ERP Code, Item Name, Size | Department, Budget Category, Product Category |
+        #              UOM, Initial Stock, Unit Price | Serial No
+        c1, c2, c3 = st.columns(3)
+        code = c1.text_input("ERP Code (blank = temporary)", key="add_code")
+        name = c2.text_input("Item Name*", key="add_name")
+        size = c3.text_input("Size*", key="add_size")
+
+        d1, d2, d3 = st.columns(3)
+        dept = d1.selectbox("Department*", depts, key="add_dept", on_change=_dept_changed)
+        bud_opts = [SEL] + get_budget_categories(FAC, dept)
+        bud_cat = d2.selectbox("Budget Category* (from Budget tab)", bud_opts, key="add_bud_cat")
+        prod_cat = d3.selectbox("Product Category*", [SEL] + prod_cats, key="add_prod_cat")
+
+        u1, u2, u3 = st.columns(3)
+        unit = u1.selectbox("UOM*", [SEL] + uoms, key="add_uom")
+        stock = u2.number_input("Initial Stock", min_value=0.0, step=1.0, key="add_stock")
+        price = u3.number_input("Unit Price (BDT)", min_value=0.0, step=1.0, key="add_price")
+
+        s1, _s2, _s3 = st.columns(3)
+        serial = s1.text_input("Serial No (optional, unique per factory)", key="add_serial")
+
+        if st.button("Save Item", key="add_item_save") and guard():
+            missing = []
+            if not name.strip():
+                missing.append("Item Name")
+            if not size.strip():
+                missing.append("Size")
+            if bud_cat == SEL:
+                missing.append("Budget Category")
+            if prod_cat == SEL:
+                missing.append("Product Category")
+            if unit == SEL:
+                missing.append("UOM")
+            if missing:
+                st.error("Required: " + ", ".join(missing) + ". Please fill / select these before saving.")
+            else:
+                res = add_item(FAC, code, name.strip(), size.strip(), dept, bud_cat, stock, price,
+                               serial.strip(), unit, prod_cat)
+                if res:
+                    st.session_state["_add_item_reset"] = True
+                    done("Stock added to existing item (no duplicate)." if res[0] == "exists"
+                         else f"New item added: {name.strip()} [{size.strip()}] · {unit}")
 
         with st.expander("➕ Add new Product Category"):
             nc1, nc2 = st.columns([3, 1])
             new_pc = nc1.text_input("New product category name", key="new_pc_name")
             if nc2.button("Add category", key="new_pc_btn") and guard():
-                if new_pc.strip():
-                    if add_product_category(new_pc.strip()):
-                        done(f"Product category '{new_pc.strip()}' added.")
-
-        with st.form("add_item_form", clear_on_submit=False):
-            c1, c2, c3 = st.columns(3)
-            code = c1.text_input("4. ERP Code (blank = temporary)")
-            name = c2.text_input("Item Name*")
-            size = c3.text_input("Size*")
-            uom_opts = get_uoms()
-            unit = c1.selectbox("5. UOM", uom_opts, index=uom_opts.index("PCS") if "PCS" in uom_opts else 0)
-            stock = c2.number_input("Initial Stock", min_value=0.0, step=1.0)
-            price = c3.number_input("Unit Price (BDT)", min_value=0.0, step=1.0)
-            serial = c1.text_input("Serial No (optional, unique per factory)")
-            submitted = st.form_submit_button("Save Item")
+                if new_pc.strip() and add_product_category(new_pc.strip()):
+                    st.session_state["new_pc_name"] = ""
+                    done(f"Product category '{_clean(new_pc)}' added.")
 
         with st.expander("➕ Add new UOM"):
             nu1, nu2 = st.columns([3, 1])
-            new_uom = nu1.text_input("New UOM (e.g. PAIR, SET, ROLL)", key="new_uom_name")
+            new_uom = nu1.text_input("New UOM (e.g. DOZEN, MTR)", key="new_uom_name")
             if nu2.button("Add UOM", key="new_uom_btn") and guard():
-                if new_uom.strip():
-                    if add_uom(new_uom.strip()):
-                        done(f"UOM '{new_uom.strip().upper()}' added.")
-
-        if submitted and guard():
-            if not name.strip() or not size.strip():
-                st.error("Item Name ar Size mandatory.")
-            elif bud_cat == "(no budget category)":
-                st.error("Budget tab-e age category toiri korun.")
-            else:
-                # Product Category is stored as the item's category (used by the existing budget join).
-                res = add_item(FAC, code, name.strip(), size.strip(), dept, prod_cat, stock, price,
-                               serial.strip(), unit)
-                if res:
-                    done("Stock added to existing item (no duplicate)." if res[0] == "exists" else "New item added.")
+                if new_uom.strip() and add_uom(new_uom.strip()):
+                    st.session_state["new_uom_name"] = ""
+                    done(f"UOM '{_clean(new_uom).upper()}' added.")
 
     with st.container(border=True):
         st.markdown('<div class="section-title">Import Opening Physical Stock</div>', unsafe_allow_html=True)
