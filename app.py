@@ -1016,6 +1016,7 @@ def init_db():
             id SERIAL PRIMARY KEY, username TEXT, requested_at TEXT, status TEXT DEFAULT 'Pending',
             handled_by TEXT, handled_at TEXT)""",
         "CREATE TABLE IF NOT EXISTS login_sessions (token_hash TEXT PRIMARY KEY, username TEXT, created_at TEXT, expires_at TEXT)",
+        "ALTER TABLE login_sessions ADD COLUMN IF NOT EXISTS factory TEXT DEFAULT ''",
     ]
     try:
         with conn.cursor() as cur:
@@ -1441,11 +1442,24 @@ def create_login_session(username):
     return tok
 
 
+UNIT_LOCK_ROLES = ("Store Officer",)   # roles that must pick one unit after login; it stays locked until sign-out
+
+
+@tx
+def save_session_factory(fac):
+    """Binds the chosen unit to this login session (survives a page reload through the session cookie)."""
+    tok = st.session_state.get("_login_tok") or _cookie_token()
+    if tok:
+        run("ALTER TABLE login_sessions ADD COLUMN IF NOT EXISTS factory TEXT DEFAULT ''")
+        run("UPDATE login_sessions SET factory=%s WHERE token_hash=%s", (fac, _tok_hash(tok)))
+    return True
+
+
 @tx
 def end_login_session():
-    tok = _cookie_token()
-    if tok:
-        run("DELETE FROM login_sessions WHERE token_hash=%s", (_tok_hash(tok),))
+    for tok in {st.session_state.get("_login_tok") or "", _cookie_token()}:
+        if tok:
+            run("DELETE FROM login_sessions WHERE token_hash=%s", (_tok_hash(tok),))
     return True
 
 
@@ -1466,6 +1480,14 @@ def restore_login_from_cookie():
     if r and r[0]["status"] == "Active":
         st.session_state["user"] = r[0]["username"]
         st.session_state["role"] = r[0]["role"]
+        st.session_state["_login_tok"] = tok
+        if r[0]["role"] in UNIT_LOCK_ROLES:   # a reload must not release the unit lock
+            try:
+                f = q("SELECT COALESCE(factory,'') AS factory FROM login_sessions WHERE token_hash=%s", (_tok_hash(tok),))
+                if f and f[0]["factory"] in FACTORIES:
+                    st.session_state["locked_factory"] = f[0]["factory"]
+            except Exception:
+                pass
 
 
 def render_session_cookie_js():
@@ -1501,6 +1523,9 @@ def render_login_control():
                 end_login_session()
                 st.session_state.pop("user", None)
                 st.session_state.pop("role", None)
+                st.session_state.pop("locked_factory", None)   # unit lock ends with the login session
+                st.session_state.pop("_login_tok", None)
+                st.session_state.pop("_gate_pending", None)
                 st.session_state["_cookie_clear"] = True
                 done("Signed out successfully.")
             with st.expander("🔑 Change password"):
@@ -1546,9 +1571,12 @@ def render_login_control():
                         else:
                             st.session_state["user"] = username.strip()
                             st.session_state["role"] = rows[0]["role"]
+                            st.session_state.pop("locked_factory", None)   # every new login must choose its unit
+                            st.session_state.pop("_gate_pending", None)
                             token = create_login_session(username.strip())
                             if token:
                                 st.session_state["_cookie_set"] = token
+                                st.session_state["_login_tok"] = token
                             log_event("LOGIN", f"User {username.strip()} logged in as {rows[0]['role']}.")
                             done(f"Welcome, {username.strip()}!")
                     else:
@@ -2207,6 +2235,9 @@ def guard(write=True):
     if write and "CONSOLIDATED" in FAC:
         st.error("CONSOLIDATED view-te edit kora jabe na. Specific factory select korun.")
         return False
+    if write and st.session_state.get("role") in UNIT_LOCK_ROLES and FAC != st.session_state.get("locked_factory"):
+        st.error("Age unit select korun - entry shudhu locked unit-e hobe.")
+        return False
     return True
 
 
@@ -2226,9 +2257,70 @@ def local_now():
         return datetime.now(timezone(timedelta(hours=6)))
 
 
+FACTORY_BANNER = {"KC Washing Plant": "#0F766E", "Windy Washing LTD": "#B45309"}
+
+
+def unit_lock_active():
+    """True for a signed-in officer: the unit is chosen once after login and then locked."""
+    return bool(st.session_state.get("user")) and st.session_state.get("role") in UNIT_LOCK_ROLES
+
+
+def unit_gate_required():
+    return unit_lock_active() and st.session_state.get("locked_factory") not in FACTORIES
+
+
+def factory_banner(fac):
+    """Always-visible, colour-coded reminder of the unit every entry is saved to."""
+    if "CONSOLIDATED" in str(fac):
+        bg, msg = "#475569", "👁 CONSOLIDATED VIEW — view only, entries are not allowed here"
+    else:
+        bg = FACTORY_BANNER.get(fac, "#0F766E")
+        lock = "🔒 " if unit_lock_active() else ""
+        msg = f"{lock}🏭 YOU ARE WORKING IN: {html_lib.escape(str(fac)).upper()} — every entry is saved to this unit"
+    st.markdown(f'<div style="background:{bg};color:#fff;font-weight:800;letter-spacing:.4px;font-size:14px;'
+                f'padding:9px 14px;border-radius:10px;margin:2px 0 10px 0;">{msg}</div>', unsafe_allow_html=True)
+
+
+def factory_gate():
+    """Shown right after an officer signs in: pick KC Washing Plant or Windy Washing Ltd. The choice is confirmed,
+    saved on the login session and cannot be changed until the officer signs out."""
+    st.markdown('<div class="section-title">Select your working unit</div>', unsafe_allow_html=True)
+    st.info("Welcome, " + str(st.session_state.get("user", "")) + ". Choose the unit you will work in. "
+            "All your entries and transactions will be saved to it, and it stays LOCKED until you sign out.")
+    pending = st.session_state.get("_gate_pending")
+    if pending in FACTORIES:
+        st.warning(f"You selected **{pending}**. After confirming, this unit is locked for the whole session "
+                   f"(sign out to change it).")
+        c1, c2, _ = st.columns([1, 1, 2])
+        if c1.button("✅ Confirm & enter", key="gate_confirm", type="primary", use_container_width=True):
+            if save_session_factory(pending):
+                st.session_state["locked_factory"] = pending
+                st.session_state["factory"] = pending
+                st.session_state.pop("_gate_pending", None)
+                log_event("UNIT_SELECTED", f"{st.session_state.get('user')} locked unit: {pending}")
+                done(f"Unit locked: {pending}")
+        if c2.button("↩ Back", key="gate_back", use_container_width=True):
+            st.session_state.pop("_gate_pending", None)
+            st.rerun()
+        return
+    cols = st.columns(len(FACTORIES))
+    for col, fac in zip(cols, FACTORIES):
+        with col:
+            with st.container(border=True):
+                st.markdown(f"### 🏭 {fac}")
+                if st.button(f"Work in {fac}", key=f"gate_pick_{FACTORIES.index(fac)}", type="primary",
+                             use_container_width=True):
+                    st.session_state["_gate_pending"] = fac
+                    st.rerun()
+
+
 def render_header():
     """Compact top bar: factory switcher and sign-in/account control side by side."""
-    if st.session_state.get("factory") not in FACTORIES + [ALL_VIEW]:
+    lock_mode = unit_lock_active()
+    if lock_mode:   # officer: unit comes only from the locked choice, never from a dropdown
+        locked = st.session_state.get("locked_factory")
+        st.session_state["factory"] = locked if locked in FACTORIES else FACTORIES[0]
+    elif st.session_state.get("factory") not in FACTORIES + [ALL_VIEW]:
         st.session_state["factory"] = FACTORIES[0]
     selected_factory = st.session_state.get("factory", FACTORIES[0])
     user_txt = (f"{st.session_state['user']} · {st.session_state.get('role', '')}"
@@ -2242,9 +2334,14 @@ def render_header():
             st.markdown("**KC Windy Inventory**")
             st.caption("Management workspace")
         with factory_col:
-            selected_factory = st.selectbox(
-                "🏭 Active factory", FACTORIES + [ALL_VIEW], key="factory"
-            )
+            if lock_mode:
+                st.markdown("🏭 Active factory")
+                st.markdown(f"🔒 **{html_lib.escape(selected_factory)}**" if not unit_gate_required()
+                            else "⚠️ **Select a unit below**")
+            else:
+                selected_factory = st.selectbox(
+                    "🏭 Active factory", FACTORIES + [ALL_VIEW], key="factory"
+                )
         with login_col:
             render_login_control()
         with meta_col:
@@ -2253,6 +2350,8 @@ def render_header():
                 f'<span>👤 {html_lib.escape(user_txt)}</span></div>',
                 unsafe_allow_html=True,
             )
+    if not unit_gate_required():
+        factory_banner(selected_factory)
     return selected_factory
 
 def sidebar_clock():
@@ -5705,7 +5804,8 @@ def tab_daily_sheet():
     with st.container(border=True):
         c1, c2, c3, c4 = st.columns([1, 2, 1, 1])
         d = c1.date_input("Date", value=date.today(), key="ds_date")
-        fac = c2.selectbox("Factory", FACTORIES, index=FACTORIES.index(FAC) if FAC in FACTORIES else 0, key="ds_fac")
+        ds_opts = [FAC] if unit_lock_active() and FAC in FACTORIES else FACTORIES   # an officer's sheet stays on the locked unit
+        fac = c2.selectbox("Factory", ds_opts, index=ds_opts.index(FAC) if FAC in ds_opts else 0, key="ds_fac")
         show_all = c3.checkbox("Include zero-stock", key="ds_all")
         auto = c4.checkbox("Auto-fill issue/received", key="ds_auto")
     ds_term = st.text_input("🔍 Search (Serial No / Item / Size / SL No)", key="ds_search",
@@ -5806,6 +5906,9 @@ with st.sidebar:
 FAC = render_header()
 FSQL, FP = fw(FAC)
 is_cons_view = "CONSOLIDATED" in FAC
+if unit_gate_required():   # signed-in officer who has not chosen a unit yet: nothing else is shown
+    factory_gate()
+    st.stop()
 autoset_uom_once()
 
 # Render only the selected module; the sidebar buttons update NAV_KEY.
