@@ -850,7 +850,7 @@ VERDICT = {"FOUND": "✔ FOUND", "SIZE_MISSING": "⚠ SIZE NOT IN LIST", "CODE_M
 NAV_KEY = "main_nav"
 NAV_ERP_AUDIT = "🔍 ERP Audit"
 TAB_NAMES = [
-    "📊 Dashboard", "📝 Transactions", "📦 Inventory", "📦 Stock Report", "🌐 Global Inventory", NAV_ERP_AUDIT,
+    "📊 Dashboard", "📝 Transactions", "📦 Inventory", "📦 Stock Report", "🌐 Global Inventory", "📱 Physical Count", NAV_ERP_AUDIT,
     "📜 Issue Ledger", "🔁 Transfer History", "📑 Requisition", "🛠 Repair & Returns",
     "📒 Ledger", "📈 Forecast", "💰 Budget", "🗓 Daily Work Sheet",
 ]
@@ -5846,6 +5846,208 @@ def tab_daily_sheet():
 
 
 # ============================================================
+#  PHYSICAL COUNT - spot check done in the store, entered on a phone, reviewed in the office
+# ============================================================
+def ensure_count_tables():
+    """Creates the two count tables on first use (additive; no existing table is touched)."""
+    if st.session_state.get("_count_tables_ready"):
+        return
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS stock_counts (
+                id SERIAL PRIMARY KEY, factory_name TEXT, counted_by TEXT, counted_at TEXT,
+                status TEXT DEFAULT 'Waiting', note TEXT DEFAULT '', reviewed_by TEXT, reviewed_at TEXT,
+                review_note TEXT DEFAULT '')""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS stock_count_items (
+                id SERIAL PRIMARY KEY, count_id INTEGER, factory_name TEXT, sl_no INTEGER, prod_id TEXT,
+                item_name TEXT, size TEXT, serial_no TEXT, unit TEXT, system_qty REAL, counted_qty REAL,
+                remarks TEXT DEFAULT '')""")
+            cur.execute("CREATE INDEX IF NOT EXISTS ix_sci_count ON stock_count_items(count_id)")
+        conn.commit()
+        st.session_state["_count_tables_ready"] = True
+    except Exception:
+        conn.rollback()
+        raise
+
+
+@tx
+def save_stock_count(fac, user, items, note):
+    """Stores one count. System stock is read again here, at the moment of submitting, and saved with the count.
+    Inventory itself is NOT changed - the count only waits for review."""
+    when = local_now().strftime("%d-%b-%Y %I:%M %p")
+    cid = run("""INSERT INTO stock_counts (factory_name, counted_by, counted_at, status, note)
+                 VALUES (%s,%s,%s,'Waiting',%s) RETURNING id""", (fac, user, when, note or ""))[0][0]
+    for it in items:
+        r = q("""SELECT prod_id, item_name, COALESCE(size,'') AS size, COALESCE(serial_no,'') AS serial_no,
+                 COALESCE(NULLIF(unit_name,''),'Pcs') AS unit, COALESCE(current_stock,0) AS stock
+                 FROM inventory WHERE sl_no=%s AND factory_name=%s""", (it["sl_no"], fac))
+        if not r:
+            raise ValueError(f"Item SL {it['sl_no']} is not in {fac}.")
+        r = r[0]
+        run("""INSERT INTO stock_count_items (count_id, factory_name, sl_no, prod_id, item_name, size, serial_no,
+               unit, system_qty, counted_qty, remarks) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (cid, fac, it["sl_no"], r["prod_id"], r["item_name"], r["size"], r["serial_no"], r["unit"],
+             float(r["stock"]), float(it["qty"]), it.get("remark", "")))
+    audit("STOCK_COUNT", f"{fac}: count #{cid} by {user}, {len(items)} item(s)")
+    return cid
+
+
+@tx
+def review_stock_count(cid, user, review_note):
+    run("""UPDATE stock_counts SET status='Reviewed', reviewed_by=%s, reviewed_at=%s, review_note=%s
+           WHERE id=%s AND status='Waiting'""",
+        (user, local_now().strftime("%d-%b-%Y %I:%M %p"), review_note or "", cid))
+    audit("STOCK_COUNT_REVIEWED", f"Count #{cid} reviewed by {user}")
+    return True
+
+
+def _pc_add():
+    """Button callback: put the picked item + counted quantity on the list, then clear the entry boxes."""
+    ss = st.session_state
+    row = ss.get("pc_opts", {}).get(ss.get("pc_pick"))
+    qty = ss.get("pc_qty")
+    if row is None:
+        ss["pc_msg"] = ("error", "Search and select an item first.")
+    elif qty is None:
+        ss["pc_msg"] = ("error", "Enter the counted quantity (type 0 if nothing is found).")
+    else:
+        ss.setdefault("pc_list", {})[row["sl_no"]] = {
+            "sl_no": row["sl_no"], "label": f"{row['item_name']} [{row['size'] or '-'}]",
+            "code": row["prod_id"], "qty": float(qty), "remark": str(ss.get("pc_rem") or "").strip()}
+        ss["pc_msg"] = ("ok", f"Added: {row['item_name']} = {float(qty):g}")
+        for k in ("pc_qty", "pc_rem", "pc_term", "pc_pick"):
+            ss.pop(k, None)
+
+
+def _pc_remove(sl):
+    st.session_state.get("pc_list", {}).pop(sl, None)
+
+
+@_fragment
+def pc_entry():
+    """Phone-friendly entry. A fragment: typing / selecting here does not reload the whole application."""
+    if not st.session_state.get("user"):
+        st.info("🔑 Sign in first to record a count.")
+        return
+    st.markdown(f"**🏭 Counting in: {FAC}**")
+    st.caption("Counting is blind: the system stock is not shown here, so the count stays honest. "
+               "It appears in the Waiting / Results tab after you submit.")
+    term = st.text_input("🔍 Item name / serial / ERP code", key="pc_term", placeholder="Type and select the item")
+    opts = {}
+    if term.strip():
+        for r in search_items(FAC, term.strip())[:30]:
+            lbl = f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']}" + (f" · S/N {r['serial']}" if r["serial"] else "")
+            opts[lbl] = r
+    st.session_state["pc_opts"] = opts
+    if term.strip() and not opts:
+        st.warning("No item found.")
+    if opts:
+        st.selectbox("Select item", list(opts), key="pc_pick")
+    try:
+        st.number_input("Counted quantity", min_value=0.0, step=1.0, value=None, placeholder="How many did you count?",
+                        key="pc_qty")
+    except TypeError:   # very old Streamlit without an empty number box
+        st.number_input("Counted quantity", min_value=0.0, step=1.0, key="pc_qty")
+    st.text_input("Remarks (optional)", key="pc_rem", placeholder="e.g. 2 damaged, kept in rack B")
+    st.button("➕ Add to count list", key="pc_add_btn", on_click=_pc_add, use_container_width=True)
+    msg = st.session_state.pop("pc_msg", None)
+    if msg:
+        (st.success if msg[0] == "ok" else st.error)(msg[1])
+
+    lst = st.session_state.get("pc_list", {})
+    st.markdown(f"#### 📝 Count list ({len(lst)} item{'s' if len(lst) != 1 else ''})")
+    if not lst:
+        st.caption("Nothing added yet.")
+    for sl, it in list(lst.items()):
+        with st.container(border=True):
+            st.markdown(f"**{html_lib.escape(it['label'])}** · {html_lib.escape(str(it['code']))}  \n"
+                        f"Counted: **{it['qty']:g}**" + (f" · {html_lib.escape(it['remark'])}" if it["remark"] else ""))
+            st.button("✖ Remove", key=f"pc_rm_{sl}", on_click=_pc_remove, args=(sl,))
+    note = st.text_input("Note for the whole count (optional)", key="pc_note")
+    if st.button(f"✅ Submit count ({len(lst)})", key="pc_submit", type="primary", use_container_width=True):
+        if not lst:
+            st.error("Add at least one item first.")
+        elif guard():
+            cid = save_stock_count(FAC, st.session_state["user"], list(lst.values()), note.strip())
+            if cid:
+                st.session_state["pc_list"] = {}
+                st.session_state.pop("pc_note", None)
+                done(f"Count #{cid} submitted - waiting for review.")
+
+
+def _pc_result_df(items):
+    rows = []
+    for r in items:
+        diff = float(r["counted_qty"]) - float(r["system_qty"])
+        rows.append({"SL No": r["sl_no"], "Serial No": r["serial_no"], "Item": r["item_name"], "Size": r["size"],
+                     "UOM": r["unit"], "System stock": float(r["system_qty"]), "Counted qty": float(r["counted_qty"]),
+                     "Difference": diff,
+                     "Result": "✅ Match" if abs(diff) < 1e-9 else ("🔻 Short" if diff < 0 else "🔺 Excess"),
+                     "Remarks": r["remarks"] or ""})
+    return pd.DataFrame(rows)
+
+
+def pc_results_view():
+    status = st.radio("Show", ["Waiting", "Reviewed", "All"], horizontal=True, key="pc_status")
+    where = "" if status == "All" else " AND status=%s"
+    params = list(FP) + ([] if status == "All" else [status])
+    counts = q(f"SELECT * FROM stock_counts WHERE 1=1{FSQL}{where} ORDER BY id DESC LIMIT 30", params)
+    if not counts:
+        st.info("No counts here yet.")
+        return
+    items = q("SELECT * FROM stock_count_items WHERE count_id = ANY(%s) ORDER BY id", ([c["id"] for c in counts],))
+    by_count = {}
+    for it in items:
+        by_count.setdefault(it["count_id"], []).append(it)
+    n_wait = sum(1 for c in counts if c["status"] == "Waiting")
+    n_diff = sum(1 for it in items if abs(float(it["counted_qty"]) - float(it["system_qty"])) >= 1e-9)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Counts shown", len(counts))
+    m2.metric("Waiting for review", n_wait)
+    m3.metric("Items with a difference", n_diff)
+    for i, c in enumerate(counts):
+        df = _pc_result_df(by_count.get(c["id"], []))
+        n_bad = int((df["Difference"].abs() >= 1e-9).sum()) if not df.empty else 0
+        badge = "⏳ Waiting" if c["status"] == "Waiting" else "✔ Reviewed"
+        title = (f"{badge} · Count #{c['id']} · {c['factory_name']} · {c['counted_by']} · {c['counted_at']} · "
+                 f"{len(df)} item(s)" + (f" · ⚠ {n_bad} different" if n_bad else " · all match"))
+        with st.expander(title, expanded=(i == 0 and c["status"] == "Waiting")):
+            if c["note"]:
+                st.caption(f"Note: {c['note']}")
+            st.dataframe(df, hide_index=True, use_container_width=True,
+                         column_config={"System stock": st.column_config.NumberColumn(format="%.2f"),
+                                        "Counted qty": st.column_config.NumberColumn(format="%.2f"),
+                                        "Difference": st.column_config.NumberColumn(format="%+.2f")})
+            st.caption("System stock = physical stock in the software at the time the count was submitted. "
+                       "Inventory is not changed by a count.")
+            if c["status"] == "Reviewed":
+                st.caption(f"Reviewed by {c['reviewed_by']} on {c['reviewed_at']}"
+                           + (f" - {c['review_note']}" if c["review_note"] else ""))
+            elif st.session_state.get("role") == "Store Manager":
+                rn = st.text_input("Review note (optional)", key=f"pc_rn_{c['id']}")
+                if st.button("✔ Mark as reviewed", key=f"pc_rv_{c['id']}"):
+                    if review_stock_count(c["id"], st.session_state["user"], rn.strip()):
+                        done(f"Count #{c['id']} marked as reviewed.")
+
+
+def tab_physical_count():
+    st.title("📱 Physical Count")
+    st.caption("Spot-check any items in the store, enter the counted quantity from your phone, and compare it with the "
+               "software stock.")
+    try:
+        ensure_count_tables()
+    except Exception as e:
+        st.error(f"Physical Count tables could not be prepared: {e}")
+        return
+    t_new, t_res = st.tabs(["➕ New count", "⏳ Waiting / Results"])
+    with t_new:
+        pc_entry()
+    with t_res:
+        pc_results_view()
+
+
+# ============================================================
 #  MAIN
 # ============================================================
 ensure_live_connection()
@@ -5879,7 +6081,7 @@ sidebar_clock()
 
 with st.sidebar:
     st.markdown('<div class="nav-section-title">Workspace</div>', unsafe_allow_html=True)
-    for nav_index in range(5):
+    for nav_index in range(6):
         nav_label = TAB_NAMES[nav_index]
         if st.button(
             nav_label,
@@ -5891,7 +6093,7 @@ with st.sidebar:
             st.rerun()
 
     st.markdown('<div class="nav-section-title">Management</div>', unsafe_allow_html=True)
-    for nav_index in range(5, len(TAB_NAMES)):
+    for nav_index in range(6, len(TAB_NAMES)):
         nav_label = TAB_NAMES[nav_index]
         if st.button(
             nav_label,
@@ -5912,7 +6114,7 @@ if unit_gate_required():   # signed-in officer who has not chosen a unit yet: no
 autoset_uom_once()
 
 # Render only the selected module; the sidebar buttons update NAV_KEY.
-RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, tab_global_inventory, tab_erp_audit, tab_issue_ledger,
+RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, tab_global_inventory, tab_physical_count, tab_erp_audit, tab_issue_ledger,
              tab_transfer_history, tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
 RENDERERS[TAB_NAMES.index(active_tab)]()
