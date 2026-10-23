@@ -1124,6 +1124,13 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, username TEXT UNIQUE, password TEXT, role TEXT, full_name TEXT)",
         "CREATE TABLE IF NOT EXISTS audit_logs (id SERIAL PRIMARY KEY, timestamp TEXT, username TEXT, action_type TEXT, details TEXT)",
         "CREATE TABLE IF NOT EXISTS req_settings (setting_key TEXT PRIMARY KEY, setting_value TEXT)",
+        """CREATE TABLE IF NOT EXISTS item_aliases (
+            id SERIAL PRIMARY KEY, factory_name TEXT, alias_name TEXT, alias_norm TEXT, sl_no INTEGER,
+            created_by TEXT, created_at TEXT, UNIQUE(factory_name, alias_norm, sl_no))""",
+        """CREATE TABLE IF NOT EXISTS issue_returns (
+            id SERIAL PRIMARY KEY, tx_id INTEGER, factory_name TEXT, sl_no INTEGER, prod_id TEXT, item_name TEXT,
+            qty REAL, original_qty REAL, officer_name TEXT, return_date TEXT, return_time TEXT, reason TEXT,
+            note TEXT, returned_by TEXT)""",
         "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS size TEXT DEFAULT ''",
         "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS unit_name TEXT DEFAULT 'Pcs'",
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS erp_grn_status TEXT DEFAULT 'Not Required'",
@@ -2195,6 +2202,7 @@ def load_index(fac):
         idx_add(idx, r["sl_no"], r["prod_id"], r["item_name"], r["size"], r["serial_no"])
     mq = q("SELECT COALESCE(MAX(sl_no),0) AS m FROM import_queue WHERE factory_name=%s", (fac,))[0]["m"]
     idx["max_sl"] = max(idx["max_sl"], int(mq or 0))
+    _inject_aliases(idx, q("SELECT alias_norm, sl_no FROM item_aliases WHERE factory_name=%s", (fac,)))
     return idx
 
 
@@ -2390,6 +2398,7 @@ def ec_index():
                       COALESCE(current_stock,0) AS phys FROM inventory WHERE factory_name=%s""", (f,)):
             e = idx_add(idx, r["sl_no"], r["prod_id"], r["item_name"], r["size"])
             e["erp"], e["phys"] = r["erp"], r["phys"]
+        _inject_aliases(idx, alias_rows(f))
         out[f] = idx
     return out
 
@@ -2525,7 +2534,7 @@ def render_header():
 
     with st.container(border=True):
         brand_col, factory_col, login_col, meta_col = st.columns(
-            [1.15, 1.35, .9, 1.5], gap="small", vertical_alignment="center"
+            [1.15, 1.35, .9, 1.5], gap="small"
         )
         with brand_col:
             st.markdown("**KC Windy Inventory**")
@@ -3556,6 +3565,7 @@ def inv_queue_view():
     if not guard():
         return
     k = str(r["id"])
+    queue_link_panel(r)
     with st.form(f"qedit_{k}"):
         c1, c2, c3 = st.columns(3)
         code = c1.text_input("ERP Code (N/A = later)", r["prod_id"] or "", key=f"qc_{k}")
@@ -4154,6 +4164,7 @@ def tab_inventory():
         ("⚡ Bulk Stock Entry", bulk_stock_entry_view),
         ("📥 Unmatch Queue", inv_queue_view),
         ("🔎 ERP Match Check", erp_check_view),
+        ("🔗 Name Alias", alias_view),
     ]
     labels = [lbl for lbl, _fn in sections]
     st.markdown("<style>.st-key-inv_view div[role=\"radiogroup\"]{display:flex!important;flex-wrap:wrap!important;gap:7px!important;padding:2px 0 12px 0}.st-key-inv_view label[data-baseweb=\"radio\"]{background:#fff!important;border:1px solid #D5DFEA!important;border-radius:9px!important;padding:8px 12px!important;margin:0!important;cursor:pointer}.st-key-inv_view label[data-baseweb=\"radio\"]>div:first-child:not(:has(p)),.st-key-inv_view label[data-baseweb=\"radio\"]>span:first-child:not(:has(p)){display:none!important}.st-key-inv_view label[data-baseweb=\"radio\"] p{color:#334155!important;font-size:13px!important;font-weight:650!important;margin:0!important;white-space:nowrap}.st-key-inv_view label[data-baseweb=\"radio\"]:hover{border-color:#0F766E!important}.st-key-inv_view label[data-baseweb=\"radio\"]:has(input:checked){background:#0F766E!important;border-color:#0F766E!important}.st-key-inv_view label[data-baseweb=\"radio\"]:has(input:checked) p{color:#fff!important}</style>", unsafe_allow_html=True)
@@ -5555,6 +5566,12 @@ def find_inv_for_req(fac, code, name):
         r = q("SELECT sl_no, prod_id, item_name FROM inventory WHERE factory_name=%s AND LOWER(item_name)=LOWER(%s)", (fac, name))
         if r:
             return r[0]
+        nn = norm_name(name)
+        for a in alias_rows(fac):
+            if a["alias_norm"] == nn:
+                r = q("SELECT sl_no, prod_id, item_name FROM inventory WHERE factory_name=%s AND sl_no=%s", (fac, a["sl_no"]))
+                if r:
+                    return r[0]
     return None
 
 
@@ -5878,6 +5895,12 @@ def delete_repair(rid):
 
 
 def tab_repair():
+    if lazy_tab_select(["🛠 Repair / Gate Pass", "↩️ Return to Store (Issue ফেরত)"], "lz_rp") == 1:
+        try:
+            return_to_store_view()
+        except Exception as e:
+            st.error(f"Return to Store load kora jayni: {e}")
+        return
     rp = qdf_c(f"""SELECT id, tracking_code, factory_name, gate_pass_no, item_name, COALESCE(qty,0) AS qty, source_type,
                  return_type, supplier_name, sent_date, return_date, status, officer_name
                  FROM repair_returns WHERE 1=1{FSQL} ORDER BY id DESC""", FP)
@@ -7008,7 +7031,7 @@ def render_dash_transfer_hint(stamp):
     st.markdown('<div class="section-title">🔁 ট্রান্সফার করুন, কিনতে হবে না</div>', unsafe_allow_html=True)
     for i, s in enumerate(sugs[:3]):
         with st.container(border=True):
-            c1, c2 = st.columns([3.2, 1], vertical_alignment="center")
+            c1, c2 = st.columns([3.2, 1])
             c1.markdown(suggestion_text(s))
             c2.button("ট্রান্সফার ফর্ম খুলুন →", key=f"dx_open_{i}", on_click=_open_xfer, args=(s,),
                       use_container_width=True, type="primary")
@@ -7126,7 +7149,7 @@ def tab_stock_cover():
         st.metric("সম্ভাব্য সাশ্রয় (না কিনলে)", f"৳{sum(s['saved_value'] for s in sugs):,.0f}", f"{len(sugs)}টি আইটেম")
         for i, s in enumerate(sugs[:100]):
             with st.container(border=True):
-                c1, c2 = st.columns([3.2, 1], vertical_alignment="center")
+                c1, c2 = st.columns([3.2, 1])
                 c1.markdown(suggestion_text(s))
                 c2.button("ফর্ম খুলুন →", key=f"sc_open_{i}", on_click=_open_xfer, args=(s,), use_container_width=True)
         return
@@ -7363,7 +7386,7 @@ def count_picks_panel():
         if i > 0 and i % 5 == 0:
             st.markdown(f"**🚨 পরের জরুরি ৫টি — {bn(i + 1)} থেকে {bn(i + 5)} নম্বর**")
         with st.container(border=True):
-            c1, c2 = st.columns([3.4, 1], vertical_alignment="center")
+            c1, c2 = st.columns([3.4, 1])
             ok = p["sl_no"] in counted_today
             c1.markdown(f"{'✅' if ok else f'**{i + 1}.**'} **{html_lib.escape(str(r['item_name']))}** "
                         f"[{html_lib.escape(str(r['size'] or '-'))}] · {html_lib.escape(str(r['prod_id']))}  \n"
@@ -7412,7 +7435,7 @@ def render_dash_note_board():
                  ORDER BY id DESC LIMIT 60""")
     if _note_can_write():
         gen = st.session_state.get("note_gen", 0)
-        c1, c2, c3 = st.columns([3.2, 1.3, 1], vertical_alignment="bottom")
+        c1, c2, c3 = st.columns([3.2, 1.3, 1])
         text = c1.text_input("নতুন নোট", key=f"note_text_{gen}", max_chars=300,
                              placeholder="যেমন: Windy-তে কাল বিয়ারিং আসবে, ERP-তে এন্ট্রি দিন")
         unit_opts = ["দুই ইউনিট"] + FACTORIES
@@ -7436,7 +7459,7 @@ def render_dash_note_board():
             mine = bool(my_unit and n["for_unit"] in (my_unit, "Both"))
             unit_txt = "দুই ইউনিট" if n["for_unit"] == "Both" else short_fac(n["for_unit"])
             with st.container(border=True):
-                a, b = st.columns([4.2, 1], vertical_alignment="center")
+                a, b = st.columns([4.2, 1])
                 a.markdown(f"{'🔔' if mine else '▫️'} **[{html_lib.escape(unit_txt)}]** {html_lib.escape(str(n['note']))}  \n"
                            f"<span style='font-size:11.5px;color:#64748B;'>— {html_lib.escape(str(n['created_by'] or ''))} · "
                            f"{html_lib.escape(str(n['created_at'] or ''))}</span>", unsafe_allow_html=True)
@@ -7474,6 +7497,10 @@ def render_dashboard_addons():
         render_budget_runout_hint(stamp)
     except Exception as e:
         st.caption(f"বাজেট আগাম সতর্কতা লোড হয়নি: {e}")
+    try:
+        render_daily_summary_share(stamp)
+    except Exception as e:
+        st.caption(f"সকালের সারাংশ লোড হয়নি: {e}")
 
 
 # ------------------------------------------------------------------
@@ -7919,9 +7946,12 @@ def ensure_req_audit_table():
         raise
 
 
-def _audit_events(fac, inv, tx_rows, xf_rows):
+def _audit_events(fac, inv, tx_rows, xf_rows, ret_rows=None):
     """Every stock movement of one item as +/- events (receipts, issues, adjustments, stock-set, inter-factory transfers)."""
     ev, flags = [], set()
+    returned = {}
+    for rr in ret_rows or []:
+        returned[rr["tx_id"]] = returned.get(rr["tx_id"], 0.0) + float(rr["qty"] or 0)
     for t in tx_rows:
         dt = parse_date(t["date"])
         if not dt:
@@ -7931,6 +7961,7 @@ def _audit_events(fac, inv, tx_rows, xf_rows):
         if tt in RECEIPT_TYPES:
             delta = qty
         elif tt in ISSUE_TYPES or tt == ADJ_OUT:
+            qty += returned.get(t.get("id"), 0.0)      # the issue as originally made; the return is its own +event below
             delta = -qty
         elif tt == OPENING_TYPE:
             m = re.search(r"Physical\s*(-?[\d.]+)\s*->\s*(-?[\d.]+)", t.get("notes") or "")
@@ -7943,6 +7974,11 @@ def _audit_events(fac, inv, tx_rows, xf_rows):
             delta = 0.0
         who = f" by {t['officer']}" if t.get("officer") else ""
         ev.append({"d": dt.date(), "delta": delta, "label": f"{_TT_SHORT.get(tt, tt)} {qty:g}{who}"})
+    have = {t.get("id") for t in tx_rows}
+    for rr in ret_rows or []:
+        dt = parse_date(rr["return_date"])
+        if dt and rr["tx_id"] in have:
+            ev.append({"d": dt.date(), "delta": float(rr["qty"] or 0), "label": f"Return to store {float(rr['qty'] or 0):g}"})
     nn = norm_name(inv["item_name"])
     for x in xf_rows:
         if str(x.get("status") or "Completed") != "Completed":
@@ -8097,8 +8133,12 @@ def _rq(x):
 def _audit_core(fac, req_no, dept, start, items, kid, audit_d, auditor, remarks):
     """Shared by both entry points: items = [(req_row_or_{}, inventory_row)]."""
     sls = [int(i["sl_no"]) for _, i in items]
-    txs = q_c("""SELECT sl_no, date, trans_type, qty, COALESCE(notes,'') AS notes, COALESCE(officer_name,'') AS officer
+    txs = q_c("""SELECT id, sl_no, date, trans_type, qty, COALESCE(notes,'') AS notes, COALESCE(officer_name,'') AS officer
                  FROM transactions WHERE factory_name=%s AND sl_no = ANY(%s)""", (fac, sls))
+    rets = q_c("SELECT tx_id, sl_no, qty, return_date FROM issue_returns WHERE factory_name=%s AND sl_no = ANY(%s)", (fac, sls))
+    ret_by_sl = {}
+    for rr in rets:
+        ret_by_sl.setdefault(int(rr["sl_no"]), []).append(rr)
     xfs = q_c("""SELECT source_factory, dest_factory, prod_id, item_name, qty, transfer_date, COALESCE(notes,'') AS notes,
                  COALESCE(status,'Completed') AS status FROM inter_factory_transfers
                  WHERE source_factory=%s OR dest_factory=%s""", (fac, fac))
@@ -8107,7 +8147,7 @@ def _audit_core(fac, req_no, dept, start, items, kid, audit_d, auditor, remarks)
         by_sl.setdefault(int(t["sl_no"]), []).append(t)
     built, flags = [], set()
     for x, inv in items:
-        ev, fl = _audit_events(fac, inv, by_sl.get(int(inv["sl_no"]), []), xfs)
+        ev, fl = _audit_events(fac, inv, by_sl.get(int(inv["sl_no"]), []), xfs, ret_by_sl.get(int(inv["sl_no"]), []))
         flags |= fl
         b = _audit_build(inv["stock"], ev, start, audit_d)
         built.append((x, inv, b))
@@ -8276,6 +8316,12 @@ def req_audit_view(rows, r):
             inv = by_code.get(str(x["prod_id"]).strip())
         if inv is None and x["item_name"]:
             inv = by_name.get(str(x["item_name"]).strip().lower())
+        if inv is None and x["item_name"]:
+            nn_ = norm_name(x["item_name"])
+            for a_ in alias_rows(fac):
+                if a_["alias_norm"] == nn_:
+                    inv = next((i for i in inv_all if int(i["sl_no"]) == int(a_["sl_no"])), None)
+                    break
         if inv is None:
             missing.append(str(x["item_name"]))
         else:
@@ -8340,7 +8386,7 @@ def audit_manual_view():
         if not labels:
             st.warning("এই নামে কোনো item পাওয়া যায়নি। ছোট/অন্য শব্দ দিয়ে খুঁজে দেখুন।")
         else:
-            cc1, cc2 = st.columns([4, 1], vertical_alignment="bottom")
+            cc1, cc2 = st.columns([4, 1])
             cc1.multiselect("Search result — যেগুলো Audit-এ নেবেন সেগুলো select করুন", list(labels), key="ram_pick")
             cc2.button("➕ যোগ করুন", key="ram_add_btn", on_click=_ram_add, use_container_width=True)
     if not chosen:
@@ -8355,13 +8401,304 @@ def audit_manual_view():
         r_ = by_sl.get(sl)
         if not r_:
             continue
-        cA, cB = st.columns([6, 1], vertical_alignment="center")
+        cA, cB = st.columns([6, 1])
         cA.markdown(f"• {r_['item_name']} [{r_['size'] or '-'}] · {r_['prod_id'] or '-'}")
         cB.button("❌", key=f"ram_rm_{sl}", on_click=_ram_remove, args=(sl,))
     items = [({"req_qty": None}, by_sl[sl]) for sl in chosen if sl in by_sl]
     if not items:
         return
     _audit_core(fac, req_no or "NO-REQ-NO", dept, start, items, f"m_{short_fac(fac)}", audit_d, auditor, remarks)
+
+
+# ------------------------------------------------------------------
+#  12. Name alias (ERP name != software name), Return to Store, Morning summary share
+#  (tables item_aliases / issue_returns are created once in init_db)
+# ------------------------------------------------------------------
+def alias_rows(fac):
+    try:
+        return q_c("SELECT alias_name, alias_norm, sl_no FROM item_aliases WHERE factory_name=%s", (fac,))
+    except Exception:
+        return []
+
+
+def _inject_aliases(idx, rows):
+    """Every learned ERP name points at the real item's index entry, so all imports / lookups match it with no further change."""
+    by_sl = {e["sl"]: e for e in idx["all"]}
+    for a in rows:
+        e, k = by_sl.get(a["sl_no"]), a["alias_norm"]
+        if e and k:
+            lst = idx["name"].setdefault(k, [])
+            if not any(x is e for x in lst):
+                lst.append(e)
+
+
+def _search_inventory(fac, term, limit=100):
+    toks = [t.lower() for t in str(term or "").split() if t.strip()][:6]
+    if not toks:
+        return []
+    hay = "LOWER(COALESCE(item_name,'') || ' ' || COALESCE(size,'') || ' ' || COALESCE(prod_id,'') || ' ' || COALESCE(serial_no,''))"
+    sql = ("SELECT sl_no, COALESCE(prod_id,'') AS prod_id, item_name, COALESCE(size,'') AS size, COALESCE(current_stock,0) AS stock, "
+           "COALESCE(erp_stock,0) AS erp FROM inventory WHERE factory_name=%s AND " + " AND ".join([f"{hay} LIKE %s"] * len(toks))
+           + f" ORDER BY item_name, size LIMIT {int(limit)}")
+    return q_c(sql, [fac] + [f"%{t}%" for t in toks])
+
+
+def _inv_label(r):
+    return f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id'] or '-'} · ERP {float(r['erp']):g} · Physical {float(r['stock']):g}"
+
+
+@tx
+def save_alias(fac, alias_name, sl_no):
+    run("""INSERT INTO item_aliases (factory_name, alias_name, alias_norm, sl_no, created_by, created_at)
+           VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (factory_name, alias_norm, sl_no) DO NOTHING""",
+        (fac, alias_name.strip(), norm_name(alias_name), int(sl_no), st.session_state.get("user", ""),
+         local_now().strftime("%d-%b-%Y %I:%M %p")))
+    audit("ALIAS_ADDED", f"{fac}: ERP name '{alias_name.strip()}' -> SL {sl_no}")
+    return True
+
+
+@tx
+def delete_alias(aid):
+    run("DELETE FROM item_aliases WHERE id=%s", (aid,))
+    audit("ALIAS_DELETED", f"alias id {aid}")
+    return True
+
+
+@tx
+def link_queue_to_item(qr, sl):
+    fac = qr["factory_name"]
+    if not q("SELECT 1 AS x FROM inventory WHERE factory_name=%s AND sl_no=%s", (fac, sl)):
+        raise ValueError("Master item পাওয়া যায়নি")
+    run("UPDATE inventory SET erp_stock=%s WHERE sl_no=%s AND factory_name=%s", (qr["erp_stock"] or 0, sl, fac))
+    run("""INSERT INTO item_aliases (factory_name, alias_name, alias_norm, sl_no, created_by, created_at)
+           VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (factory_name, alias_norm, sl_no) DO NOTHING""",
+        (fac, qr["item_name"], norm_name(qr["item_name"]), int(sl), st.session_state.get("user", ""),
+         local_now().strftime("%d-%b-%Y %I:%M %p")))
+    run("UPDATE import_queue SET status='Linked' WHERE id=%s", (qr["id"],))
+    audit("QUEUE_LINKED", f"{fac}: queue '{qr['item_name']}' [{qr['size']}] linked to SL {sl}; ERP stock {qr['erp_stock']} set")
+    return True
+
+
+def queue_link_panel(r):
+    """Unmatched ERP row -> link to the real item (same item, different name): sets its ERP balance and remembers the name."""
+    k = str(r["id"])
+    if not st.toggle("🔗 Master-এ একই আইটেম আছে (শুধু নাম আলাদা)? লিঙ্ক করুন", key=f"ql_on_{k}"):
+        return
+    fac = r["factory_name"]
+    ns = norm_size(r["size"])
+    inv = q_c("""SELECT sl_no, COALESCE(prod_id,'') AS prod_id, item_name, COALESCE(size,'') AS size,
+                 COALESCE(current_stock,0) AS stock, COALESCE(erp_stock,0) AS erp FROM inventory WHERE factory_name=%s""", (fac,))
+    scored = []
+    for i in inv:
+        if ns and norm_size(i["size"]) != ns:
+            continue
+        s = _name_match_score(r["item_name"], i["item_name"])
+        if s >= 0.55:
+            scored.append((s, i))
+    scored.sort(key=lambda x: -x[0])
+    opts = {f"{int(round(s * 100))}% · {_inv_label(i)}": int(i["sl_no"]) for s, i in scored[:8]}
+    term = st.text_input("অথবা নিজে খুঁজুন (নাম / code)", key=f"ql_term_{k}")
+    for i in _search_inventory(fac, term, 30):
+        opts.setdefault(f"🔎 {_inv_label(i)}", int(i["sl_no"]))
+    if not opts:
+        st.caption("কাছাকাছি কোনো আইটেম পাওয়া যায়নি। নিজে খুঁজে দেখুন, অথবা নিচে নতুন আইটেম হিসেবে Approve করুন।")
+        return
+    pick = st.selectbox("কোন আইটেমের সাথে মিল?", list(opts), key=f"ql_pick_{k}")
+    st.caption(f"লিঙ্ক করলে: ওই আইটেমের ERP balance = {float(r['erp_stock'] or 0):g} হবে, আর ‘{r['item_name']}’ নামটি alias হিসেবে মনে থাকবে।")
+    pw = mgr_check(f"ql_pw_{k}")
+    if st.button("🔗 Link করুন", key=f"ql_btn_{k}", type="primary"):
+        if not guard():
+            return
+        if not pw:
+            st.error("Manager password দিন।")
+        elif link_queue_to_item(r, opts[pick]):
+            done("লিঙ্ক হয়েছে — ERP balance বসেছে ও alias সংরক্ষিত।")
+
+
+def alias_view():
+    st.markdown('<div class="section-title">🔗 Name Alias — ERP-র নাম ↔ সফটওয়্যারের নাম</div>', unsafe_allow_html=True)
+    st.caption("ERP-তে যে নামে আইটেম আছে আর এখানে যে নামে আছে তা আলাদা হলে একবার জুড়ে দিন। পরে ERP Balance import, Requisition import ও Audit-এ ওই নাম নিজে মিলে যাবে।")
+    fac = st.selectbox("Unit", FACTORIES, key="al_fac") if "CONSOLIDATED" in str(FAC) else FAC
+    c1, c2 = st.columns(2)
+    alias = c1.text_input("ERP-তে আইটেমের নাম (alias)", key="al_name")
+    term = c2.text_input("এই সফটওয়্যারের আইটেম খুঁজুন", key="al_term")
+    res = _search_inventory(fac, term, 60)
+    if term.strip() and not res:
+        st.warning("এই নামে আইটেম পাওয়া যায়নি।")
+    if res:
+        labels = {_inv_label(r): int(r["sl_no"]) for r in res}
+        pick = st.selectbox("কোন আইটেম?", list(labels), key="al_pick")
+        if st.button("💾 Alias সংরক্ষণ", key="al_save", type="primary"):
+            if not guard():
+                pass
+            elif not norm_name(alias):
+                st.error("ERP-র নাম লিখুন।")
+            elif save_alias(fac, alias, labels[pick]):
+                done("Alias সংরক্ষিত হয়েছে।")
+    ad = qdf_c("""SELECT a.id, a.alias_name AS "ERP নাম", i.item_name AS "সফটওয়্যারের নাম", COALESCE(i.size,'') AS "Size",
+                  COALESCE(i.prod_id,'') AS "ERP Code", a.created_by AS "কে", a.created_at AS "কখন"
+                  FROM item_aliases a LEFT JOIN inventory i ON i.sl_no=a.sl_no AND i.factory_name=a.factory_name
+                  WHERE a.factory_name=%s ORDER BY a.id DESC""", (fac,))
+    if ad.empty:
+        st.caption("এখনো কোনো alias নেই।")
+        return
+    st.dataframe(ad.drop(columns=["id"]), hide_index=True, use_container_width=True, height=min(80 + 35 * len(ad), 360))
+    with st.expander("🗑 Alias মুছুন"):
+        lab = {f"{r['ERP নাম']}  →  {r['সফটওয়্যারের নাম']} [{r['Size'] or '-'}]": int(r["id"]) for r in ad.to_dict("records")}
+        sel = st.selectbox("কোনটি?", list(lab), key="al_del_sel")
+        pw = mgr_check("al_del_pw")
+        if st.button("🗑 মুছুন", key="al_del_btn"):
+            if not guard():
+                pass
+            elif not pw:
+                st.error("Manager password দিন।")
+            elif delete_alias(lab[sel]):
+                done("Alias মুছে গেছে।")
+
+
+# ---------------- Return to Store ----------------
+RETURN_REASONS = ["অব্যবহৃত — ফেরত", "ভুল Issue হয়েছিল", "ভুল আইটেম/মাপ", "অন্যান্য"]
+
+
+@tx
+def return_to_store(tid, qty, reason, note):
+    rows = q("SELECT * FROM transactions WHERE id=%s FOR UPDATE", (tid,))
+    if not rows:
+        raise ValueError("Issue রেকর্ড পাওয়া যায়নি")
+    t = rows[0]
+    if t["trans_type"] != "Issued":
+        raise ValueError("শুধু সাধারণ Issue ফেরত নেওয়া যায়")
+    cur_q = float(t["qty"] or 0)
+    if qty <= 0 or qty > cur_q + 1e-9:
+        raise ValueError(f"ফেরতের পরিমাণ ০-র বেশি এবং {cur_q:g}-এর মধ্যে হতে হবে")
+    now = local_now()
+    d_s = now.strftime(DATE_FMT)
+    run("UPDATE transactions SET qty=qty-%s, notes=COALESCE(notes,'') || %s WHERE id=%s",
+        (qty, f" [Returned {qty:g} to store on {d_s} by {st.session_state.get('user', '')}: {reason}]", tid))
+    run("UPDATE inventory SET current_stock=COALESCE(current_stock,0)+%s WHERE sl_no=%s AND factory_name=%s",
+        (qty, t["sl_no"], t["factory_name"]))
+    run("""INSERT INTO issue_returns (tx_id, factory_name, sl_no, prod_id, item_name, qty, original_qty, officer_name,
+           return_date, return_time, reason, note, returned_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (tid, t["factory_name"], t["sl_no"], t["prod_id"], t["item_name"], qty, cur_q, t["officer_name"], d_s,
+         now.strftime("%I:%M %p"), reason, note, st.session_state.get("user", "")))
+    audit("RETURN_TO_STORE", f"{t['factory_name']}: {t['item_name']} - {qty:g} returned (issue #{tid} by {t['officer_name']}, was {cur_q:g})")
+    return True
+
+
+def return_to_store_view():
+    st.markdown('<div class="section-title">↩️ Return to Store — Issue হওয়া মাল ফেরত</div>', unsafe_allow_html=True)
+    st.caption("Issue-র মাল ফেরত এলে মূল Issue থেকে ওই পরিমাণ কমে যায় আর স্টকে ফিরে আসে — তাই খরচ, Budget ও Issue Ledger নিজে ঠিক থাকে। শুধু সাধারণ Issue ফেরত নেওয়া যায়।")
+    c1, c2 = st.columns([2, 1])
+    term = c1.text_input("🔍 Item / Officer / Notes খুঁজুন", key="rts_term").strip().lower()
+    days = c2.selectbox("কত দিন আগের Issue", [7, 15, 30, 60, 90], index=2, key="rts_days")
+    today = local_now().date()
+    since = today - timedelta(days=int(days))
+    years = sorted({today.year, since.year})
+    cond = " OR ".join(["date LIKE %s OR date LIKE %s OR date LIKE %s"] * len(years))
+    pats = []
+    for y in years:
+        pats += [f"%-{y}", f"{y}-%", f"%/{y}"]
+    fsql, fp = fw(FAC)
+    df = qdf_c(f"""SELECT id, date, time, factory_name, item_name, qty, officer_name, COALESCE(notes,'') AS notes
+                   FROM transactions WHERE trans_type='Issued' AND qty>0{fsql} AND ({cond}) ORDER BY id DESC LIMIT 1500""", fp + pats)
+    if not df.empty:
+        df["d"] = _parse_dates(df["date"])
+        df = df[df["d"].notna() & (df["d"] >= pd.Timestamp(since))]
+        if term:
+            m = df[["item_name", "officer_name", "notes"]].astype(str).apply(
+                lambda c: c.str.lower().str.contains(term, regex=False)).any(axis=1)
+            df = df[m]
+    if df.empty:
+        st.info("এই সময়ে কোনো Issue পাওয়া যায়নি।")
+    else:
+        view = df.head(150)
+        st.dataframe(view[["id", "date", "time", "factory_name", "item_name", "qty", "officer_name"]], hide_index=True,
+                     use_container_width=True, height=min(80 + 35 * len(view), 330))
+        lab = {f"#{r['id']} · {r['date']} · {r['item_name']} · {float(r['qty']):g} · {r['officer_name']}": r for r in view.to_dict("records")}
+        r = lab[st.selectbox("কোন Issue থেকে ফেরত?", list(lab), key="rts_sel")]
+        k = str(r["id"])
+        cur_q = float(r["qty"])
+        q1, q2 = st.columns([1, 1.5])
+        rq = q1.number_input(f"ফেরতের পরিমাণ (সর্বোচ্চ {cur_q:g})", min_value=0.0, max_value=cur_q, value=min(1.0, cur_q), key=f"rts_q_{k}")
+        reason = q2.selectbox("কারণ", RETURN_REASONS, key=f"rts_r_{k}")
+        note = st.text_input("মন্তব্য (ঐচ্ছিক)", key=f"rts_n_{k}")
+        st.caption("⚠️ ERP-তেও ফেরতের এন্ট্রি দিতে ভুলবেন না, নইলে ERP balance আর Physical মিলবে না।")
+        ok = st.checkbox("নিশ্চিত — এই ফেরত স্টকে যোগ হবে", key=f"rts_ok_{k}")
+        if st.button("↩️ ফেরত নিন", key=f"rts_btn_{k}", type="primary"):
+            if not guard():
+                pass
+            elif not ok:
+                st.error("নিশ্চিত করার টিক দিন।")
+            elif rq <= 0:
+                st.error("পরিমাণ ০-র বেশি হতে হবে।")
+            elif return_to_store(int(r["id"]), float(rq), reason, note.strip()):
+                done(f"{rq:g} ফেরত নেওয়া হয়েছে, স্টকে যোগ হয়েছে।")
+    with st.expander("🗂 আগের ফেরতের তালিকা"):
+        hist = qdf_c(f"""SELECT return_date, return_time, factory_name, item_name, qty, original_qty AS issue_qty_before, officer_name AS issued_to,
+                         reason, note, returned_by FROM issue_returns WHERE 1=1{fsql} ORDER BY id DESC LIMIT 300""", fp)
+        if hist.empty:
+            st.caption("এখনো কোনো ফেরত নেই।")
+        else:
+            st.dataframe(hist, hide_index=True, use_container_width=True, height=min(80 + 35 * len(hist), 340))
+            export_buttons(hist, "issue_returns")
+
+
+# ---------------- Morning summary (WhatsApp / Email share) ----------------
+@tx
+def save_summary_number(num):
+    run("""INSERT INTO req_settings (setting_key, setting_value) VALUES ('summary_wa_number', %s)
+           ON CONFLICT (setting_key) DO UPDATE SET setting_value=EXCLUDED.setting_value""", (num,))
+    return True
+
+
+def _nv(v):
+    return "-" if v is None else str(v)
+
+
+def render_daily_summary_share(stamp=None):
+    """Manager only, off by default (no extra work until switched on). One tap opens WhatsApp / the mail app with the text ready."""
+    if st.session_state.get("role") != "Store Manager":
+        return
+    if not st.toggle("📤 সকালের সারাংশ পাঠান (WhatsApp / Email)", key="dash_sum_on"):
+        return
+    from urllib.parse import quote
+    c = dash_work_counts()
+    today = local_now().date()
+    today_s = today.strftime("%Y-%m-%d")
+    flags = compute_issue_anomalies(c["stamp"], today_s)
+    brows = compute_budget_runout(c["stamp"], today_s)
+    if "CONSOLIDATED" not in str(FAC):
+        flags = [f for f in flags if f["factory"] == FAC]
+        brows = [r for r in brows if r["factory"] == FAC]
+    risky = [r for r in brows if r["status"] in ("over", "runout")]
+    L = [f"📊 {FAC} — {today:%d-%b-%Y}", "", "🗂 আজকের কাজ:",
+         f"• ERP আপডেট বাকি: {_nv(c['erp_n'])} আইটেম",
+         f"• Issue PO Pending: {c['po_issue_n']} (Received PO Pending: {c['po_recv_n']})",
+         f"• ফিজিক্যাল যাচাই বাকি: {_nv(c['verif_n'])} আইটেম",
+         f"• রিভিউয়ের অপেক্ষায় গণনা: {_nv(c['review_n'])}", "", f"⚠️ অস্বাভাবিক Issue (গত {RECENT_ANOM_DAYS} দিন): {len(flags)}"]
+    for f in flags[:3]:
+        L.append(f"• {f['item']} [{f['size'] or '-'}] {f['date']:%d-%b} — {f['reasons'][0]}")
+    L += ["", f"📅 বাজেট সতর্কতা: {len(risky)}"]
+    for r in risky[:5]:
+        L.append(f"• {r['category']}: {_runout_text(r)}")
+    text = "\n".join(L)
+    saved = ""
+    try:
+        s = q_c("SELECT setting_value FROM req_settings WHERE setting_key='summary_wa_number'")
+        saved = s[0]["setting_value"] if s else ""
+    except Exception:
+        pass
+    n1, n2 = st.columns([3, 1])
+    num = n1.text_input("WhatsApp নম্বর (দেশ কোডসহ, যেমন 8801XXXXXXXXX; ফাঁকা রাখলে পরে বেছে নেবেন)", value=saved, key="dash_sum_num")
+    if n2.button("নম্বর সেভ", key="dash_sum_save") and guard(write=False):
+        if save_summary_number(re.sub(r"\D", "", num)):
+            done("নম্বর সংরক্ষিত।")
+    digits = re.sub(r"\D", "", num)
+    st.text_area("সারাংশ (কপি করা যাবে)", text, height=230, key="dash_sum_txt")
+    st.markdown(f"[🟢 WhatsApp-এ পাঠান](https://wa.me/{digits}?text={quote(text)})  ·  "
+                f"[📧 Email-এ পাঠান](mailto:?subject={quote(f'Daily summary - {FAC} - {today:%d-%b-%Y}')}&body={quote(text)})")
+    st.caption("বোতামে চাপলে WhatsApp / Email app নিজে খুলে লেখা বসিয়ে দেবে, আপনাকে শুধু Send চাপতে হবে। নিজে থেকে রোজ সকালে পাঠাতে হলে "
+               "আলাদা WhatsApp Business API বা Email (SMTP) সেটআপ লাগবে।")
 
 
 # ------------------------------------------------------------------
