@@ -2471,6 +2471,7 @@ def tab_dashboard():
         f'</div>',
         unsafe_allow_html=True,
     )
+    render_dashboard_addons()   # NEW: আজকের কাজ card, note board, transfer suggestions (isolated; cannot break the dashboard)
 
     transaction_rows = qdf(f"""SELECT t.factory_name, t.date, t.time, t.trans_type, t.qty, t.item_name,
                        t.officer_name, COALESCE(t.supplier_name,'') AS supplier_name,
@@ -3188,6 +3189,7 @@ def add_item_form():
     code = c1.text_input("ERP Code (blank = temporary)", key="add_code")
     name = c2.text_input("Item Name*", key="add_name")
     size = c3.text_input("Size (optional)", key="add_size", help="Leave blank if the item has no size.")
+    similar_item_alert(FAC, name, size)   # NEW: warns when a very similar item name already exists (never blocks saving)
 
     d1, d2, d3 = st.columns(3)
     dept = d1.selectbox("Department*", list(DEPARTMENTS), key="add_dept", on_change=_dept_changed)
@@ -4395,7 +4397,7 @@ def tab_erp_audit():
     # ---- search bar (filters every list below: tables, adjust, ERP-done selection)
     if st.session_state.get(AUD_VIEW_KEY) not in AUD_VIEWS:
         st.session_state[AUD_VIEW_KEY] = AUD_VIEWS[0]
-    if st.session_state[AUD_VIEW_KEY] in (AUD_PO, AUD_RECV):
+    if st.session_state[AUD_VIEW_KEY] in (AUD_PO, AUD_RECV, AUD_SEP):
         term = ""   # these two views carry their own search bar
     else:
         term = st.text_input("🔍 Search ERP audit records (Item / Serial No / ERP Code / SL No / Factory / Status)",
@@ -4593,6 +4595,8 @@ def tab_erp_audit():
                 if st.button("✔️ Mark ERP PO/GRN Done", key="age_btn"):
                     if mark_grn_receipt(int(rr["id"]), gd.strftime(DATE_FMT)):
                         done("Receipt marked ERP GRN Done.")
+    if aud_sel == AUD_SEP:   # NEW: Short / Excess resolution plan for the audit department
+        short_excess_plan_view(aud, tasks)
 
 
 
@@ -6381,9 +6385,1064 @@ def tab_physical_count():
         return
     t_new, t_res = st.tabs(["➕ New count", "⏳ Waiting / Results"])
     with t_new:
+        count_picks_panel()   # NEW: today's 5 items the system recommends counting
         pc_entry()
     with t_res:
         pc_results_view()
+
+
+# ============================================================
+#  SMART ADD-ONS (v3)  -  ADDITIVE ONLY
+#  1. "আজকের কাজ" card on the Dashboard          2. Today's 5 items to count (Physical Count page)
+#  3. Transfer-instead-of-buy suggestion + form   4. Similar-name warning when adding an item
+#  5. Stock Cover ("আর N দিন চলবে") page          6. Dashboard Note Board
+#  7. Short / Excess resolution plan (ERP Audit -> "🗓 Short/Excess Plan")
+#  Nothing above this block was changed; the old pages only received one-line hooks that call these functions.
+#  Speed: the heavy numbers are cached (keyed by a cheap "data stamp"), every block is wrapped so it can never
+#  break the page it sits on, and the two small new tables are created once per session.
+# ============================================================
+import json
+
+NAV_ISSUE_LEDGER = "📜 Issue Ledger"
+NAV_PHYSICAL = "📱 Physical Count"
+NAV_TRANSACTIONS = "📝 Transactions"
+NAV_STOCK_COVER = "⏳ Stock Cover"
+if NAV_STOCK_COVER not in TAB_NAMES:
+    TAB_NAMES.append(NAV_STOCK_COVER)          # shows up under "Management" in the sidebar automatically
+SC_VIEW_KEY = "sc_view"
+SC_COVER, SC_XFER = "⏳ স্টক কত দিন চলবে", "🔁 ট্রান্সফার (কিনতে হবে না)"
+AUD_SEP = "🗓 Short/Excess Plan"
+if AUD_SEP not in AUD_VIEWS:
+    AUD_VIEWS.append(AUD_SEP)
+USAGE_WINDOW_DAYS = 90
+INTEGER_UOMS = {"pcs", "pc", "pair", "set", "box", "book", "pack", "packet", "roll", "coil", "nos"}
+_BN_DIGITS = str.maketrans("0123456789", "০১২৩৪৫৬৭৮৯")
+
+STAMP_SQL = """(SELECT COALESCE(MAX(id),0) FROM transactions) AS tx_max,
+ (SELECT COUNT(*) FROM transactions) AS tx_n,
+ (SELECT COUNT(*) FROM inter_factory_transfers) AS tf_n,
+ (SELECT COALESCE(MAX(id),0) FROM inter_factory_transfers) AS tf_max,
+ (SELECT ROUND(COALESCE(SUM(COALESCE(current_stock,0)),0)::numeric,3)::float8 FROM inventory WHERE factory_name=%s) AS s_a,
+ (SELECT ROUND(COALESCE(SUM(COALESCE(current_stock,0)),0)::numeric,3)::float8 FROM inventory WHERE factory_name=%s) AS s_b,
+ (SELECT ROUND(COALESCE(SUM(COALESCE(erp_stock,0)),0)::numeric,3)::float8 FROM inventory) AS erp_sum,
+ (SELECT COUNT(*) FROM inventory) AS inv_n"""
+STAMP_KEYS = ("tx_max", "tx_n", "tf_n", "tf_max", "s_a", "s_b", "erp_sum", "inv_n")
+
+
+def bn(x):
+    """Bengali digits for display text."""
+    return str(x).translate(_BN_DIGITS)
+
+
+def short_fac(f):
+    return str(f or "").split()[0] if f else "-"
+
+
+def _full_rerun():
+    """Rerun the whole app even when called from inside a fragment (older Streamlit has no `scope` argument)."""
+    try:
+        st.rerun(scope="app")
+    except TypeError:
+        st.rerun()
+
+
+def go_page(label, aud_view=None):
+    """Button callback: jump to another page (the callback ends in a full rerun, so the sidebar follows)."""
+    st.session_state[NAV_KEY] = label
+    if aud_view:
+        st.session_state[AUD_VIEW_KEY] = aud_view
+
+
+def _parse_dates(series):
+    """Fast, tolerant parsing of a text date column (DD-Mon-YYYY first, then every format parse_date knows)."""
+    s = series.astype(str).str.strip()
+    out = pd.to_datetime(s, format=DATE_FMT, errors="coerce")
+    miss = out.isna()
+    if miss.any():
+        out.loc[miss] = pd.to_datetime(s[miss].apply(parse_date), errors="coerce")
+    return out
+
+
+def ensure_addon_tables():
+    """One small table for the Note Board, created once per session (additive; nothing existing is touched)."""
+    if st.session_state.get("_addon_tables_ready"):
+        return
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS dash_notes (
+                id SERIAL PRIMARY KEY, for_unit TEXT DEFAULT 'Both', note TEXT, created_by TEXT, created_at TEXT,
+                status TEXT DEFAULT 'Open', done_by TEXT, done_at TEXT)""")
+        conn.commit()
+        st.session_state["_addon_tables_ready"] = True
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _stamp_params():
+    return [FACTORIES[0], FACTORIES[1]]
+
+
+def data_stamp():
+    """One cheap query. Any new transaction / transfer / stock change gives a new stamp, which refreshes the caches."""
+    r = q(f"SELECT {STAMP_SQL}", _stamp_params())[0]
+    return tuple(r[k] for k in STAMP_KEYS)
+
+
+# ------------------------------------------------------------------
+#  1. "আজকের কাজ" card
+# ------------------------------------------------------------------
+@st.cache_data(ttl=300, show_spinner=False)
+def _verif_due(fac, stamp, today_s):
+    """Items whose physical verification is overdue (same rule as verification_needed(), worked out for all items at once)."""
+    fsql, fp = fw(fac)
+    today = datetime.strptime(today_s, "%Y-%m-%d").date()
+    df = qdf(f"""SELECT factory_name, sl_no, date, COALESCE(verification_status,'') AS vs FROM transactions
+                 WHERE trans_type IN ('Issued','Internal Issue') AND date IS NOT NULL{fsql}""", fp)
+    cols = ["factory_name", "sl_no", "item_name", "size", "prod_id", "days", "since"]
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    df["d"] = _parse_dates(df["date"])
+    df = df[df["d"].notna() & (df["d"].dt.date < today)].copy()
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    keys = ["factory_name", "sl_no"]
+    df["phys"] = df["vs"].astype(str).str.startswith("Physically")
+    last_phys = df[df["phys"]].groupby(keys)["d"].max().rename("last_phys")
+    df = df.join(last_phys, on=keys)
+    pending = df[(~df["phys"]) & (df["last_phys"].isna() | (df["d"] > df["last_phys"]))]
+    if pending.empty:
+        return pd.DataFrame(columns=cols)
+    first = pending.groupby(keys)["d"].min().rename("since_ts").reset_index()
+    first["days"] = (pd.Timestamp(today) - first["since_ts"]).dt.days
+    first = first[first["days"] >= VERIFY_AFTER_DAYS]
+    if first.empty:
+        return pd.DataFrame(columns=cols)
+    inv = qdf(f"SELECT factory_name, sl_no, item_name, COALESCE(size,'') AS size, prod_id FROM inventory WHERE 1=1{fsql}", fp)
+    out = first.merge(inv, on=keys, how="left")
+    out["since"] = out["since_ts"].dt.strftime(DATE_FMT)
+    return out.sort_values("days", ascending=False)[cols].reset_index(drop=True)
+
+
+def dash_work_counts():
+    """All four 'today' numbers with ONE database round trip (+ one cached calculation for the verification list)."""
+    erp_ok = counts_ok = True
+    try:
+        ensure_erp_track_columns()
+    except Exception:
+        erp_ok = False
+    try:
+        ensure_count_tables()
+    except Exception:
+        counts_ok = False
+    fsql_i, fp_i = fw(FAC, "i.")
+    fsql_t, fp_t = fw(FAC, "t.")
+    recv_types = "('Supplier. Rec','Internal Rec','Stock Adjustment (+)')"
+    parts, params = [], []
+    if erp_ok:
+        parts.append(f"""(SELECT COUNT(*) FROM inventory i WHERE EXISTS (SELECT 1 FROM transactions t
+                 WHERE t.factory_name=i.factory_name AND t.sl_no=i.sl_no AND t.trans_type IN ('Issued','Internal Issue')
+                 AND t.id > COALESCE(i.erp_upto_tx,0)){fsql_i}) AS erp_n""")
+        params += fp_i
+    else:
+        parts.append("(SELECT NULL::int) AS erp_n")
+    parts.append(f"(SELECT COUNT(*) {PO_FROM} WHERE {PO_WHERE} AND t.trans_type NOT IN {recv_types}{fsql_t}) AS po_issue_n")
+    params += fp_t
+    parts.append(f"(SELECT COUNT(*) {PO_FROM} WHERE {PO_WHERE} AND t.trans_type IN {recv_types}{fsql_t}) AS po_recv_n")
+    params += fp_t
+    if counts_ok:
+        parts.append(f"(SELECT COUNT(*) FROM stock_counts WHERE status='Waiting'{FSQL}) AS review_n")
+        params += FP
+    else:
+        parts.append("(SELECT NULL::int) AS review_n")
+    parts.append(STAMP_SQL)
+    params += _stamp_params()
+    r = q("SELECT " + ",\n".join(parts), params)[0]
+    stamp = tuple(r[k] for k in STAMP_KEYS)
+    today_s = local_now().strftime("%Y-%m-%d")
+    try:
+        vdf = _verif_due(FAC, stamp, today_s)
+    except Exception:
+        vdf = None
+    return {"erp_n": r["erp_n"], "po_issue_n": int(r["po_issue_n"] or 0), "po_recv_n": int(r["po_recv_n"] or 0),
+            "review_n": r["review_n"], "verif_n": (len(vdf) if vdf is not None else None), "verif_df": vdf,
+            "stamp": stamp, "today_s": today_s}
+
+
+def render_today_work_card():
+    st.markdown('<div class="section-title">আজকের কাজ</div>', unsafe_allow_html=True)
+    c = dash_work_counts()
+    cards = [
+        ("ERP আপডেট বাকি", c["erp_n"], "আইটেম", "Issue-এর পর ERP balance বসানো হয়নি",
+         NAV_ISSUE_LEDGER, None, "Issue Ledger খুলুন →"),
+        ("Issue PO Pending", c["po_issue_n"], "টি", f"Received PO Pending: {c['po_recv_n']}",
+         NAV_ERP_AUDIT, AUD_PO, "ERP PO Pending খুলুন →"),
+        ("ফিজিক্যাল যাচাই বাকি", c["verif_n"], "আইটেম", f"{VERIFY_AFTER_DAYS} দিন ধরে যাচাই ছাড়া Issue চলছে",
+         NAV_TRANSACTIONS, None, "Transactions খুলুন →"),
+        ("রিভিউয়ের অপেক্ষায় গণনা", c["review_n"], "টি", "Physical Count — Manager review বাকি",
+         NAV_PHYSICAL, None, "Physical Count খুলুন →"),
+    ]
+    cols = st.columns(4, gap="small")
+    total = 0
+    for i, (col, (title, n, unit, hint, page, view, btn)) in enumerate(zip(cols, cards)):
+        with col:
+            with st.container(border=True):
+                shown = "—" if n is None else f"{int(n):,}"
+                color = "#94A3B8" if n is None else ("#16A34A" if int(n) == 0 else "#DC2626")
+                total += int(n or 0)
+                st.markdown(
+                    f'<div style="font-size:11.5px;font-weight:800;color:#64748B;letter-spacing:.3px;">{html_lib.escape(title)}</div>'
+                    f'<div style="font-size:34px;font-weight:800;color:{color};line-height:1.2;">{shown}'
+                    f'<span style="font-size:13px;color:#64748B;font-weight:600;"> {unit}</span></div>'
+                    f'<div style="font-size:12px;color:#64748B;margin-bottom:6px;">{html_lib.escape(hint)}</div>',
+                    unsafe_allow_html=True)
+                st.button(btn if (n is None or int(n) > 0) else "খুলুন →", key=f"tw_go_{i}", on_click=go_page,
+                          args=(page, view), use_container_width=True,
+                          type="primary" if (n is not None and int(n) > 0) else "secondary")
+    if total == 0:
+        st.success("🎉 আজকের জন্য কোনো বাকি কাজ নেই।")
+    else:
+        st.caption(f"মোট বাকি কাজ: {total:,} · কার্ডের বোতামে ক্লিক করলে সরাসরি ওই পেজে যাবে।")
+    vdf = c["verif_df"]
+    if vdf is not None and not vdf.empty:
+        with st.expander(f"🔎 ফিজিক্যাল যাচাই বাকি আইটেমগুলো ({len(vdf)})"):
+            show = vdf.head(60).rename(columns={"factory_name": "Factory", "sl_no": "SL No", "item_name": "Item",
+                                                "size": "Size", "prod_id": "ERP Code", "days": "Days since first unverified issue",
+                                                "since": "First unverified issue"})
+            st.dataframe(show, hide_index=True, use_container_width=True, height=min(60 + 35 * len(show), 320))
+            if len(vdf) > 60:
+                st.caption(f"প্রথম 60টি দেখানো হলো (মোট {len(vdf)})।")
+    return c["stamp"]
+
+
+# ------------------------------------------------------------------
+#  Stock cover data (shared by Stock Cover page, transfer suggestions and the 5-item picker)
+# ------------------------------------------------------------------
+def _ident(code, name, size):
+    c = str(code or "").strip().upper()
+    if c and not is_blank_code(c) and not c.startswith("TEMP-"):
+        return f"E|{c}|{norm_size(size)}"
+    return f"N|{norm_name(name)}|{norm_size(size)}"
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cover_base(stamp, today_s):
+    today = datetime.strptime(today_s, "%Y-%m-%d").date()
+    inv = qdf("""SELECT factory_name, sl_no, COALESCE(prod_id,'') AS prod_id, COALESCE(item_name,'') AS item_name,
+                 COALESCE(size,'') AS size, COALESCE(serial_no,'') AS serial_no,
+                 COALESCE(NULLIF(unit_name,''),'Pcs') AS unit, COALESCE(current_stock,0) AS stock,
+                 COALESCE(erp_stock,0) AS erp, COALESCE(unit_price,0) AS price, COALESCE(department,'') AS department,
+                 COALESCE(min_stock,0) AS min_stock
+                 FROM inventory WHERE factory_name = ANY(%s)""", (FACTORIES,))
+    if inv.empty:
+        return inv
+    since = today - timedelta(days=USAGE_WINDOW_DAYS)
+    years = sorted({today.year, since.year})
+    cond = " OR ".join(["date LIKE %s OR date LIKE %s OR date LIKE %s"] * len(years))
+    pats = []
+    for y in years:
+        pats += [f"%-{y}", f"{y}-%", f"%/{y}"]
+    iss = qdf(f"""SELECT factory_name, sl_no, date, qty FROM transactions
+                  WHERE trans_type IN ('Issued','Internal Issue') AND factory_name = ANY(%s) AND ({cond})""",
+              [FACTORIES] + pats)
+    keys = ["factory_name", "sl_no"]
+    if not iss.empty:
+        iss["d"] = _parse_dates(iss["date"])
+        iss["qty"] = pd.to_numeric(iss["qty"], errors="coerce").fillna(0.0)
+        iss = iss[(iss["d"] >= pd.Timestamp(since)) & (iss["d"] <= pd.Timestamp(today))]
+    if not iss.empty:
+        agg = iss.groupby(keys).agg(q90=("qty", "sum"), n90=("qty", "size"), last_issue=("d", "max")).reset_index()
+        df = inv.merge(agg, on=keys, how="left")
+    else:
+        df = inv.copy()
+        df["q90"], df["n90"], df["last_issue"] = 0.0, 0, pd.NaT
+    df["q90"] = pd.to_numeric(df["q90"], errors="coerce").fillna(0.0)
+    df["n90"] = pd.to_numeric(df["n90"], errors="coerce").fillna(0).astype(int)
+    for col in ("stock", "erp", "price", "min_stock"):
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    df["avg_daily"] = df["q90"] / float(USAGE_WINDOW_DAYS)
+    df["cover_days"] = float("nan")
+    has_use = df["avg_daily"] > 0
+    df.loc[has_use & (df["stock"] > 0), "cover_days"] = df["stock"] / df["avg_daily"]
+    df.loc[has_use & (df["stock"] <= 0), "cover_days"] = 0.0
+    df["last_issue"] = pd.to_datetime(df["last_issue"], errors="coerce")
+    df["ident"] = [_ident(c, n, s) for c, n, s in zip(df["prod_id"], df["item_name"], df["size"])]
+    return df
+
+
+def load_cover_df(stamp=None):
+    stamp = stamp or data_stamp()
+    return _cover_base(stamp, local_now().strftime("%Y-%m-%d"))
+
+
+def cover_label(stock, avg_daily, cover):
+    if avg_daily <= 0:
+        return f"ব্যবহার নেই ({bn(USAGE_WINDOW_DAYS)} দিনে)"
+    if stock <= 0:
+        return "স্টক শেষ"
+    if cover >= 365:
+        return "১ বছরের বেশি চলবে"
+    d = int(math.floor(cover))
+    return "১ দিনেরও কম চলবে" if d < 1 else f"আর {bn(d)} দিন চলবে"
+
+
+def cover_style(stock, avg_daily, cover):
+    """(background, text) colours: red <= 7 days, orange <= 15, yellow <= 30, green above, grey = no recent use."""
+    if avg_daily <= 0:
+        return "#F1F5F9", "#64748B"
+    if stock <= 0:
+        return "#FECACA", "#7F1D1D"
+    if cover <= 7:
+        return "#FEE2E2", "#B91C1C"
+    if cover <= 15:
+        return "#FFEDD5", "#C2410C"
+    if cover <= 30:
+        return "#FEF9C3", "#854D0E"
+    return "#DCFCE7", "#166534"
+
+
+# ------------------------------------------------------------------
+#  3. Transfer instead of buy
+# ------------------------------------------------------------------
+def compute_transfer_suggestions(df, low_days=15, src_keep_days=45, dst_target_days=30):
+    """Unit A runs out soon (<= low_days of cover, or at/below its minimum) while unit B holds more than it needs for
+    src_keep_days: suggest moving enough to give A about dst_target_days, never taking B below its own safe level."""
+    if df is None or df.empty:
+        return []
+    a = df[df["factory_name"] == FACTORIES[0]]
+    b = df[df["factory_name"] == FACTORIES[1]]
+    a = a[~a["ident"].duplicated(keep=False)]
+    b = b[~b["ident"].duplicated(keep=False)]
+    if a.empty or b.empty:
+        return []
+    fields = ("factory_name", "sl_no", "prod_id", "item_name", "size", "unit", "stock", "price", "min_stock", "avg_daily")
+    out = []
+    for r in a.merge(b, on="ident", suffixes=("_a", "_b")).to_dict("records"):
+        sides = [{k: r[f"{k}_{s}"] for k in fields} for s in ("a", "b")]
+        if str(sides[0]["unit"]).strip().lower() != str(sides[1]["unit"]).strip().lower():
+            continue
+        best = None
+        for dst, src in ((sides[0], sides[1]), (sides[1], sides[0])):
+            if src["stock"] <= 0:
+                continue
+            low = False
+            dcov = None
+            if dst["avg_daily"] > 0:
+                dcov = dst["stock"] / dst["avg_daily"] if dst["stock"] > 0 else 0.0
+                low = dcov <= low_days
+            if dst["min_stock"] > 0 and dst["stock"] <= dst["min_stock"]:
+                low = True
+            if not low:
+                continue
+            need = max(dst["avg_daily"] * dst_target_days, dst["min_stock"]) - dst["stock"]
+            free = src["stock"] - max(src["avg_daily"] * src_keep_days, src["min_stock"])
+            if need <= 0 or free <= 0:
+                continue
+            qty = min(need, free)
+            integer = str(dst["unit"]).strip().lower() in INTEGER_UOMS
+            qty = float(math.floor(qty + 1e-9)) if integer else round(qty, 2)
+            if qty < (1 if integer else 0.01):
+                continue
+            price = dst["price"] or src["price"] or 0.0
+            sug = {"item_name": dst["item_name"], "size": dst["size"], "prod_id": dst["prod_id"], "unit": dst["unit"],
+                   "dst_factory": dst["factory_name"], "dst_sl": int(dst["sl_no"]), "dst_stock": dst["stock"], "dst_cover": dcov,
+                   "src_factory": src["factory_name"], "src_sl": int(src["sl_no"]), "src_stock": src["stock"],
+                   "src_prod_id": src["prod_id"], "src_item_name": src["item_name"],
+                   "src_cover_after": ((src["stock"] - qty) / src["avg_daily"]) if src["avg_daily"] > 0 else None,
+                   "qty": qty, "saved_value": qty * price}
+            if best is None or sug["saved_value"] > best["saved_value"]:
+                best = sug
+        if best:
+            out.append(best)
+    out.sort(key=lambda s: (s["dst_cover"] if s["dst_cover"] is not None else 999.0, -s["saved_value"]))
+    return out
+
+
+def suggestion_text(s):
+    cov = ("স্টক শেষ" if (s["dst_cover"] is not None and s["dst_stock"] <= 0)
+           else (f"আর {bn(int(s['dst_cover']))} দিনের স্টক" if s["dst_cover"] is not None else "ন্যূনতম স্টকের নিচে"))
+    return (f"**{s['item_name']}** [{s['size'] or '-'}] — {short_fac(s['dst_factory'])}-এ {cov} ({s['dst_stock']:g} {s['unit']}), "
+            f"{short_fac(s['src_factory'])}-এ {s['src_stock']:g} {s['unit']} আছে → "
+            f"**{s['qty']:g} {s['unit']} ট্রান্সফার করুন, কিনতে হবে না।**")
+
+
+def _open_xfer(sug):
+    st.session_state["xfer_sug"] = sug
+    st.session_state[SC_VIEW_KEY] = SC_XFER
+    st.session_state[NAV_KEY] = NAV_STOCK_COVER
+
+
+def _open_xfer_list():
+    st.session_state[SC_VIEW_KEY] = SC_XFER
+    st.session_state[NAV_KEY] = NAV_STOCK_COVER
+
+
+def _sug_for_view(sugs):
+    if "CONSOLIDATED" in str(FAC):
+        return sugs
+    return [s for s in sugs if FAC in (s["dst_factory"], s["src_factory"])]
+
+
+def render_dash_transfer_hint(stamp):
+    df = load_cover_df(stamp)
+    sugs = _sug_for_view(compute_transfer_suggestions(df))
+    if not sugs:
+        return
+    st.markdown('<div class="section-title">🔁 ট্রান্সফার করুন, কিনতে হবে না</div>', unsafe_allow_html=True)
+    for i, s in enumerate(sugs[:3]):
+        with st.container(border=True):
+            c1, c2 = st.columns([3.2, 1], vertical_alignment="center")
+            c1.markdown(suggestion_text(s))
+            c2.button("ট্রান্সফার ফর্ম খুলুন →", key=f"dx_open_{i}", on_click=_open_xfer, args=(s,),
+                      use_container_width=True, type="primary")
+    if len(sugs) > 3:
+        st.button(f"সব {len(sugs)}টি প্রস্তাব দেখুন →", key="dx_all", on_click=_open_xfer_list)
+
+
+@tx
+def do_manual_transfer(sug, qty, date_s, note, leave_note):
+    """Moves stock between the two units exactly like the existing auto-transfer (same table, same note format, so
+    Transfer History can edit / reverse it). Stock is re-read and locked here; ERP balances are not touched."""
+    src = run("SELECT COALESCE(current_stock,0) FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE",
+              (sug["src_sl"], sug["src_factory"]))
+    dst = run("SELECT COALESCE(current_stock,0) FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE",
+              (sug["dst_sl"], sug["dst_factory"]))
+    if not src or not dst:
+        st.error("Item ar paoa jacche na. Page refresh kore abar chesta korun.")
+        return False
+    live = float(src[0][0] or 0)
+    if qty <= 0 or qty > live + 1e-9:
+        st.error(f"{short_fac(sug['src_factory'])}-e ekhon stock {live:g} - {qty:g} transfer kora jabe na.")
+        return False
+    now = local_now()
+    ref_no = f"TRF-{now:%Y%m%d%H%M%S%f}"
+    user = st.session_state.get("user", "")
+    run("UPDATE inventory SET current_stock=current_stock-%s WHERE sl_no=%s AND factory_name=%s",
+        (qty, sug["src_sl"], sug["src_factory"]))
+    run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s",
+        (qty, sug["dst_sl"], sug["dst_factory"]))
+    notes = f"{(note or 'Transfer (system suggestion: no purchase needed)').strip()} (source item: {sug['src_item_name']} [{sug['src_prod_id']}])"
+    run("""INSERT INTO inter_factory_transfers (transfer_ref, source_factory, dest_factory, prod_id, item_name, qty,
+           transfer_date, transfer_time, initiated_by, status, notes) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'Completed',%s)""",
+        (ref_no, sug["src_factory"], sug["dst_factory"], sug["prod_id"], sug["item_name"], qty, date_s,
+         now.strftime("%I:%M %p"), user, notes))
+    if leave_note:
+        run("""INSERT INTO dash_notes (for_unit, note, created_by, created_at, status) VALUES ('Both',%s,%s,%s,'Open')""",
+            (f"ERP-te transfer entry din: {sug['item_name']} [{sug['size'] or '-'}] {qty:g} {sug['unit']} "
+             f"({short_fac(sug['src_factory'])} -> {short_fac(sug['dst_factory'])}), ref {ref_no}", user,
+             now.strftime("%d-%b-%Y %I:%M %p")))
+    audit("MANUAL_TRANSFER", f"{qty:g} {sug['unit']} of {sug['item_name']} {sug['src_factory']} -> {sug['dst_factory']} ({ref_no})")
+    return ref_no
+
+
+def transfer_form(sug):
+    with st.container(border=True):
+        st.markdown(f"#### 🔁 ট্রান্সফার ফর্ম — {sug['item_name']} [{sug['size'] or '-'}]")
+        live = q("""SELECT factory_name, COALESCE(current_stock,0) AS stock FROM inventory
+                    WHERE (sl_no=%s AND factory_name=%s) OR (sl_no=%s AND factory_name=%s)""",
+                 (sug["src_sl"], sug["src_factory"], sug["dst_sl"], sug["dst_factory"]))
+        live_map = {r["factory_name"]: float(r["stock"] or 0) for r in live}
+        src_live = live_map.get(sug["src_factory"], 0.0)
+        m1, m2, m3 = st.columns(3)
+        m1.metric(f"থেকে: {short_fac(sug['src_factory'])}", f"{src_live:g} {sug['unit']}")
+        m2.metric(f"এখন: {short_fac(sug['dst_factory'])}", f"{live_map.get(sug['dst_factory'], 0.0):g} {sug['unit']}")
+        m3.metric("প্রস্তাবিত পরিমাণ", f"{sug['qty']:g} {sug['unit']}")
+        if src_live <= 0:
+            st.error("Source unit-e ekhon stock nei - transfer kora jabe na.")
+        integer = str(sug["unit"]).strip().lower() in INTEGER_UOMS
+        sid = f"{sug['src_sl']}_{sug['dst_sl']}_{sug['src_factory'][:2]}"
+        top = max(src_live, 0.0)
+        default = min(float(sug["qty"]), top) if top > 0 else 0.0
+        c1, c2 = st.columns(2)
+        qty = c1.number_input("ট্রান্সফার পরিমাণ", min_value=0.0, max_value=top if top > 0 else None, value=default,
+                              step=1.0 if integer else 0.5, key=f"xf_qty_{sid}")
+        tdate = c2.date_input("তারিখ", value=local_now().date(), max_value=local_now().date(), key=f"xf_date_{sid}")
+        note = st.text_input("Remarks (optional)", key=f"xf_note_{sid}", placeholder="e.g. Windy-te bearing sesh, KC-te beshi")
+        leave = st.checkbox("📌 Note Board-e reminder rakhun: ERP-te transfer entry din", value=True, key=f"xf_leave_{sid}")
+        b1, b2 = st.columns(2)
+        if b1.button("✅ ট্রান্সফার নিশ্চিত করুন", type="primary", key="xf_go", use_container_width=True,
+                     disabled=(src_live <= 0 or qty <= 0)):
+            if guard():
+                res = do_manual_transfer(sug, float(qty), tdate.strftime(DATE_FMT), note, leave)
+                if res:
+                    _cover_base.clear()
+                    st.session_state.pop("xfer_sug", None)
+                    done(f"Transfer hoyeche: {float(qty):g} {sug['unit']} {short_fac(sug['src_factory'])} → "
+                         f"{short_fac(sug['dst_factory'])} (stock duto unit-e update).")
+        if b2.button("✖ বাতিল", key="xf_cancel", use_container_width=True):
+            st.session_state.pop("xfer_sug", None)
+            _full_rerun()
+        st.caption("ERP balance eikhane change hoy na - ERP-te transfer entry alada kore dite hobe.")
+
+
+# ------------------------------------------------------------------
+#  5. Stock Cover page
+# ------------------------------------------------------------------
+def tab_stock_cover():
+    st.title("⏳ Stock Cover")
+    st.caption(f"প্রতিটি আইটেমের বর্তমান স্টক ও গত {USAGE_WINDOW_DAYS} দিনের গড় Issue দেখে কত দিন চলবে — "
+               "সবচেয়ে আগে ফুরাবে এমন আইটেম সবার ওপরে।")
+    if st.session_state.get(SC_VIEW_KEY) not in (SC_COVER, SC_XFER):
+        st.session_state[SC_VIEW_KEY] = SC_COVER
+    view = st.radio("View", [SC_COVER, SC_XFER], key=SC_VIEW_KEY, horizontal=True, label_visibility="collapsed")
+    df = load_cover_df()
+    if df is None or df.empty:
+        st.info("Inventory khali.")
+        return
+    if view == SC_XFER:
+        sugs = _sug_for_view(compute_transfer_suggestions(df))
+        pick = st.session_state.get("xfer_sug")
+        if pick:
+            transfer_form(pick)
+        st.markdown('<div class="section-title">সিস্টেমের প্রস্তাব · এক ইউনিটে ঘাটতি, অন্য ইউনিটে বাড়তি</div>', unsafe_allow_html=True)
+        st.caption("Rule: যে ইউনিটে ১৫ দিনের কম স্টক (বা ন্যূনতম স্টকের নিচে), আর অন্য ইউনিটে নিজের ৪৫ দিনের চাহিদার পরেও বাড়তি আছে "
+                   "— শুধু তখনই প্রস্তাব আসে। একই ERP code/নাম + একই size + একই UOM হলেই মিলানো হয়।")
+        if not sugs:
+            st.success("এখন কোনো ট্রান্সফার প্রস্তাব নেই।")
+            return
+        st.metric("সম্ভাব্য সাশ্রয় (না কিনলে)", f"৳{sum(s['saved_value'] for s in sugs):,.0f}", f"{len(sugs)}টি আইটেম")
+        for i, s in enumerate(sugs[:100]):
+            with st.container(border=True):
+                c1, c2 = st.columns([3.2, 1], vertical_alignment="center")
+                c1.markdown(suggestion_text(s))
+                c2.button("ফর্ম খুলুন →", key=f"sc_open_{i}", on_click=_open_xfer, args=(s,), use_container_width=True)
+        return
+
+    d = df if "CONSOLIDATED" in str(FAC) else df[df["factory_name"] == FAC]
+    f1, f2, f3 = st.columns([2.2, 1.2, 1.4])
+    term = f1.text_input("🔍 Search (Item / ERP code / serial / size)", key="sc_search")
+    horizon = f2.selectbox("দেখান", ["৩০ দিনের মধ্যে ফুরাবে", "৯০ দিনের মধ্যে ফুরাবে", "সব (ব্যবহার আছে)"], key="sc_horizon")
+    show_unused = f3.checkbox(f"{USAGE_WINDOW_DAYS} দিনে ব্যবহার নেই এমনও দেখান", key="sc_unused")
+    t = term.strip().lower()
+    if t:
+        m = d[["item_name", "prod_id", "serial_no", "size"]].astype(str).apply(
+            lambda c: c.str.lower().str.contains(t, regex=False)).any(axis=1)
+        d = d[m]
+    used = d[d["avg_daily"] > 0]
+    k = st.columns(4)
+    k[0].metric("🔴 ৭ দিনের মধ্যে", int((used["cover_days"] <= 7).sum()))
+    k[1].metric("🟠 ৮–১৫ দিন", int(((used["cover_days"] > 7) & (used["cover_days"] <= 15)).sum()))
+    k[2].metric("🟡 ১৬–৩০ দিন", int(((used["cover_days"] > 15) & (used["cover_days"] <= 30)).sum()))
+    k[3].metric("⚪ ব্যবহার নেই", int((d["avg_daily"] <= 0).sum()))
+    limit = {"৩০ দিনের মধ্যে ফুরাবে": 30, "৯০ দিনের মধ্যে ফুরাবে": 90}.get(horizon)
+    v = used if limit is None else used[used["cover_days"] <= limit]
+    if show_unused:
+        v = pd.concat([v, d[d["avg_daily"] <= 0]])
+    v = v.copy()
+    v["_sort"] = v["cover_days"].fillna(1e9)
+    v = v.sort_values(["_sort", "item_name"]).head(500).reset_index(drop=True)
+    if v.empty:
+        st.success("এই ফিল্টারে কোনো আইটেম নেই।")
+        return
+    labels = [cover_label(r.stock, r.avg_daily, r.cover_days) for r in v.itertuples()]
+    css = []
+    for r in v.itertuples():
+        bg, fg = cover_style(r.stock, r.avg_daily, r.cover_days)
+        css.append(f"background-color:{bg};color:{fg};font-weight:700")
+    out = pd.DataFrame({"Factory": v["factory_name"], "ERP Code": v["prod_id"], "Item": v["item_name"], "Size": v["size"],
+                        "Stock": v["stock"], "UOM": v["unit"], "গড় Issue / দিন": v["avg_daily"].round(2),
+                        "চলবে": labels, "Days left": v["cover_days"].round(1), "Last issue": v["last_issue"].dt.strftime(DATE_FMT)})
+    if "CONSOLIDATED" not in str(FAC):
+        out = out.drop(columns=["Factory"])
+    styled = out.style.apply(lambda col: css if col.name == "চলবে" else [""] * len(col), axis=0)
+    st.dataframe(styled, hide_index=True, use_container_width=True, height=520)
+    st.caption(f"গণনা: বর্তমান Physical stock ÷ গত {USAGE_WINDOW_DAYS} দিনের গড় দৈনিক Issue (Issued + Internal Issue)। "
+               "রং: 🔴 ≤৭ দিন · 🟠 ≤১৫ · 🟡 ≤৩০ · 🟢 তার বেশি · ধূসর = ব্যবহার নেই। নতুন আইটেমে হিসাব কম নির্ভরযোগ্য।")
+    export_buttons(out, "stock_cover")
+
+
+# ------------------------------------------------------------------
+#  2. Today's 5 items to count (shown on the Physical Count page)
+# ------------------------------------------------------------------
+def compute_count_picks(fac, stamp, today, n=5):
+    """Risk score = 30% item value, 25% how often it is issued, 25% past Short/Excess history, 20% days since last count."""
+    base = _cover_base(stamp, today.strftime("%Y-%m-%d"))
+    if base is None or base.empty:
+        return []
+    d = base[(base["factory_name"] == fac) & (base["stock"] > 0)].copy()
+    if d.empty:
+        return []
+    d["value"] = d["stock"] * d["price"]
+    d["v_pct"] = d["value"].rank(pct=True)
+    d.loc[d["value"] <= 0, "v_pct"] = 0.0
+    d["i_pct"] = d["n90"].rank(pct=True)
+    d.loc[d["n90"] <= 0, "i_pct"] = 0.0
+    hist = qdf("""SELECT sci.sl_no, sci.system_qty, sci.counted_qty, sc.counted_at FROM stock_count_items sci
+                  JOIN stock_counts sc ON sc.id=sci.count_id WHERE sci.factory_name=%s""", (fac,))
+    if hist.empty:
+        d["n_counts"], d["n_diff"], d["last_count"] = 0, 0, pd.NaT
+    else:
+        hist["diff"] = ((pd.to_numeric(hist["counted_qty"], errors="coerce").fillna(0)
+                         - pd.to_numeric(hist["system_qty"], errors="coerce").fillna(0)).abs() >= 1e-9).astype(int)
+        hist["cd"] = pd.to_datetime(hist["counted_at"].astype(str).str[:11], format=DATE_FMT, errors="coerce")
+        h = hist.groupby("sl_no").agg(n_counts=("diff", "size"), n_diff=("diff", "sum"), last_count=("cd", "max")).reset_index()
+        d = d.merge(h, on="sl_no", how="left")
+    d["last_count"] = pd.to_datetime(d["last_count"], errors="coerce")
+    d["n_counts"] = pd.to_numeric(d["n_counts"], errors="coerce").fillna(0).astype(int)
+    d["n_diff"] = pd.to_numeric(d["n_diff"], errors="coerce").fillna(0).astype(int)
+    tasks = qdf("SELECT prod_id, COUNT(*) AS task_n FROM audit_correction_tasks WHERE factory_name=%s GROUP BY prod_id", (fac,))
+    d = d.merge(tasks, on="prod_id", how="left") if not tasks.empty else d.assign(task_n=0)
+    d["task_n"] = pd.to_numeric(d["task_n"], errors="coerce").fillna(0).astype(int)
+    d.loc[d["prod_id"].astype(str).str.upper().str.startswith("TEMP-") | d["prod_id"].astype(str).str.strip().eq(""), "task_n"] = 0
+    today_ts = pd.Timestamp(today)
+    d["age"] = (today_ts - d["last_count"]).dt.days
+    d["age"] = d["age"].fillna(180).clip(lower=0, upper=180)
+    d["erp_gap"] = (d["stock"] - d["erp"]).abs() > 1e-9
+    d["hist"] = (d["n_diff"].clip(upper=3) / 3.0) * 0.6 + d["erp_gap"].astype(float) * 0.25 + (d["task_n"] > 0).astype(float) * 0.15
+    d["score"] = 0.30 * d["v_pct"] + 0.25 * d["i_pct"] + 0.25 * d["hist"] + 0.20 * (d["age"] / 180.0)
+    d = d.sort_values(["score", "value"], ascending=False).head(n)
+    picks = []
+    for r in d.to_dict("records"):
+        why = []
+        if r["v_pct"] >= 0.8:
+            why.append(f"💰 দামি আইটেম (প্রতি {r['unit']} ৳{r['price']:,.0f})")
+        if r["n90"] >= 3 and r["i_pct"] >= 0.6:
+            why.append(f"📤 ঘন ঘন Issue ({USAGE_WINDOW_DAYS} দিনে {int(r['n90'])} বার)")
+        if r["n_diff"] > 0:
+            why.append(f"⚠️ আগের গণনায় {int(r['n_diff'])} বার Short/Excess")
+        if r["erp_gap"]:
+            why.append("⚠️ ERP-র সাথে মিলছে না")
+        if r["task_n"] > 0:
+            why.append("📋 আগে Correction task হয়েছে")
+        if r["n_counts"] == 0 or pd.isna(r["last_count"]):
+            why.append("⏱ কখনো গোনা হয়নি")
+        elif r["age"] >= 30:
+            why.append(f"⏱ {int(r['age'])} দিন গোনা হয়নি")
+        picks.append({"sl_no": int(r["sl_no"]), "reasons": why or ["সামগ্রিক ঝুঁকি স্কোরে এগিয়ে"], "score": round(float(r["score"]), 4)})
+    return picks
+
+
+@tx
+def _save_picks(key, picks):
+    run("""INSERT INTO req_settings (setting_key, setting_value) VALUES (%s,%s)
+           ON CONFLICT (setting_key) DO NOTHING""", (key, json.dumps(picks, ensure_ascii=False)))
+    return True
+
+
+def get_today_picks(fac):
+    """Picked once per factory per day and then kept, so the list does not change while the officer is working."""
+    today = local_now().date()
+    key = f"count_picks|{fac}|{today:%Y-%m-%d}"
+    saved = q("SELECT setting_value FROM req_settings WHERE setting_key=%s", (key,))
+    if saved:
+        try:
+            return json.loads(saved[0]["setting_value"])
+        except Exception:
+            pass
+    picks = compute_count_picks(fac, data_stamp(), today)
+    if picks and st.session_state.get("user") and st.session_state.get("role") != "Auditor":
+        if _save_picks(key, picks):
+            saved = q("SELECT setting_value FROM req_settings WHERE setting_key=%s", (key,))
+            if saved:
+                try:
+                    return json.loads(saved[0]["setting_value"])
+                except Exception:
+                    pass
+    return picks
+
+
+def _pick_to_search(term):
+    st.session_state["pc_term"] = term
+    st.session_state.pop("pc_pick", None)
+
+
+def count_picks_panel():
+    """Sits above the entry form on the Physical Count page. System stock is NOT shown, so the count stays blind."""
+    if "CONSOLIDATED" in str(FAC):
+        st.info("🎯 আজকের ৫টি আইটেমের তালিকা দেখতে ওপরে নির্দিষ্ট একটি factory select করুন।")
+        return
+    try:
+        picks = get_today_picks(FAC)
+    except Exception as e:
+        st.caption(f"আজকের ৫টি আইটেমের তালিকা তৈরি করা যায়নি: {e}")
+        return
+    st.markdown('<div class="section-title">🎯 আজ কোন ৫টি আইটেম গুনবেন — সিস্টেম বলে দিচ্ছে</div>', unsafe_allow_html=True)
+    if not picks:
+        st.caption("গোনার মতো আইটেম পাওয়া যায়নি (stock > 0 আইটেম নেই)।")
+        return
+    sl_list = [p["sl_no"] for p in picks]
+    info = {r["sl_no"]: r for r in q("""SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size,
+                                       COALESCE(NULLIF(unit_name,''),'Pcs') AS unit FROM inventory
+                                       WHERE factory_name=%s AND sl_no = ANY(%s)""", (FAC, sl_list))}
+    counted_today = {r["sl_no"] for r in q("""SELECT DISTINCT sci.sl_no FROM stock_count_items sci
+                                              JOIN stock_counts sc ON sc.id=sci.count_id
+                                              WHERE sci.factory_name=%s AND sc.counted_at LIKE %s AND sci.sl_no = ANY(%s)""",
+                                           (FAC, f"{local_now():%d-%b-%Y}%", sl_list))}
+    n_done = sum(1 for p in picks if p["sl_no"] in counted_today)
+    st.caption(f"আজ {n_done}/{len(picks)}টি গোনা হয়েছে · বেছে নেওয়ার ভিত্তি: দামি আইটেম, বেশি Issue হয়, আগে Short/Excess হয়েছিল, "
+               "অনেক দিন গোনা হয়নি। (Blind count: system stock এখানে দেখানো হয় না।)")
+    for i, p in enumerate(picks):
+        r = info.get(p["sl_no"])
+        if not r:
+            continue
+        with st.container(border=True):
+            c1, c2 = st.columns([3.4, 1], vertical_alignment="center")
+            ok = p["sl_no"] in counted_today
+            c1.markdown(f"{'✅' if ok else f'**{i + 1}.**'} **{html_lib.escape(str(r['item_name']))}** "
+                        f"[{html_lib.escape(str(r['size'] or '-'))}] · {html_lib.escape(str(r['prod_id']))}  \n"
+                        + " · ".join(p["reasons"]))
+            term = r["prod_id"] if (r["prod_id"] and not is_blank_code(r["prod_id"]) and not str(r["prod_id"]).upper().startswith("TEMP-")) else r["item_name"]
+            if ok:
+                c2.caption("আজ গোনা হয়েছে")
+            else:
+                c2.button("➕ গুনতে যান", key=f"pick_go_{p['sl_no']}", on_click=_pick_to_search, args=(str(term),),
+                          use_container_width=True)
+
+
+# ------------------------------------------------------------------
+#  6. Dashboard Note Board
+# ------------------------------------------------------------------
+@tx
+def add_dash_note(for_unit, text):
+    run("INSERT INTO dash_notes (for_unit, note, created_by, created_at, status) VALUES (%s,%s,%s,%s,'Open')",
+        (for_unit, text, st.session_state.get("user", ""), local_now().strftime("%d-%b-%Y %I:%M %p")))
+    audit("NOTE_ADDED", f"{for_unit}: {text[:120]}")
+    return True
+
+
+@tx
+def done_dash_note(nid):
+    run("""UPDATE dash_notes SET status='Done', done_by=%s, done_at=%s WHERE id=%s AND status='Open'""",
+        (st.session_state.get("user", ""), local_now().strftime("%d-%b-%Y %I:%M %p"), int(nid)))
+    audit("NOTE_DONE", f"Note {nid} marked done")
+    return True
+
+
+def _note_can_write():
+    return bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
+
+
+@_fragment
+def render_dash_note_board():
+    """Short hand-over notes between shifts / units. Fragment: adding or ticking a note does not reload the dashboard."""
+    ensure_addon_tables()
+    st.markdown('<div class="section-title">📌 নোট বোর্ড</div>', unsafe_allow_html=True)
+    my_unit = FAC if FAC in FACTORIES else None
+    notes = q("""SELECT id, for_unit, note, created_by, created_at FROM dash_notes WHERE status='Open'
+                 ORDER BY id DESC LIMIT 60""")
+    if _note_can_write():
+        gen = st.session_state.get("note_gen", 0)
+        c1, c2, c3 = st.columns([3.2, 1.3, 1], vertical_alignment="bottom")
+        text = c1.text_input("নতুন নোট", key=f"note_text_{gen}", max_chars=300,
+                             placeholder="যেমন: Windy-তে কাল বিয়ারিং আসবে, ERP-তে এন্ট্রি দিন")
+        unit_opts = ["দুই ইউনিট"] + FACTORIES
+        default_idx = 0
+        if my_unit:
+            default_idx = 2 if my_unit == FACTORIES[0] else 1   # note is usually for the OTHER unit's officer
+        target = c2.selectbox("কার জন্য", unit_opts, index=default_idx, key=f"note_unit_{gen}")
+        if c3.button("📌 নোট রাখুন", key=f"note_add_{gen}", use_container_width=True):
+            if not text.strip():
+                st.error("নোট লিখুন।")
+            elif add_dash_note("Both" if target == "দুই ইউনিট" else target, text.strip()):
+                st.session_state["note_gen"] = gen + 1
+                done("নোট রাখা হয়েছে।")
+    else:
+        st.caption("নোট লিখতে Login করুন (Auditor শুধু দেখতে পারেন)।")
+    if not notes:
+        st.caption("কোনো খোলা নোট নেই।")
+    else:
+        notes.sort(key=lambda n: (0 if (my_unit and n["for_unit"] in (my_unit, "Both")) else 1, -int(n["id"])))
+        for n in notes:
+            mine = bool(my_unit and n["for_unit"] in (my_unit, "Both"))
+            unit_txt = "দুই ইউনিট" if n["for_unit"] == "Both" else short_fac(n["for_unit"])
+            with st.container(border=True):
+                a, b = st.columns([4.2, 1], vertical_alignment="center")
+                a.markdown(f"{'🔔' if mine else '▫️'} **[{html_lib.escape(unit_txt)}]** {html_lib.escape(str(n['note']))}  \n"
+                           f"<span style='font-size:11.5px;color:#64748B;'>— {html_lib.escape(str(n['created_by'] or ''))} · "
+                           f"{html_lib.escape(str(n['created_at'] or ''))}</span>", unsafe_allow_html=True)
+                if _note_can_write() and b.button("✅ হয়েছে", key=f"note_done_{n['id']}", use_container_width=True):
+                    if done_dash_note(n["id"]):
+                        done("নোট 'হয়েছে' চিহ্নিত হয়েছে।")
+    recent = q("""SELECT for_unit, note, done_by, done_at FROM dash_notes WHERE status='Done' ORDER BY id DESC LIMIT 10""")
+    if recent:
+        with st.expander(f"হয়ে যাওয়া নোট (শেষ {len(recent)}টি)"):
+            for n in recent:
+                st.markdown(f"✔ ~~{n['note']}~~ — {n['done_by']} · {n['done_at']}")
+
+
+def render_dashboard_addons():
+    """One call from the top of the Dashboard. Each block is isolated: if one fails the others and the old dashboard still load."""
+    stamp = None
+    try:
+        stamp = render_today_work_card()
+    except Exception as e:
+        st.caption(f"আজকের কাজ কার্ড লোড হয়নি: {e}")
+    try:
+        render_dash_note_board()
+    except Exception as e:
+        st.caption(f"নোট বোর্ড লোড হয়নি: {e}")
+    try:
+        if stamp is not None:
+            render_dash_transfer_hint(stamp)
+    except Exception as e:
+        st.caption(f"ট্রান্সফার প্রস্তাব লোড হয়নি: {e}")
+
+
+# ------------------------------------------------------------------
+#  4. Similar-name warning (Add New Item)
+# ------------------------------------------------------------------
+@st.cache_data(ttl=45, show_spinner=False)
+def _item_name_index(fac):
+    rows = q("SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size, COALESCE(current_stock,0) AS stock "
+             "FROM inventory WHERE factory_name=%s", (fac,))
+    for r in rows:
+        r["tokens"] = tuple(sorted(_name_tokens(r["item_name"], r["size"])))
+    return rows
+
+
+def _name_tokens(name, size=""):
+    s = f"{name} {size}".lower()
+    toks = re.findall(r"\d+|[^\W\d_]+", s)
+    return {t for t in toks if t not in ("pcs", "pc", "no", "nos", "the", "of", "for", "and", "with")}
+
+
+def similar_items(fac, name, size, limit=5, threshold=0.8):
+    """'Bearing 6205' vs '6205 Bearing' -> same words in another order. Different numbers (6205 vs 6206) never match."""
+    a = _name_tokens(name, size)
+    if len(a) == 0:
+        return []
+    a_nums = {t for t in a if t.isdigit()}
+    found = []
+    for r in _item_name_index(fac):
+        b = set(r["tokens"])
+        if not (a & b):
+            continue
+        b_nums = {t for t in b if t.isdigit()}
+        if a_nums and b_nums and not (a_nums & b_nums):
+            continue
+        jac = len(a & b) / len(a | b)
+        if jac < 0.4:
+            continue
+        sim = 1.0 if a == b else max(jac, difflib.SequenceMatcher(None, " ".join(sorted(a)), " ".join(sorted(b))).ratio())
+        if sim >= threshold:
+            found.append((sim, r))
+    found.sort(key=lambda x: -x[0])
+    return found[:limit]
+
+
+def similar_item_alert(fac, name, size):
+    """Soft warning only (never blocks saving): different-but-similar items such as '6205 ZZ' and '6205 2RS' are legitimate."""
+    if "CONSOLIDATED" in str(fac) or len(str(name or "").strip()) < 3:
+        return
+    try:
+        hits = similar_items(fac, name, size)
+    except Exception:
+        return
+    if not hits:
+        return
+    lines = "\n".join(f"- **{h['item_name']}** [{h['size'] or '-'}] · ERP {h['prod_id']} · SL {h['sl_no']} · "
+                      f"stock {float(h['stock']):g} · মিল {int(round(s * 100))}%" for s, h in hits)
+    st.warning(f"⚠️ এই নামের কাছাকাছি আইটেম আগে থেকেই আছে — এটাই কি?\n\n{lines}\n\n"
+               "এটাই হলে নতুন আইটেম না বানিয়ে Transactions-এ গিয়ে ওই আইটেমে stock যোগ করুন। সত্যিই আলাদা আইটেম হলে নিচে চালিয়ে যান।")
+    top = hits[0][1]
+    if st.button("📝 এটাই — Transactions-এ যাই", key="sim_go_tx"):
+        g = st.session_state.get("tx_gen", 0)
+        st.session_state[f"tx_search_{g}"] = str(top["item_name"])
+        st.session_state[NAV_KEY] = NAV_TRANSACTIONS
+        _full_rerun()
+
+
+# ------------------------------------------------------------------
+#  7. Short / Excess resolution plan (ERP Audit)
+# ------------------------------------------------------------------
+PLAN_PHASES = {1: "Phase 1 · Quick fix (ERP update / PO-GRN entry)", 2: "Phase 2 · High-value Short/Excess (recount + documents)",
+               3: "Phase 3 · Remaining Short/Excess"}
+
+
+def _workdays(start, count, skip_friday=True):
+    """First `count` working dates from `start` (Friday off by default)."""
+    out, d = [], start
+    while len(out) < count:
+        if not (skip_friday and d.weekday() == 4):
+            out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+def build_short_excess_plan(base, officers, per_officer, start, skip_friday=True):
+    """base: one row per mismatched item with phase / weight already set. Returns (plan df, phase summary df, work days)."""
+    if base.empty:
+        return base, pd.DataFrame(), 0
+    cap = max(len(officers) * float(per_officer), 0.5)
+    base = base.sort_values(["phase", "abs_value"], ascending=[True, False]).reset_index(drop=True)
+    day, used, day_idx = 0, 0.0, []
+    for w in base["weight"]:
+        if used > 0 and used + w > cap + 1e-9:
+            day += 1
+            used = 0.0
+        used += w
+        day_idx.append(day)
+    base["day_no"] = [i + 1 for i in day_idx]
+    n_days = max(day_idx) + 1
+    dates = _workdays(start, n_days + 1, skip_friday)   # +1 working day: manager verification & closing buffer
+    base["target"] = [dates[i] for i in day_idx]
+    base["officer"] = [officers[i % len(officers)] for i in range(len(base))]
+    summ = []
+    for ph, g in base.groupby("phase"):
+        summ.append({"Phase": PLAN_PHASES[ph], "Items": str(len(g)), "Short": str(int((g["variance"] < 0).sum())),
+                     "Excess": str(int((g["variance"] > 0).sum())), "Value (৳)": f"{float(g['abs_value'].sum()):,.0f}",
+                     "Work days": f"Day {int(g['day_no'].min())}–{int(g['day_no'].max())}",
+                     "Deadline": g["target"].max().strftime(DATE_FMT)})
+    summ.append({"Phase": "✅ Manager verification & close", "Items": str(len(base)), "Short": "", "Excess": "", "Value (৳)": "",
+                 "Work days": f"Day {n_days + 1}", "Deadline": dates[n_days].strftime(DATE_FMT)})
+    return base, pd.DataFrame(summ), n_days + 1
+
+
+@tx
+def save_plan_tasks(rows):
+    n = 0
+    today_s = local_now().strftime(DATE_FMT)
+    for r in rows:
+        run("""INSERT INTO audit_correction_tasks (factory_name, prod_id, item_name, variance_type, variance_qty, variance_value,
+               root_cause, corrective_action, assigned_officer, task_date, target_date, status, manager_remarks, priority,
+               verification_status) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'Open',%s,%s,'Pending')""",
+            (r["factory_name"], r["prod_id"], r["item_name"], r["type"], r["variance"], r["value"], r["cause"], r["action"],
+             r["officer"], today_s, r["target"], f"Short/Excess Plan - {PLAN_PHASES[r['phase']].split(' · ')[0]}", r["priority"]))
+        n += 1
+    audit("PLAN_TASKS", f"{n} Short/Excess plan task(s) created")
+    return n
+
+
+def short_excess_plan_view(aud, tasks):
+    st.markdown('<div class="section-title">🗓 Short / Excess সমাধান পরিকল্পনা (Audit Department-এর জন্য)</div>', unsafe_allow_html=True)
+    if aud is None or aud.empty or not (aud["variance"] != 0).any():
+        st.success("সব আইটেম ERP-র সাথে মিলেছে — কোনো Short/Excess নেই।")
+        return
+    mm = aud[aud["variance"] != 0].copy()
+    mm["abs_value"] = (mm["variance"] * mm["unit_price"]).abs()
+    erp_set, po_set = set(), set()
+    try:
+        ensure_erp_track_columns()
+        fsql_i, fp_i = fw(FAC, "i.")
+        for r in q(f"""SELECT i.factory_name, i.sl_no FROM inventory i WHERE EXISTS (SELECT 1 FROM transactions t
+                       WHERE t.factory_name=i.factory_name AND t.sl_no=i.sl_no AND t.trans_type IN ('Issued','Internal Issue')
+                       AND t.id > COALESCE(i.erp_upto_tx,0)){fsql_i}""", fp_i):
+            erp_set.add((r["factory_name"], r["sl_no"]))
+    except Exception:
+        pass
+    try:
+        fsql_t, fp_t = fw(FAC, "t.")
+        for r in q(f"SELECT DISTINCT t.factory_name, t.sl_no {PO_FROM} WHERE {PO_WHERE}{fsql_t}", fp_t):
+            po_set.add((r["factory_name"], r["sl_no"]))
+    except Exception:
+        pass
+    ranks = mm["abs_value"].rank(ascending=False, method="first") / max(len(mm), 1)
+    rows = []
+    for (idx, r), rk in zip(mm.iterrows(), ranks):
+        key = (r["factory_name"], r["sl_no"])
+        short = r["variance"] < 0
+        tier = "Critical" if rk <= 0.10 else ("High" if rk <= 0.30 else ("Medium" if rk <= 0.60 else "Low"))
+        if key in erp_set:
+            cause, action, phase, weight = ("Issue-এর পর ERP balance আপডেট হয়নি",
+                                            "Issue Ledger → ERP Balance Update-এ ERP balance বসান", 1, 0.5)
+        elif key in po_set:
+            cause, action, phase, weight = ("ERP PO/GRN এন্ট্রি বাকি", "ERP-তে PO/GRN এন্ট্রি সম্পূর্ণ করুন", 1, 0.5)
+        else:
+            cause = ("অজানা — Physical গণনা ও ডকুমেন্ট যাচাই দরকার" if short
+                     else "Receipt/GRN বাদ পড়া বা ভুল Issue entry হতে পারে")
+            action = "Recount → Issue/Receipt ledger মেলান → ERP/Physical adjust (Manager)"
+            phase, weight = (2 if tier in ("Critical", "High") else 3), 1.0
+        rows.append({"factory_name": r["factory_name"], "sl_no": r["sl_no"], "prod_id": r["prod_id"], "item_name": r["item_name"],
+                     "size": r["size"], "type": "Shortage" if short else "Excess", "variance": float(r["variance"]),
+                     "abs_value": float(r["abs_value"]), "priority": tier, "cause": cause, "action": action,
+                     "phase": phase, "weight": weight})
+    _short_excess_plan_panel(pd.DataFrame(rows), tasks)
+
+
+@_fragment
+def _short_excess_plan_panel(base, tasks):
+    n_short, n_exc = int((base["variance"] < 0).sum()), int((base["variance"] > 0).sum())
+    v_short = float(base.loc[base["variance"] < 0, "abs_value"].sum())
+    v_exc = float(base.loc[base["variance"] > 0, "abs_value"].sum())
+    k = st.columns(4)
+    k[0].metric("Short items", n_short, f"৳{v_short:,.0f}")
+    k[1].metric("Excess items", n_exc, f"৳{v_exc:,.0f}")
+    quick = int((base["phase"] == 1).sum())
+    k[2].metric("Quick fix (ERP entry)", quick)
+    k[3].metric("Recount দরকার", len(base) - quick)
+
+    st.markdown("**পরিকল্পনার ধরন ঠিক করুন** — সংখ্যা বদলালে তারিখ নিজে থেকে বদলাবে।")
+    p1, p2, p3, p4 = st.columns(4)
+    officer_pool = ["Officer_Sagor", "Officer_Rahim", "Manager Admin"]
+    officers = p1.multiselect("কারা কাজ করবেন", officer_pool, default=officer_pool[:2], key="sep_officers")
+    per_off = p2.number_input("প্রতিদিন প্রতি জন (আইটেম)", min_value=1.0, max_value=60.0, value=8.0, step=1.0, key="sep_per")
+    start = p3.date_input("শুরুর তারিখ", value=local_now().date(), key="sep_start")
+    skip_fri = p4.checkbox("শুক্রবার ছুটি", value=True, key="sep_fri")
+    if not officers:
+        st.warning("অন্তত একজন অফিসার select করুন।")
+        return
+    plan, summ, n_days = build_short_excess_plan(base, officers, per_off, start, skip_fri)
+    final = plan["target"].max()                              # date of the last item
+    finish = _workdays(start, n_days, skip_fri)[-1]           # + 1 working day for Manager verification / closing
+    daily_units = len(officers) * per_off
+    total_units = float(plan["weight"].sum())
+    st.success(f"✅ এই ক্ষমতায় সব Short/Excess সমাধানে লাগবে **{n_days} কার্যদিবস** — সম্ভাব্য শেষ তারিখ **{finish.strftime(DATE_FMT)}** "
+               f"(সর্বশেষ আইটেম {final.strftime(DATE_FMT)}, তারপর ১ দিন Manager verification)।")
+    want = st.number_input("নির্দিষ্ট দিনের মধ্যে শেষ করতে চান? (কার্যদিবস, ঐচ্ছিক — 0 = না)", min_value=0, max_value=120, value=0, step=1, key="sep_target")
+    if want and want > 1:
+        need_cap = total_units / (want - 1)
+        need_off = math.ceil(need_cap / per_off)
+        if daily_units + 1e-9 >= need_cap:
+            st.info(f"{want} কার্যদিবসে শেষ করা সম্ভব — বর্তমান ক্ষমতাই যথেষ্ট।")
+        else:
+            st.warning(f"{want} কার্যদিবসে শেষ করতে দৈনিক প্রায় {need_cap:.0f} একক কাজ লাগবে → প্রতিজন {per_off:g} আইটেম হলে "
+                       f"**{need_off} জন অফিসার** লাগবে (এখন {len(officers)} জন)।")
+    st.markdown("**ধাপ অনুযায়ী পরিকল্পনা**")
+    st.dataframe(summ, hide_index=True, use_container_width=True)
+    summary_txt = (f"Short/Excess সমাধান পরিকল্পনা ({local_now():%d-%b-%Y}): মোট {n_short}টি Short (৳{v_short:,.0f}) ও {n_exc}টি Excess "
+                   f"(৳{v_exc:,.0f}) আইটেম। {quick}টি আইটেম শুধু ERP এন্ট্রি/আপডেটের কারণে (দ্রুত সমাধান), বাকি {len(base) - quick}টিতে "
+                   f"Physical recount ও ডকুমেন্ট যাচাই লাগবে। {len(officers)} জন অফিসার দৈনিক {per_off:g}টি করে কাজ করলে "
+                   f"{n_days} কার্যদিবসে, অর্থাৎ {finish.strftime(DATE_FMT)}-এর মধ্যে সব আইটেমের সমাধান ও Manager verification সম্পন্ন হবে।")
+    st.markdown("**Audit Department-কে জানানোর সারাংশ** (কপি করে পাঠান)")
+    st.code(summary_txt, language=None)
+
+    show = plan.copy()
+    show["Target date"] = show["target"].apply(lambda d: d.strftime(DATE_FMT))
+    out = pd.DataFrame({"Day": show["day_no"], "Phase": show["phase"].map(lambda p: PLAN_PHASES[p].split(" · ")[0]),
+                        "Factory": show["factory_name"], "ERP Code": show["prod_id"], "Item": show["item_name"], "Size": show["size"],
+                        "Type": show["type"], "Variance": show["variance"], "Value (৳)": show["abs_value"].round(0),
+                        "Priority": show["priority"], "সম্ভাব্য কারণ": show["cause"], "করণীয়": show["action"],
+                        "Officer": show["officer"], "Target date": show["Target date"]})
+    with st.expander(f"📋 আইটেম-ভিত্তিক বিস্তারিত পরিকল্পনা ({len(out)})", expanded=False):
+        st.dataframe(out, hide_index=True, use_container_width=True, height=420,
+                     column_config={"Variance": st.column_config.NumberColumn(format="%+.2f")})
+        st.caption("'সম্ভাব্য কারণ' সিস্টেমের অনুমান (ERP update / PO-GRN pending আছে কি না দেখে) — Physical যাচাই ছাড়া চূড়ান্ত নয়।")
+        export_buttons(out, "short_excess_plan")
+
+    st.markdown("**পরিকল্পনা কতদূর এগিয়েছে (Correction Task থেকে)**")
+    if tasks is None or tasks.empty:
+        st.caption("এখনো কোনো Correction task নেই।")
+    else:
+        t = tasks.copy()
+        total, closed = len(t), int((t["status"] == "Closed").sum())
+        due = t["target_date"].apply(parse_date)
+        today = datetime.combine(local_now().date(), datetime.min.time())
+        overdue = int(sum(1 for s, d in zip(t["status"], due) if s != "Closed" and d is not None and d < today))
+        g = st.columns(4)
+        g[0].metric("মোট task", total)
+        g[1].metric("Closed", closed, f"{closed / total * 100:.0f}%")
+        g[2].metric("Open", total - closed)
+        g[3].metric("⏰ সময় পেরিয়েছে", overdue)
+        st.progress(closed / total if total else 0.0)
+
+    st.markdown("**এই পরিকল্পনা Correction Task হিসেবে সেভ করুন**")
+    open_keys = set()
+    if tasks is not None and not tasks.empty:
+        for r in tasks[tasks["status"] != "Closed"].to_dict("records"):
+            open_keys.add((r["factory_name"], str(r["prod_id"]), r["item_name"]))
+    fresh = [r for r in plan.to_dict("records") if (r["factory_name"], str(r["prod_id"]), r["item_name"]) not in open_keys]
+    st.caption(f"{len(fresh)}টি আইটেমের জন্য নতুন task হবে ({len(plan) - len(fresh)}টির open task আগে থেকেই আছে — সেগুলো বাদ)। "
+               "task-এ Target date, Priority, কারণ ও করণীয় বসে যাবে; পরে '📝 Correction Plan' থেকে Edit/Close করতে পারবেন।")
+    if "CONSOLIDATED" in str(FAC):
+        st.info("Task সেভ করতে ওপরে নির্দিষ্ট একটি factory select করুন।")
+    elif st.button(f"💾 {len(fresh)}টি Correction Task তৈরি করুন", key="sep_save", type="primary", disabled=not fresh):
+        if guard():
+            rows = [{**r, "target": r["target"].strftime(DATE_FMT), "value": (r["abs_value"] if r["variance"] > 0 else -r["abs_value"])}
+                    for r in fresh]
+            n = save_plan_tasks(rows)
+            if n:
+                done(f"{n}টি Correction task তৈরি হয়েছে।")
 
 
 # ============================================================
@@ -6457,7 +7516,8 @@ autoset_uom_once()
 
 # Render only the selected module; the sidebar buttons update NAV_KEY.
 RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, tab_global_inventory, tab_physical_count, tab_erp_audit, tab_issue_ledger,
-             tab_transfer_history, tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet]
+             tab_transfer_history, tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet,
+             tab_stock_cover]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
 RENDERERS[TAB_NAMES.index(active_tab)]()
 render_session_cookie_js()
