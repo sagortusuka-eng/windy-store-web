@@ -6470,6 +6470,8 @@ def pc_results_view():
     m1.metric("Counts shown", len(counts))
     m2.metric("Waiting for review", n_wait)
     m3.metric("Items with a difference", n_diff)
+    compact = st.checkbox("\U0001F4F1 Compact view (phone)", key="pc_compact",
+                          help="Shows only Item, Size, System stock, Counted qty, Difference and Result.")
     for i, c in enumerate(counts):
         df = _pc_result_df(by_count.get(c["id"], []))
         n_bad = int((df["Difference"].abs() >= 1e-9).sum()) if not df.empty else 0
@@ -6479,7 +6481,8 @@ def pc_results_view():
         with st.expander(title, expanded=(i == 0 and c["status"] == "Waiting")):
             if c["note"]:
                 st.caption(f"Note: {c['note']}")
-            st.dataframe(df, hide_index=True, use_container_width=True,
+            _shown = df[["Item", "Size", "System stock", "Counted qty", "Difference", "Result"]] if (compact and not df.empty) else df
+            st.dataframe(_shown, hide_index=True, use_container_width=True,
                          column_config={"System stock": st.column_config.NumberColumn(format="%.2f"),
                                         "Counted qty": st.column_config.NumberColumn(format="%.2f"),
                                         "Difference": st.column_config.NumberColumn(format="%+.2f")})
@@ -6495,7 +6498,53 @@ def pc_results_view():
                         done(f"Count #{c['id']} marked as reviewed.")
 
 
+_PC_PHONE_CSS = """<style>
+@media (max-width: 900px) {
+  .block-container { padding-left: .7rem !important; padding-right: .7rem !important; }
+  .st-key-pc_mobile div[data-baseweb='input'], .st-key-pc_mobile div[data-baseweb='base-input'] { min-height: 50px !important; }
+  .st-key-pc_mobile div[data-baseweb='input'] input, .st-key-pc_mobile div[data-baseweb='base-input'] input,
+  .st-key-pc_mobile textarea { font-size: 16px !important; }   /* 16px stops the phone from zooming in on tap */
+  .st-key-pc_mobile div[data-testid='stNumberInput'] input { font-size: 22px !important; font-weight: 800 !important; }
+  .st-key-pc_mobile div[data-baseweb='select'] > div { min-height: 50px !important; font-size: 16px !important; }
+  .st-key-pc_mobile .stButton > button { min-height: 52px !important; font-size: 16px !important; width: 100% !important; }
+  .st-key-pc_mobile div[data-testid='stMetric'] { padding: 10px 12px !important; }
+  .st-key-pc_mobile h1 { font-size: 1.5rem !important; }
+}
+</style>"""
+
+
+def _phone_install_meta():
+    """Invisible: theme colour + icon so 'Add to Home screen' gives the officers a proper app icon (runs once per session)."""
+    if st.session_state.get("_phone_meta_done"):
+        return
+    st.session_state["_phone_meta_done"] = True
+    components.html(
+        f"""<script>
+        try {{
+          const h = window.parent.document.head;
+          const add = (tag, attrs) => {{ const e = window.parent.document.createElement(tag);
+                                         Object.keys(attrs).forEach(k => e.setAttribute(k, attrs[k])); h.appendChild(e); }};
+          add('meta', {{name: 'theme-color', content: '#0F766E'}});
+          add('meta', {{name: 'apple-mobile-web-app-capable', content: 'yes'}});
+          add('meta', {{name: 'mobile-web-app-capable', content: 'yes'}});
+          add('meta', {{name: 'apple-mobile-web-app-title', content: 'KC Windy'}});
+          add('link', {{rel: 'apple-touch-icon', href: 'data:image/png;base64,{WINDY_LOGO_B64}'}});
+        }} catch (e) {{}}
+        </script>""", height=0)
+
+
 def tab_physical_count():
+    try:
+        _box = st.container(key="pc_mobile")
+    except TypeError:   # very old Streamlit without container(key=...)
+        _box = st.container()
+    with _box:
+        _tab_physical_count_body()
+
+
+def _tab_physical_count_body():
+    st.markdown(_PC_PHONE_CSS, unsafe_allow_html=True)
+    _phone_install_meta()
     st.title("📱 Physical Count")
     st.caption("Spot-check any items in the store, enter the counted quantity from your phone, and compare it with the "
                "software stock.")
@@ -7587,6 +7636,13 @@ restore_login_from_cookie()
 show_flash()
 
 # Brand and account/login appear first; Workspace and Management remain clearly grouped below.
+try:   # home-screen shortcut:  <app link>/?page=count  opens Physical Count directly (once per session)
+    _pg = str(st.query_params.get("page", "")).strip().lower()
+except Exception:
+    _pg = ""
+if _pg in ("count", "physical", "physical-count") and not st.session_state.get("_deeplink_done"):
+    st.session_state[NAV_KEY] = NAV_PHYSICAL
+    st.session_state["_deeplink_done"] = True
 if st.session_state.get(NAV_KEY) not in TAB_NAMES:
     st.session_state[NAV_KEY] = TAB_NAMES[0]  # Dashboard is the first page for new sessions.
 
