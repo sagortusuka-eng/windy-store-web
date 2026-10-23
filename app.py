@@ -901,10 +901,50 @@ MODULE_NAV = [("📝", "Transactions"), ("📦", "Inventory Master"), ("🔍", "
 # ============================================================
 #  DATABASE
 # ============================================================
+# ---- SPEED: data version counter. Every successful COMMIT (from any save in the app) bumps it, so the cached
+# ---- read-only loaders below (q_c / qdf_c) refresh immediately after a write and stay instant otherwise.
+@st.cache_resource(show_spinner=False)
+def _data_version_box():
+    return {"v": 0}
+
+
+def _bump_data_version():
+    try:
+        _data_version_box()["v"] += 1
+    except Exception:
+        pass
+
+
+def _data_version():
+    try:
+        return _data_version_box()["v"]
+    except Exception:
+        return 0
+
+
+@st.cache_resource(show_spinner=False)
+def _once_flags():
+    return {}
+
+
+def run_once_per_process(name, fn):
+    """Runs a setup step (CREATE/ALTER ... IF NOT EXISTS) once per server process, not once per browser session."""
+    flags = _once_flags()
+    if not flags.get(name):
+        fn()
+        flags[name] = True
+
+
+class _TrackedConnection(psycopg2.extensions.connection):
+    def commit(self):
+        super().commit()
+        _bump_data_version()
+
+
 @st.cache_resource(show_spinner=False)
 def _connect():
-    conn = psycopg2.connect(st.secrets["DB_URL"], connect_timeout=10, keepalives=1, keepalives_idle=30,
-                            keepalives_interval=10, keepalives_count=3)
+    conn = psycopg2.connect(st.secrets["DB_URL"], connection_factory=_TrackedConnection, connect_timeout=10,
+                            keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=3)
     conn.autocommit = False
     return conn
 
@@ -956,6 +996,50 @@ def q(sql, params=None):
 def qdf(sql, params=None):
     cols, rows = fetch(sql, params)
     return pd.DataFrame(rows, columns=cols)
+
+
+@st.cache_data(ttl=30, show_spinner=False, max_entries=128)
+def _cached_rows(sql, params_t, ver):
+    """Read-only query result, cached for 30 s and dropped at once when any save commits (ver changes)."""
+    return fetch(sql, params_t)
+
+
+def q_c(sql, params=None):
+    """Same as q(), but served from cache when nothing was saved since the last identical call."""
+    if isinstance(params, dict):
+        return q(sql, params)
+    cols, rows = _cached_rows(sql, tuple(params) if params else None, _data_version())
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def qdf_c(sql, params=None):
+    """Same as qdf(), but served from cache when nothing was saved since the last identical call."""
+    if isinstance(params, dict):
+        return qdf(sql, params)
+    cols, rows = _cached_rows(sql, tuple(params) if params else None, _data_version())
+    return pd.DataFrame(rows, columns=cols)
+
+
+# Re-runs only the block it decorates when a widget inside it changes (typing / picking in a form does not rebuild the page).
+_frag = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None) or (lambda f: f)
+
+_LZ_CSS = """<style>
+div[class*='st-key-lz_'] div[role='radiogroup']{display:flex!important;flex-wrap:wrap!important;gap:7px!important;padding:2px 0 12px 0}
+div[class*='st-key-lz_'] label[data-baseweb='radio']{background:#fff!important;border:1px solid #D5DFEA!important;border-radius:9px!important;padding:8px 12px!important;margin:0!important;cursor:pointer}
+div[class*='st-key-lz_'] label[data-baseweb='radio']>div:first-child:not(:has(p)),div[class*='st-key-lz_'] label[data-baseweb='radio']>span:first-child:not(:has(p)){display:none!important}
+div[class*='st-key-lz_'] label[data-baseweb='radio'] p{color:#334155!important;font-size:13px!important;font-weight:650!important;margin:0!important;white-space:nowrap}
+div[class*='st-key-lz_'] label[data-baseweb='radio']:hover{border-color:#0F766E!important}
+div[class*='st-key-lz_'] label[data-baseweb='radio']:has(input:checked){background:#0F766E!important;border-color:#0F766E!important}
+div[class*='st-key-lz_'] label[data-baseweb='radio']:has(input:checked) p{color:#fff!important}
+</style>"""
+
+
+def lazy_tab_select(labels, key):
+    """Drop-in for st.tabs: pill buttons that return the INDEX of the open section, so only that section's code runs
+    (st.tabs runs every tab on every click). Use:  _tab = lazy_tab_select([...], "lz_x");  if _tab == 0: ..."""
+    st.markdown(_LZ_CSS, unsafe_allow_html=True)
+    choice = st.radio(key, labels, horizontal=True, key=key, label_visibility="collapsed")
+    return labels.index(choice) if choice in labels else 0
 
 
 def run(sql, params=None):
@@ -1220,7 +1304,7 @@ def init_master_tables():
 def ensure_master_tables():
     """Runs once per browser session, so Add Item works even if the cached DB initializer skipped it."""
     if not st.session_state.get("_master_tables_ready"):
-        init_master_tables()
+        run_once_per_process("master_tables", init_master_tables)
         st.session_state["_master_tables_ready"] = True
 
 
@@ -1232,7 +1316,7 @@ def get_uoms():
     """Default UOMs (fixed order) followed by any UOM added later from Inventory -> Add / Import."""
     out = list(DEFAULT_UOMS)
     try:
-        for r in q("SELECT uom_name FROM uom_master ORDER BY id"):
+        for r in q_c("SELECT uom_name FROM uom_master ORDER BY id"):
             n = _clean(r["uom_name"])
             if n and n.upper() not in {x.upper() for x in out}:
                 out.append(n)
@@ -1247,10 +1331,10 @@ def get_budget_categories(fac=None, dept=None):
     fsql, fp = fw(fac)
     rows = []
     if dept:
-        rows = q(f"SELECT DISTINCT category_name FROM category_budgets WHERE department_name=%s{fsql} ORDER BY category_name",
+        rows = q_c(f"SELECT DISTINCT category_name FROM category_budgets WHERE department_name=%s{fsql} ORDER BY category_name",
                  [dept] + fp)
     if not rows:
-        rows = q(f"SELECT DISTINCT category_name FROM category_budgets WHERE 1=1{fsql} ORDER BY category_name", fp)
+        rows = q_c(f"SELECT DISTINCT category_name FROM category_budgets WHERE 1=1{fsql} ORDER BY category_name", fp)
     return [r["category_name"] for r in rows if _clean(r["category_name"])]
 
 
@@ -1784,19 +1868,48 @@ def insert_tx(fac, officer, sl, pid, name, qty, ttype, day, notes, date_s, time_
          po_flag, po_date, unit_price_at_tx))
 
 
+def _csv_bytes(df):
+    return df.to_csv(index=False).encode("utf-8-sig")
+
+
+def _xlsx_bytes(df):
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False)
+    return buf.getvalue()
+
+
+def _lazy_download(col, label, builder, fname, mime, key):
+    """Newer Streamlit: the file is built only when the person clicks Download, so a normal page run does no file work
+    (a 3,000-row PDF alone took seconds on every single page run). Returns False if this Streamlit cannot do that."""
+    for kw in ({"on_click": "ignore"}, {}):
+        try:
+            col.download_button(label, builder, fname, mime, key=key, **kw)
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def export_buttons(df, name):
     if df is None or df.empty:
         st.caption("Download korar moto data nei.")
         return
     c1, c2, c3 = st.columns(3)
-    c1.download_button("⬇️ CSV", df.to_csv(index=False).encode("utf-8-sig"), f"{name}.csv", "text/csv", key=f"csv_{name}")
-    buf = io.BytesIO()
-    df.to_excel(buf, index=False)
-    c2.download_button("⬇️ Excel", buf.getvalue(), f"{name}.xlsx",
-                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"xls_{name}")
+    xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if _lazy_download(c1, "⬇️ CSV", lambda: _csv_bytes(df), f"{name}.csv", "text/csv", f"csv_{name}"):
+        _lazy_download(c2, "⬇️ Excel", lambda: _xlsx_bytes(df), f"{name}.xlsx", xlsx_mime, f"xls_{name}")
+        try:
+            import reportlab  # noqa: F401
+            _lazy_download(c3, "⬇️ PDF", lambda: to_pdf(df, name), f"{name}.pdf", "application/pdf", f"pdf_{name}")
+        except ImportError:
+            c3.caption("PDF: 'pip install reportlab'")
+        return
+    # Older Streamlit without deferred downloads: original behaviour (files built right away).
+    c1.download_button("⬇️ CSV", _csv_bytes(df), f"{name}.csv", "text/csv", key=f"csv_{name}_b")
+    c2.download_button("⬇️ Excel", _xlsx_bytes(df), f"{name}.xlsx", xlsx_mime, key=f"xls_{name}_b")
     pdf = to_pdf(df, name)
     if pdf:
-        c3.download_button("⬇️ PDF", pdf, f"{name}.pdf", "application/pdf", key=f"pdf_{name}")
+        c3.download_button("⬇️ PDF", pdf, f"{name}.pdf", "application/pdf", key=f"pdf_{name}_b")
     else:
         c3.caption("PDF: 'pip install reportlab'")
 
@@ -1880,7 +1993,7 @@ def resolve_item(fac, key, in_stock_only=False):
     fsql, fp = fw(fac)
     stock_sql = " AND COALESCE(current_stock,0) > 0" if in_stock_only else ""
     for where, params in stages:
-        rows = q(f"SELECT {INV_COLS} FROM inventory WHERE {where}{stock_sql}{fsql} ORDER BY factory_name, sl_no", params + fp)
+        rows = q_c(f"SELECT {INV_COLS} FROM inventory WHERE {where}{stock_sql}{fsql} ORDER BY factory_name, sl_no", params + fp)
         if len(rows) == 1:
             return rows[0], rows
         if len(rows) > 1:
@@ -1892,7 +2005,7 @@ def search_items(fac, term, in_stock_only=False):
     like = f"%{term.lower()}%"
     fsql, fp = fw(fac)
     stock_sql = " AND COALESCE(current_stock,0) > 0" if in_stock_only else ""
-    return q(f"""SELECT {INV_COLS} FROM inventory
+    return q_c(f"""SELECT {INV_COLS} FROM inventory
                  WHERE (LOWER(item_name) LIKE %s OR LOWER(COALESCE(size,'')) LIKE %s OR LOWER(prod_id) LIKE %s
                         OR LOWER(COALESCE(serial_no,'')) LIKE %s OR CAST(sl_no AS TEXT)=%s){stock_sql}{fsql}
                  ORDER BY CASE WHEN LOWER(COALESCE(serial_no,''))=LOWER(%s) THEN 0 ELSE 1 END, sl_no LIMIT 100""",
@@ -1932,7 +2045,7 @@ def is_duplicate_tx(fac, sl, ttype, qty, date_s, user, notes):
 
 def inv_options(fac):
     fsql, fp = fw(fac)
-    rows = q(f"""SELECT sl_no, prod_id, factory_name, item_name, COALESCE(size,'') AS size, department, category,
+    rows = q_c(f"""SELECT sl_no, prod_id, factory_name, item_name, COALESCE(size,'') AS size, department, category,
                  COALESCE(serial_no,'') AS serial_no, COALESCE(erp_stock,0) AS erp_stock, COALESCE(current_stock,0) AS current_stock,
                  COALESCE(unit_price,0) AS unit_price, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit_name
                  FROM inventory WHERE 1=1{fsql} ORDER BY factory_name, sl_no""", fp)
@@ -1993,7 +2106,7 @@ def verification_needed(fac, sl, tx_dt):
     the cycle; the next unverified issue starts a new cycle.
     """
     target_date = tx_dt.date() if isinstance(tx_dt, datetime) else tx_dt
-    rows = q("""SELECT date, verification_status
+    rows = q_c("""SELECT date, verification_status
                  FROM transactions
                  WHERE factory_name=%s AND sl_no=%s
                    AND trans_type IN ('Issued','Internal Issue')
@@ -2249,7 +2362,7 @@ def ec_index():
     out = {}
     for f in FACTORIES:
         idx = empty_index()
-        for r in q("""SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size, COALESCE(erp_stock,0) AS erp,
+        for r in q_c("""SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size, COALESCE(erp_stock,0) AS erp,
                       COALESCE(current_stock,0) AS phys FROM inventory WHERE factory_name=%s""", (f,)):
             e = idx_add(idx, r["sl_no"], r["prod_id"], r["item_name"], r["size"])
             e["erp"], e["phys"] = r["erp"], r["phys"]
@@ -2302,7 +2415,7 @@ def guard(write=True):
 
 
 def inventory_count():
-    return int(q(f"SELECT COUNT(*) AS n FROM inventory WHERE 1=1{FSQL}", FP)[0]["n"] or 0)
+    return int(q_c(f"SELECT COUNT(*) AS n FROM inventory WHERE 1=1{FSQL}", FP)[0]["n"] or 0)
 
 
 # ============================================================
@@ -2442,11 +2555,11 @@ def sidebar_clock():
 #  HOME - EXECUTIVE OVERVIEW (budget metrics)
 # ============================================================
 def load_budget_data():
-    cons = qdf(f"""SELECT t.factory_name, t.date, t.qty, COALESCE(i.unit_price,0) AS price,
+    cons = qdf_c(f"""SELECT t.factory_name, t.date, t.qty, COALESCE(i.unit_price,0) AS price,
                    COALESCE(i.category,'') AS category
                    FROM transactions t JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
                    WHERE t.trans_type IN ('Issued','Internal Issue'){fw(FAC, 't.')[0]}""", FP)
-    bud = qdf(f"SELECT factory_name, category_name, allocated_budget FROM category_budgets WHERE 1=1{FSQL}", FP)
+    bud = qdf_c(f"SELECT factory_name, category_name, allocated_budget FROM category_budgets WHERE 1=1{FSQL}", FP)
     if not cons.empty:
         cons["qty"] = cons["qty"].astype(float)
         cons["price"] = cons["price"].astype(float)
@@ -2473,7 +2586,7 @@ def tab_dashboard():
     )
     render_dashboard_addons()   # NEW: আজকের কাজ card, note board, transfer suggestions (isolated; cannot break the dashboard)
 
-    transaction_rows = qdf(f"""SELECT t.factory_name, t.date, t.time, t.trans_type, t.qty, t.item_name,
+    transaction_rows = qdf_c(f"""SELECT t.factory_name, t.date, t.time, t.trans_type, t.qty, t.item_name,
                        t.officer_name, COALESCE(t.supplier_name,'') AS supplier_name,
                        COALESCE(t.challan_no,'') AS challan_no,
                        COALESCE(i.category,'Uncategorized') AS category,
@@ -2483,12 +2596,12 @@ def tab_dashboard():
                 WHERE t.trans_type IN ('Supplier. Rec','Issued','Internal Issue'){fw(FAC, 't.')[0]}
                 ORDER BY t.id DESC""", FP)
 
-    budget_df = qdf(
+    budget_df = qdf_c(
         f"SELECT factory_name, department_name, category_name, COALESCE(allocated_budget,0) AS allocated_budget "
         f"FROM category_budgets WHERE 1=1{FSQL} ORDER BY department_name, category_name", FP
     )
-    inventory_total = int(q(f"SELECT COUNT(*) AS n FROM inventory WHERE 1=1{FSQL}", FP)[0]["n"] or 0)
-    low_stock_total = int(q(f"SELECT COUNT(*) AS n FROM inventory WHERE COALESCE(current_stock,0)<=5{FSQL}", FP)[0]["n"] or 0)
+    inventory_total = int(q_c(f"SELECT COUNT(*) AS n FROM inventory WHERE 1=1{FSQL}", FP)[0]["n"] or 0)
+    low_stock_total = int(q_c(f"SELECT COUNT(*) AS n FROM inventory WHERE COALESCE(current_stock,0)<=5{FSQL}", FP)[0]["n"] or 0)
 
     if transaction_rows.empty:
         transaction_rows = pd.DataFrame(columns=[
@@ -2727,7 +2840,7 @@ def tx_manager_panel(df, kp, title="🔐 Manager: Delete / Edit a transaction"):
         rows = {int(r["id"]): r for r in df.head(500).to_dict("records")}
         tid = int(st.selectbox("Transaction ID", list(rows), key=f"{kp}_mgr_id",
                                format_func=lambda i: f"ID {i} | {rows[i].get('item_name', '')} | qty {rows[i].get('qty', '')} | {rows[i].get('date', '')}"))
-        cur = q("SELECT date, notes FROM transactions WHERE id=%s", (tid,))
+        cur = q_c("SELECT date, notes FROM transactions WHERE id=%s", (tid,))
         if not cur:
             st.warning("Transaction paoa jay nai (ager-i delete hoye thakte pare).")
             return
@@ -2753,11 +2866,11 @@ def tx_manager_panel(df, kp, title="🔐 Manager: Delete / Edit a transaction"):
 def tab_transactions():
     fac, fsql, fp = FAC, FSQL, FP
     today_s = local_now().strftime(DATE_FMT)
-    _cnt = q(f"""SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN COALESCE(current_stock,0) <= 5 THEN 1 ELSE 0 END),0) AS low
+    _cnt = q_c(f"""SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN COALESCE(current_stock,0) <= 5 THEN 1 ELSE 0 END),0) AS low
                  FROM inventory WHERE 1=1{fsql}""", fp)[0]   # one query instead of two
     total_items = int(_cnt["n"] or 0)
     low_stock_items = int(_cnt["low"] or 0)
-    today_transactions = int(q(f"SELECT COUNT(*) AS n FROM transactions WHERE date=%s{fsql}", [today_s] + fp)[0]["n"] or 0)
+    today_transactions = int(q_c(f"SELECT COUNT(*) AS n FROM transactions WHERE date=%s{fsql}", [today_s] + fp)[0]["n"] or 0)
 
     st.title("Transactions")
     st.caption("Record stock movements and review recent activity.")
@@ -2769,7 +2882,10 @@ def tab_transactions():
     if total_items == 0 and not is_cons_view:
         st.info("📦 Ei factory-r inventory khali. [2] INVENTORY → ➕ Add / Import theke opening stock upload korun.")
     left, right = st.columns([1.05, 2], gap="large")
-    with left:
+
+    @_frag   # typing / picking in the entry form re-runs ONLY this block (not the recent list, alerts, header ...)
+    def _tx_entry_form():
+        g = st.session_state.get("tx_gen", 0)
         try:
             form_box = st.container(border=True, key="tx_form_box")
         except TypeError:   # very old Streamlit without container(key=...)
@@ -2906,7 +3022,11 @@ def tab_transactions():
                             st.session_state["tx_gen"] = g + 1
                             done("✅ Transaction saved, stock updated. Form reset hoyeche - porer transaction-er jonno ready.")
 
-    with right:
+    with left:
+        _tx_entry_form()
+
+    @_frag   # searching the recent list re-runs ONLY this block
+    def _tx_recent_panel():
         st.markdown('<div class="section-title">Recent Transactions</div>', unsafe_allow_html=True)
         rs = st.text_input("🔍 Search transactions (Item / Serial / ERP / SL / Officer)", key="tx_recent_search")
         extra, ep = "", []
@@ -2916,7 +3036,7 @@ def tab_transactions():
                         OR CAST(sl_no AS TEXT)=%s OR EXISTS (SELECT 1 FROM inventory i2 WHERE i2.sl_no=transactions.sl_no
                             AND i2.factory_name=transactions.factory_name AND LOWER(COALESCE(i2.serial_no,'')) LIKE %s))"""
             ep = [like, like, like, rs.strip(), like]
-        tdf = qdf(f"""SELECT id, factory_name, officer_name, sl_no,
+        tdf = qdf_c(f"""SELECT id, factory_name, officer_name, sl_no,
                       (SELECT COALESCE(i.serial_no,'') FROM inventory i WHERE i.sl_no=transactions.sl_no
                          AND i.factory_name=transactions.factory_name LIMIT 1) AS serial_no,
                       prod_id, item_name, qty, trans_type,
@@ -2936,8 +3056,11 @@ def tab_transactions():
         export_buttons(tdf, "transactions")
         tx_manager_panel(tdf, "tx")
 
+    with right:
+        _tx_recent_panel()
+
     st.markdown('<div class="section-title">Low & Negative Stock Alerts (≤ 5 pcs)</div>', unsafe_allow_html=True)
-    alerts = qdf(f"""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, prod_id, item_name,
+    alerts = qdf_c(f"""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, prod_id, item_name,
                      COALESCE(size,'') AS size, current_stock
                      FROM inventory WHERE current_stock <= 5{fsql} ORDER BY current_stock ASC""", fp)
     if not alerts.empty:
@@ -3094,7 +3217,7 @@ def do_import_opening(fac, rows):
 def inv_master_view():
     st.title("Inventory Master")
     st.caption(f"Search, filter and review stock balances · {html_lib.escape(str(FAC))}")
-    inv = qdf(f"""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, prod_id, item_name,
+    inv = qdf_c(f"""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, prod_id, item_name,
                   COALESCE(size,'') AS size, department, category,
                   COALESCE(erp_stock,0) AS erp_stock, COALESCE(current_stock,0) AS current_stock,
                   COALESCE(unit_price,0) AS unit_price, erp_status FROM inventory WHERE 1=1{FSQL}
@@ -3389,7 +3512,7 @@ def delete_queue(qid):
 
 
 def inv_queue_view():
-    qd = qdf(f"""SELECT id, factory_name, sl_no, prod_id, item_name, COALESCE(size,'') AS size, department, category,
+    qd = qdf_c(f"""SELECT id, factory_name, sl_no, prod_id, item_name, COALESCE(size,'') AS size, department, category,
                  erp_stock, current_stock, unit_price, status FROM import_queue WHERE 1=1{FSQL} ORDER BY id DESC""", FP)
     st.caption("Unmatch / Import Queue: ERP Balance import-e Master-e na paoa item ekhane jay. Approve korle Master-e jabe.")
     st.dataframe(qd, hide_index=True, use_container_width=True)
@@ -3553,7 +3676,7 @@ def recon_file_rows(df, c):
 
 
 def recon_db_rows(fac):
-    return q("""SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size,
+    return q_c("""SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size,
                 COALESCE(NULLIF(unit_name,''),'Pcs') AS unit,
                 COALESCE(current_stock,0) AS phys, COALESCE(erp_stock,0) AS erp
                 FROM inventory WHERE factory_name=%s ORDER BY sl_no""", (fac,))
@@ -3796,7 +3919,7 @@ def tab_stock_report():
             elif reset_all_stock_to_zero(fac):
                 done("All stock balances have been reset to Zero.")
 
-    st_items = qdf(f"""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, prod_id, item_name,
+    st_items = qdf_c(f"""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, prod_id, item_name,
                        COALESCE(size,'') AS size, department, category,
                        COALESCE(erp_stock,0) AS erp_stock, COALESCE(current_stock,0) AS current_stock,
                        COALESCE(unit_price,0) AS unit_price, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit_name
@@ -3873,7 +3996,7 @@ def tab_stock_report():
                        for r in view_sr.to_dict("records")}
             sel_key = st.selectbox("Select an item to view its transactions & manage", list(opts_sr.keys()), key="sr_item_select")
             sel_item = opts_sr[sel_key]
-            item_txs = qdf("""SELECT id, date, time, trans_type, qty, officer_name, supplier_name, challan_no, notes, verification_status
+            item_txs = qdf_c("""SELECT id, date, time, trans_type, qty, officer_name, supplier_name, challan_no, notes, verification_status
                               FROM transactions WHERE factory_name=%s AND sl_no=%s ORDER BY id DESC""",
                            (sel_item["factory_name"], sel_item["sl_no"]))
             st.markdown(f"**Transaction history for: {sel_item['item_name']} [{sel_item['size'] or '-'}] (SL {sel_item['sl_no']}, ERP Code: {sel_item['prod_id']})**")
@@ -3947,7 +4070,7 @@ def bulk_stock_entry_view():
                "tarpor niche 'Save all changes' click korun. Shudhu stock dui column badle; onno kichu badle na.")
     search_term = st.text_input("🔍 Search (Item / ERP Code / Size / Serial / SL No)", key="bulk_search",
                                 placeholder="Filter kore chhoto list-e kaj korun (khali rakhle sob item)")
-    df = qdf(f"""SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size, COALESCE(serial_no,'') AS serial_no,
+    df = qdf_c(f"""SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size, COALESCE(serial_no,'') AS serial_no,
                  COALESCE(erp_stock,0) AS erp_stock, COALESCE(current_stock,0) AS current_stock
                  FROM inventory WHERE 1=1{FSQL} ORDER BY sl_no""", FP)
     if df.empty:
@@ -3994,20 +4117,20 @@ def bulk_stock_entry_view():
 
 
 def tab_inventory():
-    t1, t2, t3, t4, t5, t6 = st.tabs(["📋 Master List", "➕ Add / Import", "✏️ Edit (Manager)",
-                                     "⚡ Bulk Stock Entry", "📥 Unmatch Queue", "🔎 ERP Match Check"])
-    with t1:
-        inv_master_view()
-    with t2:
-        inv_add_import_view()
-    with t3:
-        inv_edit_view()
-    with t4:
-        bulk_stock_entry_view()
-    with t5:
-        inv_queue_view()
-    with t6:
-        erp_check_view()
+    """Inventory sections as a pill radio: ONLY the selected section runs.
+    (st.tabs runs all six sections on every click = about 12 database calls + three file exports per click.)"""
+    sections = [
+        ("📋 Master List", inv_master_view),
+        ("➕ Add / Import", inv_add_import_view),
+        ("✏️ Edit (Manager)", inv_edit_view),
+        ("⚡ Bulk Stock Entry", bulk_stock_entry_view),
+        ("📥 Unmatch Queue", inv_queue_view),
+        ("🔎 ERP Match Check", erp_check_view),
+    ]
+    labels = [lbl for lbl, _fn in sections]
+    st.markdown("<style>.st-key-inv_view div[role=\"radiogroup\"]{display:flex!important;flex-wrap:wrap!important;gap:7px!important;padding:2px 0 12px 0}.st-key-inv_view label[data-baseweb=\"radio\"]{background:#fff!important;border:1px solid #D5DFEA!important;border-radius:9px!important;padding:8px 12px!important;margin:0!important;cursor:pointer}.st-key-inv_view label[data-baseweb=\"radio\"]>div:first-child:not(:has(p)),.st-key-inv_view label[data-baseweb=\"radio\"]>span:first-child:not(:has(p)){display:none!important}.st-key-inv_view label[data-baseweb=\"radio\"] p{color:#334155!important;font-size:13px!important;font-weight:650!important;margin:0!important;white-space:nowrap}.st-key-inv_view label[data-baseweb=\"radio\"]:hover{border-color:#0F766E!important}.st-key-inv_view label[data-baseweb=\"radio\"]:has(input:checked){background:#0F766E!important;border-color:#0F766E!important}.st-key-inv_view label[data-baseweb=\"radio\"]:has(input:checked) p{color:#fff!important}</style>", unsafe_allow_html=True)
+    choice = st.radio("Inventory section", labels, horizontal=True, key="inv_view", label_visibility="collapsed")
+    dict(sections)[choice]()
 
 
 # ============================================================
@@ -4143,7 +4266,7 @@ PO_WHERE = ("((t.trans_type IN ('Issued','Internal Issue') AND i.erp_status='ERP
 
 def po_pending_counts():
     fsql, fp = fw(FAC, "t.")
-    r = q(f"""SELECT COALESCE(SUM(CASE WHEN t.trans_type='Supplier. Rec' THEN 0 ELSE 1 END),0) AS issue_n,
+    r = q_c(f"""SELECT COALESCE(SUM(CASE WHEN t.trans_type='Supplier. Rec' THEN 0 ELSE 1 END),0) AS issue_n,
                      COALESCE(SUM(CASE WHEN t.trans_type='Supplier. Rec' THEN 1 ELSE 0 END),0) AS recv_n
               {PO_FROM} WHERE {PO_WHERE}{fsql}""", fp)[0]
     i_n, r_n = int(r["issue_n"] or 0), int(r["recv_n"] or 0)
@@ -4168,7 +4291,7 @@ def clear_po_pending_flags(ids, date_s):
 
 def erp_po_pending_view():
     fsql, fp = fw(FAC, "t.")
-    df = qdf(f"""SELECT t.id, t.factory_name, t.sl_no, COALESCE(i.serial_no,'') AS serial_no, t.item_name,
+    df = qdf_c(f"""SELECT t.id, t.factory_name, t.sl_no, COALESCE(i.serial_no,'') AS serial_no, t.item_name,
                  COALESCE(NULLIF(t.erp_code,''), t.prod_id) AS erp_code,
                  CASE WHEN t.trans_type IN ('Supplier. Rec','Internal Rec','Stock Adjustment (+)') THEN 'Received' ELSE 'Issue' END AS type,
                  t.qty, t.date, t.time, t.officer_name,
@@ -4251,7 +4374,7 @@ def update_received_record(tid, name, erp_name, erp_code, erp_status, erp_sl, su
 
 def erp_product_received_view():
     fsql, fp = fw(FAC, "t.")
-    rc = qdf(f"""SELECT t.id, t.date, t.time, t.factory_name, t.item_name, COALESCE(t.erp_product_name,'') AS erp_product_name,
+    rc = qdf_c(f"""SELECT t.id, t.date, t.time, t.factory_name, t.item_name, COALESCE(t.erp_product_name,'') AS erp_product_name,
                  COALESCE(i.serial_no,'') AS serial_no, t.sl_no, t.prod_id,
                  COALESCE(NULLIF(t.erp_code,''), t.prod_id) AS erp_code, COALESCE(t.erp_sl_ref,'') AS erp_sl_ref,
                  t.qty, COALESCE(t.supplier_name,'') AS supplier_name, COALESCE(t.challan_no,'') AS challan_no,
@@ -4300,15 +4423,15 @@ def erp_product_received_view():
         st.info("Ei filter-e kono received record nei.")
         return
 
-    d1, d2 = st.tabs(["📋 Receiving History (date-wise)", "📦 Product-wise Summary"])
-    with d1:
+    _tab = lazy_tab_select(["📋 Receiving History (date-wise)", "📦 Product-wise Summary"], "lz_recv")
+    if _tab == 0:
         out = view[["id", "date", "item_name", "serial_no", "sl_no", "erp_code", "qty", "factory_name", "supplier_name",
                     "challan_no", "erp_status", "officer_name", "erp_product_name", "erp_sl_ref", "notes"]].copy()
         out.columns = ["ID", "Date", "Item Name", "Serial No", "SL No", "ERP Code", "Qty", "Factory", "Supplier",
                        "Challan No", "ERP Status", "Officer", "ERP Product Name", "ERP SL / ID", "Remarks"]
         st.dataframe(out, hide_index=True, use_container_width=True, height=380)
         export_buttons(out, "product_received")
-    with d2:
+    if _tab == 1:
         g = (view.groupby(["factory_name", "item_name", "serial_no", "erp_code"], as_index=False)
              .agg(times=("id", "count"), qty=("qty", "sum"), first=("_dt", "min"), last=("_dt", "max"))
              .sort_values("qty", ascending=False))
@@ -4368,7 +4491,7 @@ def erp_product_received_view():
 
 
 def tab_erp_audit():
-    aud = qdf(f"""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, prod_id, item_name,
+    aud = qdf_c(f"""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, prod_id, item_name,
                   COALESCE(size,'') AS size,
                   COALESCE(erp_stock,0) AS erp_stock, COALESCE(current_stock,0) AS current_stock,
                   COALESCE(unit_price,0) AS unit_price, erp_status
@@ -4383,9 +4506,9 @@ def tab_erp_audit():
         exc = aud[aud.variance > 0]
     else:
         short = exc = aud
-    tasks = qdf(f"SELECT * FROM audit_correction_tasks WHERE 1=1{FSQL}", FP)
+    tasks = qdf_c(f"SELECT * FROM audit_correction_tasks WHERE 1=1{FSQL}", FP)
     open_n = int((tasks["status"] != "Closed").sum()) if not tasks.empty else 0
-    pend_q = qdf(f"SELECT COUNT(*) AS n FROM import_queue WHERE status='Pending Approval'{FSQL}", FP)
+    pend_q = qdf_c(f"SELECT COUNT(*) AS n FROM import_queue WHERE status='Pending Approval'{FSQL}", FP)
     c = st.columns(6)
     c[0].metric("Mismatched", len(short) + len(exc))
     c[1].metric("Short Items", len(short))
@@ -4417,9 +4540,8 @@ def tab_erp_audit():
             "unit_price", "short_value", "excess_value", "erp_status", "variance_type"]
     if aud_sel == AUD_ACT:
         if guard():
-            a1, a2, a3, a4 = st.tabs(["📥 Import ERP Balance", "⚖️ Adjust variance to ERP (Manager)",
-                                      "📋 Assign Correction Task", "✔️ Mark ERP status Done"])
-            with a1:
+            _tab = lazy_tab_select(["📥 Import ERP Balance", "⚖️ Adjust variance to ERP (Manager)", "📋 Assign Correction Task", "✔️ Mark ERP status Done"], "lz_audit_act")
+            if _tab == 0:
                 st.markdown("**📥 Import ERP Balance** (Excel/CSV: ERP Code, Item Name, Size, ERP Balance)")
                 up = st.file_uploader("ERP balance file", type=["xlsx", "xls", "csv"], key="erp_bal_file")
                 if up and st.button("Import ERP balance", key="erp_bal_btn"):
@@ -4445,7 +4567,7 @@ def tab_erp_audit():
                             done(f"ERP import: matched {res['matched']}, unmatch queue-e {res['queued']}, "
                                  f"already queued {res['dup']}, skipped {skipped}.")
 
-            with a2:
+            if _tab == 1:
                 st.markdown("**⚖️ Adjust variance to ERP** (Manager)")
                 st.caption("Physical stock-ke ERP balance-er sathe milano hoy. Upore search bar diye item khunje nin.")
                 if vt.empty:
@@ -4465,7 +4587,7 @@ def tab_erp_audit():
                         elif adjust_variance(row, aq):
                             done("Variance adjusted.")
 
-            with a3:
+            if _tab == 2:
                 st.markdown("**📋 Assign correction task**")
                 if vt.empty:
                     st.caption("Variance item nei.")
@@ -4482,7 +4604,7 @@ def tab_erp_audit():
                         if assign_task(row2["factory_name"], row2, officer, days, prio, rem):
                             done("Correction task assigned.")
 
-            with a4:
+            if _tab == 3:
                 st.markdown("**✔️ Mark ERP status Done** (ERP Pending items)")
                 if v_pend.empty:
                     st.caption("ERP Pending item nei." if not term.strip() else "Search-e kono ERP Pending item nei.")
@@ -4579,7 +4701,7 @@ def tab_erp_audit():
                         elif update_task(tid, eo, ep_, es, et, er.strip()):
                             done("Task updated.")
     if aud_sel == AUD_AGE:
-        rc = qdf(f"""SELECT id, factory_name, date, item_name, prod_id, qty, officer_name FROM transactions
+        rc = qdf_c(f"""SELECT id, factory_name, date, item_name, prod_id, qty, officer_name FROM transactions
                      WHERE trans_type='Supplier. Rec' AND erp_grn_status='Pending'{FSQL} ORDER BY id DESC""", FP)
         if rc.empty:
             st.success("ERP-e wait korche emon receipt nei.")
@@ -4668,7 +4790,7 @@ def tab_global_inventory():
     """Consolidated, read-only inventory overview for both factories."""
     st.title("Global Inventory")
     st.caption("Compare KC and Windy stock, find data issues, and review safe transfer or reorder suggestions.")
-    inv = qdf("""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, COALESCE(prod_id,'') AS prod_id,
+    inv = qdf_c("""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, COALESCE(prod_id,'') AS prod_id,
                        COALESCE(item_name,'') AS item_name, COALESCE(size,'') AS size,
                        COALESCE(department,'') AS department, COALESCE(category,'') AS category,
                        COALESCE(current_stock,0) AS current_stock, COALESCE(erp_stock,0) AS erp_stock,
@@ -4682,7 +4804,7 @@ def tab_global_inventory():
         st.info("No inventory records are available for these factories yet.")
         return
 
-    recent_usage = q("""SELECT factory_name, sl_no, date, qty FROM transactions
+    recent_usage = q_c("""SELECT factory_name, sl_no, date, qty FROM transactions
                        WHERE trans_type IN ('Issued','Internal Issue') AND factory_name = ANY(%s)""", (FACTORIES,))
     today = local_now().date()
     usage_start = today - timedelta(days=90)
@@ -4846,7 +4968,7 @@ def tab_global_inventory():
     else:
         st.info("No products match these filters.")
 
-    sync_logs=q("SELECT timestamp,username,details FROM audit_logs WHERE action_type='IMPORT_ERP_BALANCE' ORDER BY id DESC LIMIT 300")
+    sync_logs=q_c("SELECT timestamp,username,details FROM audit_logs WHERE action_type='IMPORT_ERP_BALANCE' ORDER BY id DESC LIMIT 300")
     sync_by_factory={}
     for log in sync_logs:
         details=str(log.get("details") or "")
@@ -4891,7 +5013,7 @@ def tab_global_inventory():
             c.metric("Value",f"৳{worth:,.0f}")
             st.markdown("**Supplier insight**")
             for row in rows:
-                receipt=q("""SELECT t.date,COALESCE(t.supplier_name,'') AS supplier_name,t.unit_price_at_tx,
+                receipt=q_c("""SELECT t.date,COALESCE(t.supplier_name,'') AS supplier_name,t.unit_price_at_tx,
                                    COALESCE(i.unit_price,0) AS master_price FROM transactions t
                            LEFT JOIN inventory i ON i.factory_name=t.factory_name AND i.sl_no=t.sl_no
                            WHERE t.factory_name=%s AND t.sl_no=%s AND t.trans_type='Supplier. Rec'
@@ -4900,7 +5022,7 @@ def tab_global_inventory():
                 price=(f"৳{float(receipt[0]['unit_price_at_tx']):,.2f}" if receipt and receipt[0]["unit_price_at_tx"] is not None
                        else (f"৳{float(receipt[0]['master_price'] or 0):,.2f} · legacy/master" if receipt else "Not available"))
                 code=txt(row["prod_id"])
-                req=q("""SELECT po_date,received_date FROM requisition_tracking WHERE factory_name=%s
+                req=q_c("""SELECT po_date,received_date FROM requisition_tracking WHERE factory_name=%s
                          AND COALESCE(po_date,'')<>'' AND COALESCE(received_date,'')<>''
                          AND ((%s<>'' AND prod_id=%s) OR LOWER(TRIM(item_name))=LOWER(TRIM(%s)))""",
                       (factory,code,code,row["item_name"]))
@@ -4922,7 +5044,7 @@ def tab_global_inventory():
     if pairs:
         condition=" OR ".join("(factory_name=%s AND sl_no=%s)" for _ in pairs)
         params=[v for pair in pairs for v in pair]
-        history=qdf(f"SELECT id,factory_name,date,time,item_name,qty,trans_type,officer_name,notes FROM transactions WHERE {condition} ORDER BY id DESC LIMIT 10",params)
+        history=qdf_c(f"SELECT id,factory_name,date,time,item_name,qty,trans_type,officer_name,notes FROM transactions WHERE {condition} ORDER BY id DESC LIMIT 10",params)
         st.dataframe(history,hide_index=True,use_container_width=True,height=300)
 
     with st.expander("Manager-only: replenishment settings"):
@@ -4977,7 +5099,7 @@ def tab_global_inventory():
 #  TAB 4 - ISSUE LEDGER
 # ============================================================
 def tab_issue_ledger():
-    iss = qdf(f"""SELECT t.id, t.date, t.time, t.factory_name, t.item_name, COALESCE(i.size,'') AS size,
+    iss = qdf_c(f"""SELECT t.id, t.date, t.time, t.factory_name, t.item_name, COALESCE(i.size,'') AS size,
                   COALESCE(i.serial_no,'') AS serial_no, t.prod_id, t.sl_no, t.qty,
                   COALESCE(i.unit_price,0) AS unit_price, t.officer_name, t.trans_type, t.notes, t.verification_status,
                   COALESCE(t.po_pending_flag,'') AS po_flag
@@ -5037,15 +5159,14 @@ def tab_issue_ledger():
         st.info("Ei filter-e kono issue record nei.")
         return
 
-    d1, d2, d3, d4, d5 = st.tabs(["📋 Issue Details", "📅 Date-wise Summary", "📦 Item-wise Summary",
-                                  "✏️ ERP Balance Update", "🏷 Tag ERP PO Pending"])
-    with d1:
+    _tab = lazy_tab_select(["📋 Issue Details", "📅 Date-wise Summary", "📦 Item-wise Summary", "✏️ ERP Balance Update", "🏷 Tag ERP PO Pending"], "lz_issue")
+    if _tab == 0:
         detail = view.sort_values(["_dt", "id"], ascending=False)[
             ["id", "date", "time", "factory_name", "serial_no", "prod_id", "sl_no", "item_name", "size", "qty", "unit_price",
              "total_value", "officer_name", "type", "verification_status", "erp_status", "notes"]]
         st.dataframe(detail, hide_index=True, use_container_width=True, height=380)
         export_buttons(detail, "issue_ledger")
-    with d2:
+    if _tab == 1:
         dd = view[view["_dt"].notna()]
         if dd.empty:
             st.info("Valid date record nei.")
@@ -5065,16 +5186,16 @@ def tab_issue_ledger():
             grp.columns = ["Date", "Item Name", "Factory", "Qty Issued"]
             st.dataframe(grp, hide_index=True, use_container_width=True)
             export_buttons(grp, "issue_date_item_factory")
-    with d3:
+    if _tab == 2:
         items = (view.groupby(["factory_name", "item_name", "size", "serial_no", "prod_id"], as_index=False)
                  .agg(entries=("id", "count"), qty=("qty", "sum"), value=("total_value", "sum"))
                  .sort_values("qty", ascending=False))
         items.columns = ["Factory", "Item Name", "Size", "Serial No", "ERP Code", "Issue Entries", "Qty Issued", "Value (৳)"]
         st.dataframe(items, hide_index=True, use_container_width=True)
         export_buttons(items, "issue_item_summary")
-    with d4:
+    if _tab == 3:
         il_erp_update_panel(view.groupby(["factory_name", "sl_no"], as_index=False).qty.sum())
-    with d5:
+    if _tab == 4:
         il_po_tag_panel(view.sort_values("id", ascending=False)[
             ["id", "date", "factory_name", "item_name", "size", "qty", "officer_name", "po_flag"]].head(300))
     tx_manager_panel(view[["id", "item_name", "qty", "date"]], "il", "🔐 Manager: Delete / Edit an issue entry")
@@ -5324,7 +5445,7 @@ def tab_transfer_history():
             st.caption("Transfer nei.")
         else:
             ref = st.selectbox("Transfer", view["transfer_ref"].tolist(), key="tf_sel")
-            t = q("SELECT * FROM inter_factory_transfers WHERE transfer_ref=%s", (ref,))[0]
+            t = q_c("SELECT * FROM inter_factory_transfers WHERE transfer_ref=%s", (ref,))[0]
             pw = mgr_check("tf_pw")
             src, dest = transfer_items(t)
             reverse = bool(src and dest)
@@ -5380,7 +5501,7 @@ def req_calc(r):
 
 
 def load_requisitions():
-    rows = q(f"""SELECT id, factory_name, req_no, department, req_date, item_name, req_qty, audit_approved_qty AS aud_qty,
+    rows = q_c(f"""SELECT id, factory_name, req_no, department, req_date, item_name, req_qty, audit_approved_qty AS aud_qty,
                  actual_received_qty AS rec_qty, po_date, received_date, COALESCE(prod_id,'') AS prod_id
                  FROM requisition_tracking WHERE 1=1{FSQL} ORDER BY id DESC""", FP)
     return [req_calc(r) for r in rows]
@@ -5626,8 +5747,8 @@ def tab_requisition():
     labels = {f"ID {r['id']} | {r['req_no']} | {r['item_name']}": r for r in rows}
     r = labels[st.selectbox("Select requisition", list(labels), key="req_sel")]
     k = str(r["id"])
-    t1, t2, t3, t4 = st.tabs(["✔️ Audit Approved Qty (Executive)", "🚚 PO / Receiving", "✏️ Edit", "📧 Sourcing Email"])
-    with t1:
+    _tab = lazy_tab_select(["✔️ Audit Approved Qty (Executive)", "🚚 PO / Receiving", "✏️ Edit", "📧 Sourcing Email"], "lz_req")
+    if _tab == 0:
         if st.session_state.get("role") != "Executive":
             st.caption("Audit Approved Qty shudhu Executive (Mr. Sattar) change korte parben.")
         else:
@@ -5635,7 +5756,7 @@ def tab_requisition():
             if st.button("Save approved qty", key=f"aud_btn_{k}") and guard():
                 if set_audit_qty(r["id"], nq, r["aud_qty"], r["item_name"], r["req_no"]):
                     done("Audit approved qty updated.")
-    with t2:
+    if _tab == 1:
         if guard():
             has_po = st.checkbox("HO PO issued", value=r["has_po"], key=f"hp_{k}")
             po_d = st.date_input("HO PO Date", value=parse_date(r["po_date"]).date() if parse_date(r["po_date"]) else date.today(), key=f"pod_{k}")
@@ -5645,7 +5766,7 @@ def tab_requisition():
                 if set_po_receiving(r["id"], po_d.strftime(DATE_FMT) if has_po else None, rq,
                                     rd.strftime(DATE_FMT) if rq > 0 else None, r["req_no"], r["item_name"]):
                     done("PO / receiving updated.")
-    with t3:
+    if _tab == 2:
         if guard():
             with st.form(f"req_edit_{k}"):
                 c1, c2, c3 = st.columns(3)
@@ -5671,7 +5792,7 @@ def tab_requisition():
                     st.error("Delete confirm tick korun.")
                 elif delete_requisition(r["id"], r["req_no"], r["item_name"]):
                     done("Requisition deleted.")
-    with t4:
+    if _tab == 3:
         sel = st.multiselect("Items (blank = sob pending)", list(labels), key="mail_sel")
         pool = [labels[s] for s in sel] if sel else rows
         fac_label = FAC if "CONSOLIDATED" not in FAC else " & ".join(FACTORIES)
@@ -5717,7 +5838,7 @@ def delete_repair(rid):
 
 
 def tab_repair():
-    rp = qdf(f"""SELECT id, tracking_code, factory_name, gate_pass_no, item_name, COALESCE(qty,0) AS qty, source_type,
+    rp = qdf_c(f"""SELECT id, tracking_code, factory_name, gate_pass_no, item_name, COALESCE(qty,0) AS qty, source_type,
                  return_type, supplier_name, sent_date, return_date, status, officer_name
                  FROM repair_returns WHERE 1=1{FSQL} ORDER BY id DESC""", FP)
     term = st.text_input("🔍 Search (Item / Gate Pass / Supplier / Tracking)", key="rp_search")
@@ -5794,7 +5915,7 @@ def tab_repair():
 #  TAB 8 - LEDGER
 # ============================================================
 def tab_ledger():
-    led = qdf(f"""SELECT t.id, t.factory_name, t.officer_name, t.sl_no, COALESCE(i.serial_no,'') AS serial_no, t.prod_id,
+    led = qdf_c(f"""SELECT t.id, t.factory_name, t.officer_name, t.sl_no, COALESCE(i.serial_no,'') AS serial_no, t.prod_id,
                   t.item_name, t.qty, t.trans_type, t.notes, COALESCE(t.supplier_name,'') AS supplier_name,
                   COALESCE(t.challan_no,'') AS challan_no,
                   t.date, t.time, COALESCE(i.unit_price,0) AS unit_price
@@ -5851,7 +5972,7 @@ def compute_forecast(mi):
     l3_start, cur_start = datetime(sy, sm, 1), datetime(cy, cm, 1)
     l3_days = max((cur_start - l3_start).days, 1)
     cur_c, l3_c = {}, {}
-    for t in q(f"SELECT factory_name, sl_no, qty, date FROM transactions WHERE trans_type IN ('Issued','Internal Issue'){FSQL}", FP):
+    for t in q_c(f"SELECT factory_name, sl_no, qty, date FROM transactions WHERE trans_type IN ('Issued','Internal Issue'){FSQL}", FP):
         dt = parse_date(t["date"])
         if not dt:
             continue
@@ -5861,9 +5982,9 @@ def compute_forecast(mi):
         elif l3_start <= dt < cur_start:
             l3_c[k] = l3_c.get(k, 0) + float(t["qty"] or 0)
     plans = {(p["factory_name"], p["plan_month"]): float(p["plan_qty"] or 0)
-             for p in q("SELECT factory_name, plan_month, plan_qty FROM production_plans")}
+             for p in q_c("SELECT factory_name, plan_month, plan_qty FROM production_plans")}
     out = []
-    for r in q(f"""SELECT factory_name, sl_no, prod_id, item_name, COALESCE(current_stock,0) AS stock,
+    for r in q_c(f"""SELECT factory_name, sl_no, prod_id, item_name, COALESCE(current_stock,0) AS stock,
                    COALESCE(unit_price,0) AS price FROM inventory WHERE 1=1{FSQL}""", FP):
         k = (r["factory_name"], r["sl_no"])
         cur_p = plans.get((r["factory_name"], mi["cur_key"]), 0)
@@ -5886,7 +6007,7 @@ def tab_forecast():
     mi = month_info()
     st.markdown(f'<div class="section-title">Production Plan · Current {mi["cur_label"]} · Next {mi["next_label"]}</div>',
                 unsafe_allow_html=True)
-    plans = {(p["factory_name"], p["plan_month"]): p for p in q("SELECT * FROM production_plans")}
+    plans = {(p["factory_name"], p["plan_month"]): p for p in q_c("SELECT * FROM production_plans")}
     if FAC and "CONSOLIDATED" not in FAC:
         cp = plans.get((FAC, mi["cur_key"]), {})
         npn = plans.get((FAC, mi["next_key"]), {})
@@ -6000,8 +6121,8 @@ def budget_manage_panel():
 
 
 def tab_budget():
-    bud = qdf(f"SELECT factory_name, department_name, category_name, allocated_budget FROM category_budgets WHERE 1=1{FSQL}", FP)
-    cost_rows = q(f"""SELECT t.factory_name, i.category, SUM(t.qty*i.unit_price) AS cost
+    bud = qdf_c(f"SELECT factory_name, department_name, category_name, allocated_budget FROM category_budgets WHERE 1=1{FSQL}", FP)
+    cost_rows = q_c(f"""SELECT t.factory_name, i.category, SUM(t.qty*i.unit_price) AS cost
                       FROM transactions t JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
                       WHERE t.trans_type IN ('Issued','Internal Issue'){fw(FAC, 't.')[0]}
                       GROUP BY t.factory_name, i.category""", FP)
@@ -6082,7 +6203,7 @@ def autoset_uom_once():
 
 def daily_rows(d, fac, show_all):
     ds = d.strftime(DATE_FMT)
-    rows = q("""SELECT i.sl_no, COALESCE(i.serial_no,'') AS serial, i.item_name, COALESCE(i.size,'') AS size,
+    rows = q_c("""SELECT i.sl_no, COALESCE(i.serial_no,'') AS serial, i.item_name, COALESCE(i.size,'') AS size,
                 COALESCE(NULLIF(i.unit_name,''),'Pcs') AS unit,
                 COALESCE(i.current_stock,0) AS cur, COALESCE(i.erp_stock,0) AS erp,
                 COALESCE(d.issue,0) AS issue, COALESCE(d.recv,0) AS recv
@@ -6335,11 +6456,11 @@ def pc_results_view():
     status = st.radio("Show", ["Waiting", "Reviewed", "All"], horizontal=True, key="pc_status")
     where = "" if status == "All" else " AND status=%s"
     params = list(FP) + ([] if status == "All" else [status])
-    counts = q(f"SELECT * FROM stock_counts WHERE 1=1{FSQL}{where} ORDER BY id DESC LIMIT 30", params)
+    counts = q_c(f"SELECT * FROM stock_counts WHERE 1=1{FSQL}{where} ORDER BY id DESC LIMIT 30", params)
     if not counts:
         st.info("No counts here yet.")
         return
-    items = q("SELECT * FROM stock_count_items WHERE count_id = ANY(%s) ORDER BY id", ([c["id"] for c in counts],))
+    items = q_c("SELECT * FROM stock_count_items WHERE count_id = ANY(%s) ORDER BY id", ([c["id"] for c in counts],))
     by_count = {}
     for it in items:
         by_count.setdefault(it["count_id"], []).append(it)
@@ -6383,11 +6504,11 @@ def tab_physical_count():
     except Exception as e:
         st.error(f"Physical Count tables could not be prepared: {e}")
         return
-    t_new, t_res = st.tabs(["➕ New count", "⏳ Waiting / Results"])
-    with t_new:
+    _tab = lazy_tab_select(["➕ New count", "⏳ Waiting / Results"], "lz_pc")
+    if _tab == 0:
         count_picks_panel()   # NEW: today's 5 items the system recommends counting
         pc_entry()
-    with t_res:
+    if _tab == 1:
         pc_results_view()
 
 
@@ -6558,7 +6679,7 @@ def dash_work_counts():
         parts.append("(SELECT NULL::int) AS review_n")
     parts.append(STAMP_SQL)
     params += _stamp_params()
-    r = q("SELECT " + ",\n".join(parts), params)[0]
+    r = q_c("SELECT " + ",\n".join(parts), params)[0]
     stamp = tuple(r[k] for k in STAMP_KEYS)
     today_s = local_now().strftime("%Y-%m-%d")
     try:
@@ -6629,7 +6750,7 @@ def _ident(code, name, size):
 @st.cache_data(ttl=300, show_spinner=False)
 def _cover_base(stamp, today_s):
     today = datetime.strptime(today_s, "%Y-%m-%d").date()
-    inv = qdf("""SELECT factory_name, sl_no, COALESCE(prod_id,'') AS prod_id, COALESCE(item_name,'') AS item_name,
+    inv = qdf_c("""SELECT factory_name, sl_no, COALESCE(prod_id,'') AS prod_id, COALESCE(item_name,'') AS item_name,
                  COALESCE(size,'') AS size, COALESCE(serial_no,'') AS serial_no,
                  COALESCE(NULLIF(unit_name,''),'Pcs') AS unit, COALESCE(current_stock,0) AS stock,
                  COALESCE(erp_stock,0) AS erp, COALESCE(unit_price,0) AS price, COALESCE(department,'') AS department,
@@ -6643,7 +6764,7 @@ def _cover_base(stamp, today_s):
     pats = []
     for y in years:
         pats += [f"%-{y}", f"{y}-%", f"%/{y}"]
-    iss = qdf(f"""SELECT factory_name, sl_no, date, qty FROM transactions
+    iss = qdf_c(f"""SELECT factory_name, sl_no, date, qty FROM transactions
                   WHERE trans_type IN ('Issued','Internal Issue') AND factory_name = ANY(%s) AND ({cond})""",
               [FACTORIES] + pats)
     keys = ["factory_name", "sl_no"]
@@ -7453,10 +7574,10 @@ ensure_live_connection()
 try:
     init_db()
     if not st.session_state.get("_recon_table_ready"):   # CREATE TABLE IF NOT EXISTS once per session, not on every click
-        ensure_recon_table()
+        run_once_per_process("recon_table", ensure_recon_table)
         st.session_state["_recon_table_ready"] = True
     if not st.session_state.get("_global_inventory_schema_ready"):
-        ensure_global_inventory_schema()
+        run_once_per_process("global_inventory_schema", ensure_global_inventory_schema)
         st.session_state["_global_inventory_schema_ready"] = True
 except Exception as e:
     st.error(f"Database setup/migration failed: {e}")
