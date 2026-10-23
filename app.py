@@ -5742,6 +5742,13 @@ def delete_requisition(rid, req_no, name):
 
 
 def tab_requisition():
+    _top = lazy_tab_select(["📋 Requisition list", "🧾 Audit Reconciliation (item search)"], "lz_reqtop")
+    if _top == 1:
+        try:
+            audit_manual_view()
+        except Exception as e:
+            st.error(f"Audit Reconciliation load kora jayni: {e}")
+        return
     with st.expander("📥 Import requisition (Excel / CSV)"):
         if guard():
             req_import_view()
@@ -8079,6 +8086,160 @@ def req_audit_pdf(meta, summary, details):
     return buf.getvalue()
 
 
+def _rq(x):
+    try:
+        v = x.get("req_qty")
+        return None if v is None else float(v)
+    except Exception:
+        return None
+
+
+def _audit_core(fac, req_no, dept, start, items, kid, audit_d, auditor, remarks):
+    """Shared by both entry points: items = [(req_row_or_{}, inventory_row)]."""
+    sls = [int(i["sl_no"]) for _, i in items]
+    txs = q_c("""SELECT sl_no, date, trans_type, qty, COALESCE(notes,'') AS notes, COALESCE(officer_name,'') AS officer
+                 FROM transactions WHERE factory_name=%s AND sl_no = ANY(%s)""", (fac, sls))
+    xfs = q_c("""SELECT source_factory, dest_factory, prod_id, item_name, qty, transfer_date, COALESCE(notes,'') AS notes,
+                 COALESCE(status,'Completed') AS status FROM inter_factory_transfers
+                 WHERE source_factory=%s OR dest_factory=%s""", (fac, fac))
+    by_sl = {}
+    for t in txs:
+        by_sl.setdefault(int(t["sl_no"]), []).append(t)
+    built, flags = [], set()
+    for x, inv in items:
+        ev, fl = _audit_events(fac, inv, by_sl.get(int(inv["sl_no"]), []), xfs)
+        flags |= fl
+        b = _audit_build(inv["stock"], ev, start, audit_d)
+        built.append((x, inv, b))
+    for f in sorted(flags):
+        st.warning(f)
+
+    base = pd.DataFrame([{"Item": inv["item_name"], "ERP Code": inv["prod_id"], "Size": inv["size"], "UOM": inv["unit"],
+                          "Req Qty": _rq(x), "Opening (req date)": round(b["opening"], 4),
+                          "Received": round(b["received"], 4), "Issued": round(b["issued"], 4),
+                          "System balance (audit date)": round(b["closing"], 4), "Physical count (auditor)": None}
+                         for x, inv, b in built])
+    base["Physical count (auditor)"] = base["Physical count (auditor)"].astype("float64")
+    st.markdown("**✍️ Auditor-এর গোনা সংখ্যা এই কলামে লিখুন**")
+    edited = st.data_editor(
+        base, hide_index=True, use_container_width=True, key=f"ra_ed_{kid}_{start:%Y%m%d}_{audit_d:%Y%m%d}_" + "-".join(str(i["sl_no"]) for _, i in items),
+        disabled=[c for c in base.columns if c != "Physical count (auditor)"],
+        column_config={"Physical count (auditor)": st.column_config.NumberColumn("Physical count (auditor) ✍️", min_value=0.0)})
+
+    summary, res_rows = [], []
+    for (x, inv, b), cnt in zip(built, edited["Physical count (auditor)"].tolist()):
+        code, diff = _audit_status(b["closing"], cnt)
+        counted = None if code == "PENDING" else float(cnt)
+        summary.append({"Item": inv["item_name"], "ERP Code": inv["prod_id"] or "-", "Size": inv["size"] or "-", "UOM": inv["unit"],
+                        "Req Qty": ("-" if _rq(x) is None else f"{_rq(x):g}"), "Opening (req date)": f"{b['opening']:g}", "Received": f"{b['received']:g}",
+                        "Issued": f"{b['issued']:g}", "Balance (audit date)": f"{b['closing']:g}",
+                        "Physical count": "-" if counted is None else f"{counted:g}",
+                        "Difference": "-" if diff is None else f"{diff:+g}",
+                        "Verification": {"VERIFIED": "VERIFIED - Audit Done", "MISMATCH": "MISMATCH", "PENDING": "PENDING"}[code],
+                        "_code": code})
+        res_rows.append({"fac": fac, "req_no": req_no, "req_date": start.strftime(DATE_FMT), "audit_date": audit_d.strftime(DATE_FMT),
+                         "sl_no": int(inv["sl_no"]), "prod_id": inv["prod_id"], "item": inv["item_name"], "size": inv["size"],
+                         "unit": inv["unit"], "opening": b["opening"], "received": b["received"], "issued": b["issued"],
+                         "system": b["closing"], "counted": counted, "diff": diff, "status": code, "auditor": auditor.strip(),
+                         "remarks": remarks.strip(), "_label": _status_label(code, diff)})
+    n_ok = sum(1 for s in summary if s["_code"] == "VERIFIED")
+    n_bad = sum(1 for s in summary if s["_code"] == "MISMATCH")
+    n_pend = sum(1 for s in summary if s["_code"] == "PENDING")
+    k = st.columns(4)
+    k[0].metric("✅ Verified", n_ok)
+    k[1].metric("❌ Mismatch", n_bad)
+    k[2].metric("⏳ Pending", n_pend)
+    overall = ("AUDIT DONE - all items verified" if n_ok == len(summary) else
+               "MISMATCH FOUND" if n_bad else "AUDIT IN PROGRESS")
+    k[3].metric("Physical verification", "Audit Done ✅" if n_ok == len(summary) else ("Mismatch ❌" if n_bad else "In progress ⏳"))
+
+    show = pd.DataFrame({"Item": [s["Item"] for s in summary], "System balance": [s["Balance (audit date)"] for s in summary],
+                         "Physical": [s["Physical count"] for s in summary], "Difference": [s["Difference"] for s in summary],
+                         "Verification": [rr["_label"] for rr in res_rows]})
+    bgs = ["#DCFCE7" if s["_code"] == "VERIFIED" else "#FEE2E2" if s["_code"] == "MISMATCH" else "#FEF9C3" for s in summary]
+    st.dataframe(show.style.apply(lambda col: [f"background-color:{c};font-weight:700" for c in bgs] if col.name == "Verification"
+                                  else [""] * len(col), axis=0), hide_index=True, use_container_width=True)
+
+    st.markdown('<div class="section-title">📅 আইটেম বেছে দিনভিত্তিক Issue / Receipt দেখুন</div>', unsafe_allow_html=True)
+    names = [f"{inv['item_name']} [{inv['size'] or '-'}] · {inv['prod_id'] or '-'}" for _, inv, _ in built]
+    pick = st.selectbox("Item", names, key=f"ra_item_{kid}")
+    x, inv, b = built[names.index(pick)]
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Opening (req date)", f"{b['opening']:g} {inv['unit']}")
+    m2.metric("Received", f"{b['received']:g}")
+    m3.metric("Issued", f"{b['issued']:g}")
+    m4.metric(f"Balance {audit_d:%d-%b}", f"{b['closing']:g} {inv['unit']}")
+    if b["daily"]:
+        dd = pd.DataFrame([{"Date": e["date"].strftime(DATE_FMT), "Received": e["received"] or None, "Issued": e["issued"] or None,
+                            "Balance (end of day)": e["balance"], "Details": e["details"]} for e in b["daily"]])
+        st.dataframe(dd, hide_index=True, use_container_width=True, height=min(80 + 35 * len(dd), 380))
+    else:
+        st.caption("এই সময়ের মধ্যে এই আইটেমে কোনো Issue/Receipt হয়নি।")
+
+    st.markdown('<div class="section-title">💾 Save · 📄 PDF · 📧 Email</div>', unsafe_allow_html=True)
+    can_save = n_pend < len(summary) and bool(auditor.strip())
+    if st.button("💾 Audit result save করুন", key=f"ra_save_{kid}", type="primary", disabled=not can_save,
+                 help="অন্তত একটি আইটেমের গোনা সংখ্যা ও Auditor name লাগবে"):
+        if guard(write=False):
+            payload = [{k_: v for k_, v in rr.items() if k_ != "_label"} for rr in res_rows if rr["status"] != "PENDING"]
+            if save_req_audit(payload):
+                done(f"{len(payload)}টি আইটেমের Audit result save হয়েছে।")
+    if not can_save:
+        st.caption("Save করতে Auditor name ও অন্তত একটি আইটেমের physical count লিখুন।")
+
+    meta = {"unit": fac, "req_no": req_no, "dept": str(dept or "-"), "month": f"{audit_d:%B %Y}",
+            "req_date": start.strftime(DATE_FMT), "audit_date": audit_d.strftime(DATE_FMT), "auditor": auditor.strip(),
+            "prepared_by": st.session_state.get("user", "") or "-", "overall": overall, "counts": f"{n_ok} / {len(summary)}",
+            "generated": local_now().strftime("%d-%b-%Y %I:%M %p")}
+    details = []
+    for (x_, inv_, b_), s, rr in zip(built, summary, res_rows):
+        details.append({**b_, "item": inv_["item_name"], "size": inv_["size"], "code": inv_["prod_id"], "unit": inv_["unit"],
+                        "counted_txt": s["Physical count"], "status_txt": s["Verification"]})
+    sum_df = pd.DataFrame([{k_: v for k_, v in s.items() if k_ != "_code"} for s in summary])
+    mov_df = pd.DataFrame([{"Item": d_["item"], "Date": e["date"].strftime(DATE_FMT), "Received": e["received"], "Issued": e["issued"],
+                            "Balance (end of day)": e["balance"], "Details": e["details"]} for d_ in details for e in d_["daily"]])
+
+    def _xlsx():
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf) as w:
+            pd.DataFrame([[k_, v] for k_, v in meta.items()], columns=["Field", "Value"]).to_excel(w, sheet_name="Header", index=False)
+            sum_df.to_excel(w, sheet_name="Summary", index=False)
+            mov_df.to_excel(w, sheet_name="Daily movements", index=False)
+        return buf.getvalue()
+
+    fname = f"Requisition_Audit_{short_fac(fac)}_{req_no}_{audit_d:%d%b%Y}".replace(" ", "_").replace("/", "-")
+    d1, d2, d3 = st.columns(3)
+    try:
+        import reportlab  # noqa: F401
+        if not _lazy_download(d1, "⬇️ PDF Report", lambda: req_audit_pdf(meta, summary, details), f"{fname}.pdf", "application/pdf", f"ra_pdf_{kid}"):
+            pdf = req_audit_pdf(meta, summary, details)
+            if pdf:
+                d1.download_button("⬇️ PDF Report", pdf, f"{fname}.pdf", "application/pdf", key=f"ra_pdf_b_{kid}")
+    except ImportError:
+        d1.caption("PDF: 'pip install reportlab'")
+    xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if not _lazy_download(d2, "⬇️ Excel", _xlsx, f"{fname}.xlsx", xlsx_mime, f"ra_xls_{kid}"):
+        d2.download_button("⬇️ Excel", _xlsx(), f"{fname}.xlsx", xlsx_mime, key=f"ra_xls_b_{kid}")
+    with d3.popover("📧 Auditor-কে Email"):
+        to = st.text_input("Auditor email", key=f"ra_to_{kid}")
+        from urllib.parse import quote
+        subj = f"Requisition Audit - {fac} - Req {req_no} - {audit_d:%d-%b-%Y}"
+        body = (f"Unit: {fac}\nRequisition No: {req_no}\nRequisition date: {meta['req_date']}\nAudit date: {meta['audit_date']}\n"
+                f"Physical verification: {overall} ({n_ok}/{len(summary)} verified, {n_bad} mismatch, {n_pend} pending)\n\n"
+                "Attached: audit report (PDF).\n")
+        st.markdown(f"[📧 Email খুলুন](mailto:{quote(to.strip())}?subject={quote(subj)}&body={quote(body)})")
+        st.caption("ব্রাউজার নিজে ফাইল attach করতে পারে না — আগে ‘PDF Report’ download করে email-এ attach করুন।")
+
+    try:
+        hist = qdf_c("""SELECT audit_date, item_name, size, system_balance, counted_qty, diff_qty, status, auditor, recorded_by, recorded_at
+                        FROM req_audit_checks WHERE factory_name=%s AND req_no=%s ORDER BY id DESC""", (fac, req_no))
+    except Exception:
+        hist = pd.DataFrame()
+    if not hist.empty:
+        with st.expander(f"🗂 আগের saved audit ({len(hist)})"):
+            st.dataframe(hist, hide_index=True, use_container_width=True, height=min(80 + 35 * len(hist), 320))
+
+
 def req_audit_view(rows, r):
     ensure_req_audit_table()
     fac, req_no = r["factory_name"], str(r["req_no"] or "")
@@ -8123,148 +8284,84 @@ def req_audit_view(rows, r):
         st.warning("Inventory-তে পাওয়া যায়নি (হিসাবে নেই): " + ", ".join(missing[:10]))
     if not items:
         return
-    sls = [int(i["sl_no"]) for _, i in items]
-    txs = q_c("""SELECT sl_no, date, trans_type, qty, COALESCE(notes,'') AS notes, COALESCE(officer_name,'') AS officer
-                 FROM transactions WHERE factory_name=%s AND sl_no = ANY(%s)""", (fac, sls))
-    xfs = q_c("""SELECT source_factory, dest_factory, prod_id, item_name, qty, transfer_date, COALESCE(notes,'') AS notes,
-                 COALESCE(status,'Completed') AS status FROM inter_factory_transfers
-                 WHERE source_factory=%s OR dest_factory=%s""", (fac, fac))
-    by_sl = {}
-    for t in txs:
-        by_sl.setdefault(int(t["sl_no"]), []).append(t)
-    built, flags = [], set()
-    for x, inv in items:
-        ev, fl = _audit_events(fac, inv, by_sl.get(int(inv["sl_no"]), []), xfs)
-        flags |= fl
-        b = _audit_build(inv["stock"], ev, start, audit_d)
-        built.append((x, inv, b))
-    for f in sorted(flags):
-        st.warning(f)
+    _audit_core(fac, req_no, str(r["department"] or "-"), start, items, str(r["id"]), audit_d, auditor, remarks)
 
-    base = pd.DataFrame([{"Item": inv["item_name"], "ERP Code": inv["prod_id"], "Size": inv["size"], "UOM": inv["unit"],
-                          "Req Qty": float(x["req_qty"]), "Opening (req date)": round(b["opening"], 4),
-                          "Received": round(b["received"], 4), "Issued": round(b["issued"], 4),
-                          "System balance (audit date)": round(b["closing"], 4), "Physical count (auditor)": None}
-                         for x, inv, b in built])
-    base["Physical count (auditor)"] = base["Physical count (auditor)"].astype("float64")
-    st.markdown("**✍️ Auditor-এর গোনা সংখ্যা এই কলামে লিখুন**")
-    edited = st.data_editor(
-        base, hide_index=True, use_container_width=True, key=f"ra_ed_{r['id']}_{audit_d:%Y%m%d}",
-        disabled=[c for c in base.columns if c != "Physical count (auditor)"],
-        column_config={"Physical count (auditor)": st.column_config.NumberColumn("Physical count (auditor) ✍️", min_value=0.0)})
 
-    summary, res_rows = [], []
-    for (x, inv, b), cnt in zip(built, edited["Physical count (auditor)"].tolist()):
-        code, diff = _audit_status(b["closing"], cnt)
-        counted = None if code == "PENDING" else float(cnt)
-        summary.append({"Item": inv["item_name"], "ERP Code": inv["prod_id"] or "-", "Size": inv["size"] or "-", "UOM": inv["unit"],
-                        "Req Qty": f"{float(x['req_qty']):g}", "Opening (req date)": f"{b['opening']:g}", "Received": f"{b['received']:g}",
-                        "Issued": f"{b['issued']:g}", "Balance (audit date)": f"{b['closing']:g}",
-                        "Physical count": "-" if counted is None else f"{counted:g}",
-                        "Difference": "-" if diff is None else f"{diff:+g}",
-                        "Verification": {"VERIFIED": "VERIFIED - Audit Done", "MISMATCH": "MISMATCH", "PENDING": "PENDING"}[code],
-                        "_code": code})
-        res_rows.append({"fac": fac, "req_no": req_no, "req_date": start.strftime(DATE_FMT), "audit_date": audit_d.strftime(DATE_FMT),
-                         "sl_no": int(inv["sl_no"]), "prod_id": inv["prod_id"], "item": inv["item_name"], "size": inv["size"],
-                         "unit": inv["unit"], "opening": b["opening"], "received": b["received"], "issued": b["issued"],
-                         "system": b["closing"], "counted": counted, "diff": diff, "status": code, "auditor": auditor.strip(),
-                         "remarks": remarks.strip(), "_label": _status_label(code, diff)})
-    n_ok = sum(1 for s in summary if s["_code"] == "VERIFIED")
-    n_bad = sum(1 for s in summary if s["_code"] == "MISMATCH")
-    n_pend = sum(1 for s in summary if s["_code"] == "PENDING")
-    k = st.columns(4)
-    k[0].metric("✅ Verified", n_ok)
-    k[1].metric("❌ Mismatch", n_bad)
-    k[2].metric("⏳ Pending", n_pend)
-    overall = ("AUDIT DONE - all items verified" if n_ok == len(summary) else
-               "MISMATCH FOUND" if n_bad else "AUDIT IN PROGRESS")
-    k[3].metric("Physical verification", "Audit Done ✅" if n_ok == len(summary) else ("Mismatch ❌" if n_bad else "In progress ⏳"))
+def _ram_add():
+    res = st.session_state.get("ram_res") or {}
+    lst = st.session_state.setdefault("ram_items", [])
+    for lb in st.session_state.get("ram_pick") or []:
+        if lb in res and res[lb] not in lst:
+            lst.append(res[lb])
+    st.session_state["ram_pick"] = []
 
-    show = pd.DataFrame({"Item": [s["Item"] for s in summary], "System balance": [s["Balance (audit date)"] for s in summary],
-                         "Physical": [s["Physical count"] for s in summary], "Difference": [s["Difference"] for s in summary],
-                         "Verification": [rr["_label"] for rr in res_rows]})
-    bgs = ["#DCFCE7" if s["_code"] == "VERIFIED" else "#FEE2E2" if s["_code"] == "MISMATCH" else "#FEF9C3" for s in summary]
-    st.dataframe(show.style.apply(lambda col: [f"background-color:{c};font-weight:700" for c in bgs] if col.name == "Verification"
-                                  else [""] * len(col), axis=0), hide_index=True, use_container_width=True)
 
-    st.markdown('<div class="section-title">📅 আইটেম বেছে দিনভিত্তিক Issue / Receipt দেখুন</div>', unsafe_allow_html=True)
-    names = [f"{inv['item_name']} [{inv['size'] or '-'}] · {inv['prod_id'] or '-'}" for _, inv, _ in built]
-    pick = st.selectbox("Item", names, key=f"ra_item_{r['id']}")
-    x, inv, b = built[names.index(pick)]
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Opening (req date)", f"{b['opening']:g} {inv['unit']}")
-    m2.metric("Received", f"{b['received']:g}")
-    m3.metric("Issued", f"{b['issued']:g}")
-    m4.metric(f"Balance {audit_d:%d-%b}", f"{b['closing']:g} {inv['unit']}")
-    if b["daily"]:
-        dd = pd.DataFrame([{"Date": e["date"].strftime(DATE_FMT), "Received": e["received"] or None, "Issued": e["issued"] or None,
-                            "Balance (end of day)": e["balance"], "Details": e["details"]} for e in b["daily"]])
-        st.dataframe(dd, hide_index=True, use_container_width=True, height=min(80 + 35 * len(dd), 380))
+def _ram_remove(sl):
+    lst = st.session_state.get("ram_items") or []
+    if sl in lst:
+        lst.remove(sl)
+
+
+def audit_manual_view():
+    """Audit without an imported requisition: ERP requisition names rarely match this software's names, so the auditor/officer searches the
+    item here, enters the requisition date and the audit date, and gets the same day-by-day reconciliation."""
+    ensure_req_audit_table()
+    st.markdown('<div class="section-title">🧾 Audit Reconciliation — item খুঁজে, তারিখ দিয়ে</div>', unsafe_allow_html=True)
+    st.caption("Office ERP-র requisition-এর নাম এই software-এর নামের সাথে না মিললেও সমস্যা নেই: এখানে item খুঁজে নিন, Requisition date ও Audit date দিন — "
+               "ওই সময়ের Issue/Receipt ও Audit-এর দিনের balance এই software-এর data থেকে আসবে।")
+    if "CONSOLIDATED" in str(FAC):
+        fac = st.selectbox("Unit", FACTORIES, key="ram_fac")
     else:
-        st.caption("এই সময়ের মধ্যে এই আইটেমে কোনো Issue/Receipt হয়নি।")
+        fac = FAC
+    today = local_now().date()
+    c1, c2, c3 = st.columns([1.2, 1.2, 1])
+    req_no = c1.text_input("Requisition No (ERP থেকে, না লিখলেও চলবে)", key="ram_no").strip()
+    dept = c2.selectbox("Department", ["-"] + list(DEPARTMENTS), key="ram_dept")
+    start = c3.date_input("Requisition date", value=today, max_value=today, key="ram_start")
+    d1, d2, d3 = st.columns([1, 1.2, 1.4])
+    audit_d = d1.date_input("Audit date", value=today, min_value=start, max_value=today, key=f"ram_aud_date_{start:%Y%m%d}")
+    auditor = d2.text_input("Auditor name", key="ram_auditor")
+    remarks = d3.text_input("Remarks (optional)", key="ram_remarks")
 
-    st.markdown('<div class="section-title">💾 Save · 📄 PDF · 📧 Email</div>', unsafe_allow_html=True)
-    can_save = n_pend < len(summary) and bool(auditor.strip())
-    if st.button("💾 Audit result save করুন", key=f"ra_save_{r['id']}", type="primary", disabled=not can_save,
-                 help="অন্তত একটি আইটেমের গোনা সংখ্যা ও Auditor name লাগবে"):
-        if guard(write=False):
-            payload = [{k_: v for k_, v in rr.items() if k_ != "_label"} for rr in res_rows if rr["status"] != "PENDING"]
-            if save_req_audit(payload):
-                done(f"{len(payload)}টি আইটেমের Audit result save হয়েছে।")
-    if not can_save:
-        st.caption("Save করতে Auditor name ও অন্তত একটি আইটেমের physical count লিখুন।")
-
-    meta = {"unit": fac, "req_no": req_no, "dept": str(r["department"] or "-"), "month": f"{audit_d:%B %Y}",
-            "req_date": start.strftime(DATE_FMT), "audit_date": audit_d.strftime(DATE_FMT), "auditor": auditor.strip(),
-            "prepared_by": st.session_state.get("user", "") or "-", "overall": overall, "counts": f"{n_ok} / {len(summary)}",
-            "generated": local_now().strftime("%d-%b-%Y %I:%M %p")}
-    details = []
-    for (x_, inv_, b_), s, rr in zip(built, summary, res_rows):
-        details.append({**b_, "item": inv_["item_name"], "size": inv_["size"], "code": inv_["prod_id"], "unit": inv_["unit"],
-                        "counted_txt": s["Physical count"], "status_txt": s["Verification"]})
-    sum_df = pd.DataFrame([{k_: v for k_, v in s.items() if k_ != "_code"} for s in summary])
-    mov_df = pd.DataFrame([{"Item": d_["item"], "Date": e["date"].strftime(DATE_FMT), "Received": e["received"], "Issued": e["issued"],
-                            "Balance (end of day)": e["balance"], "Details": e["details"]} for d_ in details for e in d_["daily"]])
-
-    def _xlsx():
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf) as w:
-            pd.DataFrame([[k_, v] for k_, v in meta.items()], columns=["Field", "Value"]).to_excel(w, sheet_name="Header", index=False)
-            sum_df.to_excel(w, sheet_name="Summary", index=False)
-            mov_df.to_excel(w, sheet_name="Daily movements", index=False)
-        return buf.getvalue()
-
-    fname = f"Requisition_Audit_{short_fac(fac)}_{req_no}_{audit_d:%d%b%Y}".replace(" ", "_").replace("/", "-")
-    d1, d2, d3 = st.columns(3)
-    try:
-        import reportlab  # noqa: F401
-        if not _lazy_download(d1, "⬇️ PDF Report", lambda: req_audit_pdf(meta, summary, details), f"{fname}.pdf", "application/pdf", f"ra_pdf_{r['id']}"):
-            pdf = req_audit_pdf(meta, summary, details)
-            if pdf:
-                d1.download_button("⬇️ PDF Report", pdf, f"{fname}.pdf", "application/pdf", key=f"ra_pdf_b_{r['id']}")
-    except ImportError:
-        d1.caption("PDF: 'pip install reportlab'")
-    xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    if not _lazy_download(d2, "⬇️ Excel", _xlsx, f"{fname}.xlsx", xlsx_mime, f"ra_xls_{r['id']}"):
-        d2.download_button("⬇️ Excel", _xlsx(), f"{fname}.xlsx", xlsx_mime, key=f"ra_xls_b_{r['id']}")
-    with d3.popover("📧 Auditor-কে Email"):
-        to = st.text_input("Auditor email", key=f"ra_to_{r['id']}")
-        from urllib.parse import quote
-        subj = f"Requisition Audit - {fac} - Req {req_no} - {audit_d:%d-%b-%Y}"
-        body = (f"Unit: {fac}\nRequisition No: {req_no}\nRequisition date: {meta['req_date']}\nAudit date: {meta['audit_date']}\n"
-                f"Physical verification: {overall} ({n_ok}/{len(summary)} verified, {n_bad} mismatch, {n_pend} pending)\n\n"
-                "Attached: audit report (PDF).\n")
-        st.markdown(f"[📧 Email খুলুন](mailto:{quote(to.strip())}?subject={quote(subj)}&body={quote(body)})")
-        st.caption("ব্রাউজার নিজে ফাইল attach করতে পারে না — আগে ‘PDF Report’ download করে email-এ attach করুন।")
-
-    try:
-        hist = qdf_c("""SELECT audit_date, item_name, size, system_balance, counted_qty, diff_qty, status, auditor, recorded_by, recorded_at
-                        FROM req_audit_checks WHERE factory_name=%s AND req_no=%s ORDER BY id DESC""", (fac, req_no))
-    except Exception:
-        hist = pd.DataFrame()
-    if not hist.empty:
-        with st.expander(f"🗂 আগের saved audit ({len(hist)})"):
-            st.dataframe(hist, hide_index=True, use_container_width=True, height=min(80 + 35 * len(hist), 320))
+    key_items = "ram_items"
+    chosen = st.session_state.setdefault(key_items, [])
+    if st.session_state.get("ram_items_fac") != fac:      # switching unit clears the list (sl_no is per unit)
+        chosen.clear()
+        st.session_state["ram_items_fac"] = fac
+    term = st.text_input("🔍 Item খুঁজুন (নাম / ERP code / size — একাধিক শব্দ লিখতে পারেন)", key="ram_search")
+    toks = [t.lower() for t in term.split() if t.strip()][:6]
+    if toks:
+        hay = "LOWER(COALESCE(item_name,'') || ' ' || COALESCE(size,'') || ' ' || COALESCE(prod_id,'') || ' ' || COALESCE(serial_no,''))"
+        sql = (f"SELECT sl_no, COALESCE(prod_id,'') AS prod_id, item_name, COALESCE(size,'') AS size, COALESCE(current_stock,0) AS stock "
+               f"FROM inventory WHERE factory_name=%s AND " + " AND ".join([f"{hay} LIKE %s"] * len(toks)) + " ORDER BY item_name, size LIMIT 100")
+        res = q_c(sql, [fac] + [f"%{t}%" for t in toks])
+        labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id'] or '-'} · stock {float(r['stock']):g}": int(r["sl_no"]) for r in res}
+        st.session_state["ram_res"] = labels
+        if not labels:
+            st.warning("এই নামে কোনো item পাওয়া যায়নি। ছোট/অন্য শব্দ দিয়ে খুঁজে দেখুন।")
+        else:
+            cc1, cc2 = st.columns([4, 1], vertical_alignment="bottom")
+            cc1.multiselect("Search result — যেগুলো Audit-এ নেবেন সেগুলো select করুন", list(labels), key="ram_pick")
+            cc2.button("➕ যোগ করুন", key="ram_add_btn", on_click=_ram_add, use_container_width=True)
+    if not chosen:
+        st.info("ওপরে item খুঁজে ‘➕ যোগ করুন’ চাপুন। একাধিক item একসাথে Audit করা যাবে।")
+        return
+    inv_rows = q_c("""SELECT sl_no, COALESCE(prod_id,'') AS prod_id, item_name, COALESCE(size,'') AS size,
+                      COALESCE(current_stock,0) AS stock, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit
+                      FROM inventory WHERE factory_name=%s AND sl_no = ANY(%s)""", (fac, list(chosen)))
+    by_sl = {int(r["sl_no"]): r for r in inv_rows}
+    st.markdown("**Audit-এ থাকা item:**")
+    for sl in list(chosen):
+        r_ = by_sl.get(sl)
+        if not r_:
+            continue
+        cA, cB = st.columns([6, 1], vertical_alignment="center")
+        cA.markdown(f"• {r_['item_name']} [{r_['size'] or '-'}] · {r_['prod_id'] or '-'}")
+        cB.button("❌", key=f"ram_rm_{sl}", on_click=_ram_remove, args=(sl,))
+    items = [({"req_qty": None}, by_sl[sl]) for sl in chosen if sl in by_sl]
+    if not items:
+        return
+    _audit_core(fac, req_no or "NO-REQ-NO", dept, start, items, f"m_{short_fac(fac)}", audit_d, auditor, remarks)
 
 
 # ------------------------------------------------------------------
