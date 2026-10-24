@@ -1,0 +1,28 @@
+name: Daily database backup
+
+on:
+  schedule:
+    - cron: "30 17 * * *"
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install driver
+        run: pip install psycopg2-binary
+      - name: Dump every table to a ZIP of CSV files
+        run: python backup_job.py
+        env:
+          DB_URL: ${{ secrets.DB_URL }}
+      - name: Keep the backup for 30 days
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-backup-${{ github.run_id }}
+          path: backup_*.zip
+          retention-days: 30
+          if-no-files-found: error
