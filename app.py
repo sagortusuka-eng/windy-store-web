@@ -998,9 +998,9 @@ def qdf(sql, params=None):
     return pd.DataFrame(rows, columns=cols)
 
 
-@st.cache_data(ttl=30, show_spinner=False, max_entries=128)
+@st.cache_data(ttl=180, show_spinner=False, max_entries=128)
 def _cached_rows(sql, params_t, ver):
-    """Read-only query result, cached for 30 s and dropped at once when any save commits (ver changes)."""
+    """Read-only query result, cached for 3 min and dropped at once when any save commits (ver changes)."""
     return fetch(sql, params_t)
 
 
@@ -1533,8 +1533,8 @@ def change_password(uname, new_pw):
 
 def user_admin_panel():
     """Store Manager only: approve registrations and answer password-reset requests."""
-    pend = q("SELECT id, username, full_name FROM users WHERE COALESCE(status,'Active')='Pending' ORDER BY id")
-    resets = q("SELECT id, username, requested_at FROM password_resets WHERE status='Pending' ORDER BY id")
+    pend = q_c("SELECT id, username, full_name FROM users WHERE COALESCE(status,'Active')='Pending' ORDER BY id")
+    resets = q_c("SELECT id, username, requested_at FROM password_resets WHERE status='Pending' ORDER BY id")
     with st.expander(f"👥 User Admin ({len(pend) + len(resets)} pending)"):
         st.markdown("**New registrations**")
         if not pend:
@@ -2933,9 +2933,53 @@ def tab_transactions():
         st.info("📦 Ei factory-r inventory khali. [2] INVENTORY → ➕ Add / Import theke opening stock upload korun.")
     left, right = st.columns([1.05, 2], gap="large")
 
+    def _tx_quick_add_item(g):
+        """Supplier Receipt only: item not in the list -> create it right here (same fields and rules as
+        Inventory > Add New Item, opening stock 0 because the receipt itself adds the stock), then it is selected."""
+        with st.expander("➕ Item তালিকায় নেই? এখান থেকে নতুন Item add করুন"):
+            ensure_master_tables()
+            k = f"txqa_{g}_"
+
+            def _qa_dept_changed():   # Budget Category depends on Department
+                st.session_state[k + "cat"] = SEL
+            a1, a2, a3 = st.columns(3)
+            qa_name = a1.text_input("Item Name*", key=k + "name")
+            qa_code = a2.text_input("ERP Code (blank = temporary)", key=k + "code")
+            qa_size = a3.text_input("Size (optional)", key=k + "size")
+            try:
+                similar_item_alert(FAC, qa_name, qa_size)   # soft warning only - never blocks saving
+            except Exception:
+                pass
+            b1, b2, b3 = st.columns(3)
+            qa_dept = b1.selectbox("Department*", list(DEPARTMENTS), key=k + "dept", on_change=_qa_dept_changed)
+            qa_cat = b2.selectbox("Budget Category*", [SEL] + get_budget_categories(FAC, qa_dept), key=k + "cat")
+            qa_pcat = b3.selectbox("Product Category*", [SEL] + get_product_categories(), key=k + "pcat")
+            c1, c2 = st.columns(2)
+            qa_uom = c1.selectbox("UOM*", [SEL] + get_uoms(), key=k + "uom")
+            qa_price = c2.number_input("Unit Price (BDT) — optional", min_value=0.0, step=1.0, key=k + "price",
+                                       help="Khali rakhle pore niche 'Purchase Rate' dilei Unit Price boshe jabe.")
+            st.caption("Opening stock 0 thakbe; ei receipt-er Quantity diye stock barbe. Save korar por item-ti nijei select hoye jabe.")
+            if st.button("💾 Item Save kore Select korun", key=k + "save", use_container_width=True) and guard():
+                missing = [lbl for lbl, bad in (("Item Name", not qa_name.strip()), ("Budget Category", qa_cat == SEL),
+                                                 ("Product Category", qa_pcat == SEL), ("UOM", qa_uom == SEL)) if bad]
+                if missing:
+                    st.error("Required: " + ", ".join(missing) + ".")
+                else:
+                    res = add_item(FAC, qa_code, qa_name.strip(), qa_size.strip(), qa_dept, qa_cat, 0.0, qa_price,
+                                   "", qa_uom, qa_pcat)
+                    if res:
+                        st.session_state["_tx_prefill_sl"] = res[1]
+                        done(f"Item ager theke chilo - select kora holo: {qa_name.strip()}" if res[0] == "exists"
+                             else f"New item added: {qa_name.strip()} [{qa_size.strip() or 'no size'}] · ERP Code {res[2]} "
+                                  "- ekhon Quantity ar Purchase Rate diye receipt save korun.")
+
     @_frag   # typing / picking in the entry form re-runs ONLY this block (not the recent list, alerts, header ...)
     def _tx_entry_form():
         g = st.session_state.get("tx_gen", 0)
+        _pf = st.session_state.pop("_tx_prefill_sl", None)   # item just created from the Supplier Receipt form -> pick it
+        if _pf:
+            st.session_state[f"tx_search_{g}"] = ""
+            st.session_state[f"tx_key_{g}"] = str(_pf)
         try:
             form_box = st.container(border=True, key="tx_form_box")
         except TypeError:   # very old Streamlit without container(key=...)
@@ -2990,6 +3034,9 @@ def tab_transactions():
                             st.warning(f"{alt['item_name']} was found, but its stock is {float(alt['stock']):g}; issue is blocked.")
                         else:
                             st.error("No item found for that SL / ERP / serial value.")
+
+            if ttype == "Supplier. Rec":
+                _tx_quick_add_item(g)
 
             qc, dc = st.columns(2)
             qty = qc.number_input("Physical Stock" if ttype == OPENING_TYPE else "Quantity",
@@ -5285,7 +5332,7 @@ def tab_issue_ledger():
 def ensure_erp_track_columns():
     """Adds two columns that remember when each item's ERP balance was last updated from the Issue Ledger.
     On first creation, issues dated before today count as 'up to date' and today's issues start as pending. Additive; no existing value is changed."""
-    if st.session_state.get("_erp_track_ready"):
+    if st.session_state.get("_erp_track_ready") or _once_flags().get("erp_track"):
         return
     conn = get_conn()
     try:
@@ -5303,6 +5350,7 @@ def ensure_erp_track_columns():
                             (local_now().strftime(DATE_FMT),))
         conn.commit()
         st.session_state["_erp_track_ready"] = True
+        _once_flags()["erp_track"] = True
     except Exception:
         conn.rollback()
         raise
@@ -6295,10 +6343,12 @@ def guess_uom(name, stock):
 
 
 def autoset_uom_once():
-    if st.session_state.get("_uom_checked"):
+    if st.session_state.get("_uom_checked") or _once_flags().get("uom_autoset"):
+        st.session_state["_uom_checked"] = True
         return
     if q("SELECT 1 AS x FROM req_settings WHERE setting_key='uom_autoset_v1' AND setting_value='done'"):
         st.session_state["_uom_checked"] = True
+        _once_flags()["uom_autoset"] = True
         return
 
     @tx
@@ -6427,7 +6477,7 @@ def tab_daily_sheet():
 # ============================================================
 def ensure_count_tables():
     """Creates the two count tables on first use (additive; no existing table is touched)."""
-    if st.session_state.get("_count_tables_ready"):
+    if st.session_state.get("_count_tables_ready") or _once_flags().get("count_tables"):
         return
     conn = get_conn()
     try:
@@ -6443,6 +6493,7 @@ def ensure_count_tables():
             cur.execute("CREATE INDEX IF NOT EXISTS ix_sci_count ON stock_count_items(count_id)")
         conn.commit()
         st.session_state["_count_tables_ready"] = True
+        _once_flags()["count_tables"] = True
     except Exception:
         conn.rollback()
         raise
@@ -6750,7 +6801,7 @@ def _parse_dates(series):
 
 def ensure_addon_tables():
     """One small table for the Note Board, created once per session (additive; nothing existing is touched)."""
-    if st.session_state.get("_addon_tables_ready"):
+    if st.session_state.get("_addon_tables_ready") or _once_flags().get("addon_tables"):
         return
     conn = get_conn()
     try:
@@ -6760,6 +6811,7 @@ def ensure_addon_tables():
                 status TEXT DEFAULT 'Open', done_by TEXT, done_at TEXT)""")
         conn.commit()
         st.session_state["_addon_tables_ready"] = True
+        _once_flags()["addon_tables"] = True
     except Exception:
         conn.rollback()
         raise
@@ -6771,7 +6823,7 @@ def _stamp_params():
 
 def data_stamp():
     """One cheap query. Any new transaction / transfer / stock change gives a new stamp, which refreshes the caches."""
-    r = q(f"SELECT {STAMP_SQL}", _stamp_params())[0]
+    r = q_c(f"SELECT {STAMP_SQL}", _stamp_params())[0]
     return tuple(r[k] for k in STAMP_KEYS)
 
 
@@ -7477,7 +7529,7 @@ def render_dash_note_board():
     ensure_addon_tables()
     st.markdown('<div class="section-title">📌 নোট বোর্ড</div>', unsafe_allow_html=True)
     my_unit = FAC if FAC in FACTORIES else None
-    notes = q("""SELECT id, for_unit, note, created_by, created_at FROM dash_notes WHERE status='Open'
+    notes = q_c("""SELECT id, for_unit, note, created_by, created_at FROM dash_notes WHERE status='Open'
                  ORDER BY id DESC LIMIT 60""")
     if _note_can_write():
         gen = st.session_state.get("note_gen", 0)
@@ -7512,7 +7564,7 @@ def render_dash_note_board():
                 if _note_can_write() and b.button("✅ হয়েছে", key=f"note_done_{n['id']}", use_container_width=True):
                     if done_dash_note(n["id"]):
                         done("নোট 'হয়েছে' চিহ্নিত হয়েছে।")
-    recent = q("""SELECT for_unit, note, done_by, done_at FROM dash_notes WHERE status='Done' ORDER BY id DESC LIMIT 10""")
+    recent = q_c("""SELECT for_unit, note, done_by, done_at FROM dash_notes WHERE status='Done' ORDER BY id DESC LIMIT 10""")
     if recent:
         with st.expander(f"হয়ে যাওয়া নোট (শেষ {len(recent)}টি)"):
             for n in recent:
@@ -8760,6 +8812,20 @@ def set_item_price(fac, sl, price):
     return True
 
 
+@tx
+def set_items_budget_category(fac, sl_list, cat):
+    """Moves items onto an existing Budget line: only inventory.category changes (the field the Budget joins on)."""
+    n = 0
+    for sl in sl_list:
+        old = q("SELECT item_name, COALESCE(category,'') AS c FROM inventory WHERE sl_no=%s AND factory_name=%s", (int(sl), fac))
+        if not old:
+            continue
+        run("UPDATE inventory SET category=%s WHERE sl_no=%s AND factory_name=%s", (cat, int(sl), fac))
+        audit("SET_BUDGET_CAT", f"{fac}: {old[0]['item_name']} category '{old[0]['c']}' -> '{cat}'")
+        n += 1
+    return n or None
+
+
 def _price_budget_warning(fac, item):
     """Shown on the Issue form: a zero price (or an unbudgeted category) means the issue will not show up in the budget."""
     if float(item.get("price") or 0) <= 0:
@@ -8857,6 +8923,33 @@ def render_budget_issue_check():
                 elif set_item_price(pick["factory_name"], int(pick["sl_no"]), float(newp)):
                     done("দাম সংরক্ষিত — বাজেটে এখন থেকে এই আইটেমের Issue ধরা পড়বে।")
             st.caption("দাম বদলালে ওই আইটেমের আগের Issue-র টাকাও নতুন দামে হিসাব হবে (বাজেট হিসাব বর্তমান দামের ওপর দাঁড়িয়ে)।")
+    unm = df[(df["price"] > 0) & (~df["status"].str.startswith("✅"))].drop_duplicates(["factory_name", "sl_no"])
+    if not unm.empty:
+        with st.expander(f"🧩 Budget লাইন বেছে দিন — Category মেলেনি ({len(unm)}টি আইটেম) — Manager"):
+            facs = sorted(unm["factory_name"].unique())
+            fsel = facs[0] if len(facs) == 1 else st.selectbox("Factory", facs, key="bic_cat_fac")
+            sub = unm[unm["factory_name"] == fsel]
+            lines = q_c("""SELECT department_name, category_name, COALESCE(allocated_budget,0) AS b FROM category_budgets
+                           WHERE factory_name=%s ORDER BY department_name, category_name""", [fsel])
+            if not lines:
+                st.info("এই Factory-র কোনো Budget লাইন নেই। আগে Budget যোগ করুন।")
+            else:
+                ilab = {f"{r['item_name']} [{r['size'] or '-'}] · এখনকার Category: {r['category'] or 'ফাঁকা'}": int(r["sl_no"])
+                        for r in sub.to_dict("records")}
+                picks = st.multiselect("কোন আইটেমগুলো", list(ilab), default=list(ilab), key=f"bic_cat_items_{fsel}")
+                llab = {f"{r['category_name']}  ·  {r['department_name']}  ·  বাজেট ৳{float(r['b']):,.0f}": r["category_name"] for r in lines}
+                target = llab[st.selectbox("কোন Budget লাইনে ধরবেন", list(llab), key=f"bic_cat_line_{fsel}")]
+                pw2 = mgr_check("bic_cat_pw")
+                if st.button("💾 Budget লাইনে সংরক্ষণ", key="bic_cat_save", type="primary"):
+                    if not guard(write=False):
+                        pass
+                    elif not pw2:
+                        st.error("Manager password দিন।")
+                    elif not picks:
+                        st.error("অন্তত একটি আইটেম বাছুন।")
+                    elif set_items_budget_category(fsel, [ilab[x] for x in picks], target):
+                        done(f"{len(picks)}টি আইটেম এখন ‘{target}’ Budget লাইনে ধরা পড়বে।")
+                st.caption("শুধু আইটেমের Budget Category বদলায় (স্টক, দাম বা Department নয়)। আগের Issue-গুলোও নতুন Category-তে হিসাব হবে।")
 
 
 # ------------------------------------------------------------------
