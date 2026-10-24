@@ -9510,6 +9510,181 @@ def render_login_page():
 
 
 # ============================================================
+#  DATA HEALTH (new page, ADDITIVE ONLY): one place that lists every data problem that makes the numbers wrong
+#  (price 0, Budget line not matching, TEMP codes, negative stock, duplicate ERP codes, blank Product Category)
+#  and fixes the first two in bulk. Nothing above this block was changed.
+# ============================================================
+NAV_DATA_HEALTH = "🩺 Data Health"
+if NAV_DATA_HEALTH not in TAB_NAMES:
+    TAB_NAMES.append(NAV_DATA_HEALTH)          # shows up under "Management" in the sidebar automatically
+
+
+@tx
+def set_prices_bulk(fac, pairs):
+    """pairs = [(sl_no, new_unit_price)]. Only unit_price changes."""
+    n = 0
+    for sl, price in pairs:
+        old = q("SELECT COALESCE(unit_price,0) AS p, item_name FROM inventory WHERE sl_no=%s AND factory_name=%s", (int(sl), fac))
+        if not old:
+            continue
+        run("UPDATE inventory SET unit_price=%s WHERE sl_no=%s AND factory_name=%s", (float(price), int(sl), fac))
+        audit("SET_PRICE", f"{fac}: {old[0]['item_name']} unit price {float(old[0]['p']):g} -> {float(price):g} (Data Health)")
+        n += 1
+    return n or None
+
+
+def _health_df():
+    fsql, fp = fw(FAC, "i.")
+    df = qdf_c(f"""SELECT i.factory_name, i.sl_no, COALESCE(i.prod_id,'') AS prod_id, COALESCE(i.item_name,'') AS item_name,
+                   COALESCE(i.size,'') AS size, COALESCE(i.category,'') AS category,
+                   COALESCE(i.product_category,'') AS product_category,
+                   COALESCE(i.unit_price,0) AS price, COALESCE(i.current_stock,0) AS stock,
+                   (SELECT COUNT(*) FROM transactions t WHERE t.sl_no=i.sl_no AND t.factory_name=i.factory_name
+                       AND t.trans_type IN ('Issued','Internal Issue')) AS issues
+                   FROM inventory i WHERE 1=1{fsql} ORDER BY i.factory_name, i.item_name""", fp)
+    if df.empty:
+        return df
+    for c in ("price", "stock", "issues"):
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+    fb, fbp = fw(FAC)
+    bud = q_c(f"SELECT factory_name, category_name FROM category_budgets WHERE 1=1{fb}", fbp)
+    lines = {(r["factory_name"], str(r["category_name"]).strip()) for r in bud}
+    df["bud_ok"] = [(f, str(c).strip()) in lines for f, c in zip(df["factory_name"], df["category"])]
+    code_up = df["prod_id"].astype(str).str.strip().str.upper()
+    df["is_temp"] = code_up.str.startswith("TEMP-") | code_up.map(lambda c: is_blank_code(c))
+    real = ~df["is_temp"]
+    df["dup_code"] = real & (code_up != "") & pd.Series(list(zip(df["factory_name"], code_up)), index=df.index).duplicated(keep=False)
+    return df
+
+
+def tab_data_health():
+    st.title("🩺 Data Health")
+    st.caption("যে ভুলগুলো থাকলে বাজেট, স্টক-কভার বা রিপোর্টের হিসাব ভুল আসে — সব এক জায়গায়। সংখ্যা ০ হলেই ঠিক।")
+    try:
+        df = _health_df()
+    except Exception as e:
+        st.error(f"Data Health লোড করা যায়নি: {e}")
+        return
+    if df is None or df.empty:
+        st.info("Inventory khali.")
+        return
+    zero = df[df["price"] <= 0]
+    nobud = df[~df["bud_ok"]]
+    temp = df[df["is_temp"]]
+    neg = df[df["stock"] < 0]
+    dup = df[df["dup_code"]]
+    nopc = df[df["product_category"].astype(str).str.strip() == ""]
+    counts = [("💲 দাম ০", len(zero)), ("🧩 Budget মেলেনি", len(nobud)), ("🏷 TEMP code", len(temp)),
+              ("➖ মাইনাস স্টক", len(neg)), ("♻️ ERP code ডুপ্লিকেট", len(dup)), ("📂 Product Category ফাঁকা", len(nopc))]
+    cols = st.columns(len(counts))
+    for col, (lab, n) in zip(cols, counts):
+        col.metric(lab, f"{n:,}")
+    st.caption(f"মোট আইটেম: {len(df):,}")
+    if sum(n for _, n in counts) == 0:
+        st.success("🎉 সব ঠিক আছে — কোনো ডাটা-সমস্যা পাওয়া যায়নি।")
+    can_fix = (not is_cons_view)
+    if is_cons_view:
+        st.info("ঠিক করার বোতাম পেতে ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ শুধু দেখা যায়)।")
+    pick = lazy_tab_select([c[0] for c in counts], "lz_dh")
+
+    def _show(frame, name, extra=None):
+        show = frame[["factory_name", "sl_no", "prod_id", "item_name", "size", "category", "product_category", "price", "stock", "issues"]].copy()
+        show.columns = ["Factory", "SL", "ERP Code", "Item", "Size", "Budget Category", "Product Category", "Unit price (৳)", "Stock", "Issue entries"]
+        if not is_cons_view:
+            show = show.drop(columns=["Factory"])
+        st.dataframe(show, hide_index=True, use_container_width=True, height=min(80 + 35 * len(show), 420))
+        export_buttons(show, name)
+
+    if pick == 0:   # ---- price 0
+        if zero.empty:
+            st.success("সব আইটেমের দাম আছে।")
+        else:
+            st.markdown("**দাম বসান** — যে আইটেমের Issue বেশি সেগুলো ওপরে। দাম বসিয়ে নিচে Manager password দিয়ে সংরক্ষণ করুন।")
+            gen = st.session_state.get("dh_gen", 0)
+            view = zero.sort_values(["issues", "item_name"], ascending=[False, True]).head(300).reset_index(drop=True)
+            ed_in = pd.DataFrame({"SL": view["sl_no"].astype(int), "ERP Code": view["prod_id"], "Item": view["item_name"],
+                                  "Size": view["size"], "Issue entries": view["issues"].astype(int),
+                                  "Unit Price (৳)": view["price"].astype(float)})
+            if can_fix:
+                edited = st.data_editor(ed_in, hide_index=True, use_container_width=True, height=min(80 + 35 * len(ed_in), 420),
+                                        key=f"dh_price_ed_{gen}", disabled=["SL", "ERP Code", "Item", "Size", "Issue entries"],
+                                        column_config={"Unit Price (৳)": st.column_config.NumberColumn(format="%.2f", min_value=0.0, step=1.0)})
+                pairs = [(int(a), float(b)) for a, b in zip(edited["SL"], edited["Unit Price (৳)"]) if b and float(b) > 0]
+                st.caption(f"পরিবর্তন: {len(pairs)}টি আইটেমে নতুন দাম বসানো হয়েছে" + (f" · মোট {len(zero):,}টির মধ্যে প্রথম {len(view)}টি দেখানো হলো" if len(zero) > len(view) else ""))
+                pw = mgr_check("dh_pw_price")
+                if st.button("💾 দাম সংরক্ষণ", key="dh_price_save", type="primary"):
+                    if not guard(write=False):
+                        pass
+                    elif not pw:
+                        st.error("Manager password দিন।")
+                    elif not pairs:
+                        st.error("কোনো আইটেমে নতুন দাম বসাননি।")
+                    elif set_prices_bulk(FAC, pairs):
+                        st.session_state["dh_gen"] = gen + 1
+                        done(f"{len(pairs)}টি আইটেমের দাম সংরক্ষিত — বাজেটে এখন থেকে ধরা পড়বে।")
+            else:
+                _show(zero, "health_zero_price")
+    if pick == 1:   # ---- Budget line not matching
+        if nobud.empty:
+            st.success("সব আইটেমের Category কোনো না কোনো Budget লাইনের সাথে মেলে।")
+        else:
+            grp = (nobud.groupby(["factory_name", "category"], as_index=False)
+                   .agg(items=("sl_no", "count"), issue_entries=("issues", "sum")).sort_values("items", ascending=False))
+            grp["category"] = grp["category"].replace("", "(ফাঁকা)")
+            grp.columns = ["Factory", "এখনকার Category", "আইটেম", "Issue entries"]
+            st.markdown("**এই Category-গুলোর কোনো Budget লাইন নেই:**")
+            st.dataframe(grp, hide_index=True, use_container_width=True, height=min(80 + 35 * len(grp), 300))
+            if can_fix:
+                lines = q_c("""SELECT department_name, category_name, COALESCE(allocated_budget,0) AS b FROM category_budgets
+                               WHERE factory_name=%s ORDER BY department_name, category_name""", [FAC])
+                cur_cats = sorted(nobud["category"].replace("", "(ফাঁকা)").unique())
+                if not lines:
+                    st.info("এই Factory-র কোনো Budget লাইন নেই। আগে Budget যোগ করুন।")
+                else:
+                    src_cat = st.selectbox("কোন Category-র সব আইটেম সরাবেন", cur_cats, key="dh_bud_src")
+                    llab = {f"{r['category_name']}  ·  {r['department_name']}  ·  বাজেট ৳{float(r['b']):,.0f}": r["category_name"] for r in lines}
+                    target = llab[st.selectbox("কোন Budget লাইনে ধরবেন", list(llab), key="dh_bud_dst")]
+                    sel = nobud[nobud["category"].replace("", "(ফাঁকা)") == src_cat]
+                    st.caption(f"{len(sel)}টি আইটেম ‘{src_cat}’ থেকে ‘{target}’-এ যাবে। শুধু Budget Category বদলায় (স্টক, দাম, Department নয়)।")
+                    pw2 = mgr_check("dh_pw_bud")
+                    if st.button("💾 Budget লাইনে সংরক্ষণ", key="dh_bud_save", type="primary"):
+                        if not guard(write=False):
+                            pass
+                        elif not pw2:
+                            st.error("Manager password দিন।")
+                        elif set_items_budget_category(FAC, [int(x) for x in sel["sl_no"]], target):
+                            done(f"{len(sel)}টি আইটেম এখন ‘{target}’ Budget লাইনে ধরা পড়বে।")
+            with st.expander(f"আইটেমের তালিকা ({len(nobud):,})"):
+                _show(nobud, "health_budget_mismatch")
+    if pick == 2:   # ---- TEMP / blank ERP codes
+        if temp.empty:
+            st.success("কোনো TEMP code নেই।")
+        else:
+            st.caption("এই আইটেমগুলোর আসল ERP code বসানো হয়নি। Inventory → Edit থেকে ঠিক করুন।")
+            _show(temp, "health_temp_codes")
+            st.button("📦 Inventory খুলুন →", key="dh_go_inv", on_click=go_page, args=("📦 Inventory", None))
+    if pick == 3:   # ---- negative stock
+        if neg.empty:
+            st.success("কোনো আইটেমের স্টক মাইনাস নয়।")
+        else:
+            st.caption("মাইনাস স্টক মানে Receipt এন্ট্রি বাকি বা Issue বেশি হয়েছে। Transactions → Stock Adjustment (+) বা Opening Balance দিয়ে ঠিক করুন।")
+            _show(neg.sort_values("stock"), "health_negative_stock")
+            st.button("📝 Transactions খুলুন →", key="dh_go_tx", on_click=go_page, args=(NAV_TRANSACTIONS, None))
+    if pick == 4:   # ---- duplicate ERP codes
+        if dup.empty:
+            st.success("কোনো ERP code একাধিক আইটেমে নেই।")
+        else:
+            st.caption("একই ERP code একাধিক আইটেমে আছে (ভিন্ন size হলে স্বাভাবিক হতে পারে; ভিন্ন আইটেম হলে ভুল)।")
+            _show(dup.sort_values(["prod_id", "item_name"]), "health_duplicate_codes")
+    if pick == 5:   # ---- blank product category
+        if nopc.empty:
+            st.success("সব আইটেমের Product Category আছে।")
+        else:
+            st.caption("Inventory → Edit থেকে Product Category বসান।")
+            _show(nopc, "health_no_product_category")
+
+
+# ============================================================
 #  MAIN
 # ============================================================
 st.session_state["_dbstat"] = {"n": 0, "t": 0.0, "slow": (0.0, "")}   # fresh counters for this page run
@@ -9596,7 +9771,7 @@ autoset_uom_once()
 # Render only the selected module; the sidebar buttons update NAV_KEY.
 RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, tab_global_inventory, tab_physical_count, tab_erp_audit, tab_issue_ledger,
              tab_transfer_history, tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet,
-             tab_stock_cover]
+             tab_stock_cover, tab_data_health]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
 RENDERERS[TAB_NAMES.index(active_tab)]()
 render_session_cookie_js()
