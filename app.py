@@ -2767,7 +2767,7 @@ def tab_dashboard():
 # ============================================================
 @tx
 def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, supplier="", challan="", po_pending=False,
-                     erp_open=None, price_open=None):
+                     erp_open=None, price_open=None, rate=None, rate_mode=None):
     user = st.session_state.get("user", "")
     sl, pid, name = item["sl_no"], item["prod_id"], item["item_name"]
     stock = float(item["stock"] or 0)
@@ -2823,10 +2823,27 @@ def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, sup
     if ttype in RECEIPT_TYPES:
         grn = "Pending" if ttype == "Supplier. Rec" else "Not Required"
         run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (qty, sl, fac))
+        tx_price = float(item.get("price") or 0)
+        price_note = ""
+        if ttype == "Supplier. Rec" and rate and float(rate) > 0:
+            # Purchase rate typed on the receipt: it becomes the item's Unit Price, so Issues of this item reach the budget.
+            rate, old_p = float(rate), tx_price
+            if rate_mode == "Weighted average" and old_p > 0 and stock > 0:
+                new_p = round((stock * old_p + qty * rate) / (stock + qty), 4)
+            elif rate_mode == "Keep current price" and old_p > 0:
+                new_p = None
+            else:
+                new_p = rate
+            if new_p is not None and abs(new_p - old_p) > 1e-9:
+                run("UPDATE inventory SET unit_price=%s WHERE sl_no=%s AND factory_name=%s", (new_p, sl, fac))
+            tx_price = rate
+            price_note = f" [Purchase rate {rate:g}; unit price {old_p:g}->{(old_p if new_p is None else new_p):g}]"
         insert_tx(fac, user, sl, pid, name, qty, ttype, day, notes, date_s, time_s, "Verified", grn,
                   supplier if ttype == "Supplier. Rec" else "", challan if ttype == "Supplier. Rec" else "",
                   po_flag=po_flag, po_date=po_date,
-                  unit_price_at_tx=float(item.get("price") or 0) if ttype == "Supplier. Rec" else None)
+                  unit_price_at_tx=tx_price if ttype == "Supplier. Rec" else None)
+        if price_note:
+            audit("PURCHASE_RATE", f"{fac}: {pid} ({name}){price_note}")
     else:
         if qty > stock:
             st.error(f"Available stock ({stock:g}) kom ache requested qty ({qty:g}) theke.")
@@ -2990,6 +3007,24 @@ def tab_transactions():
                                               key=f"tx_price_open_{g}_{sl_key}")
                 st.caption("Physical Stock = hate thaka poriman. ERP Stock = ERP-er balance. "
                            "Unit Price = proti ekok-er dam (khali/purono rakhle ager dam thakbe).")
+            rate_in, rate_mode = None, None
+            if ttype == "Supplier. Rec":
+                # Shown ONLY for Supplier Receipt: the purchase rate becomes the item's Unit Price (so budget values are never blank).
+                sl_key = item["sl_no"] if item is not None else 0
+                cur_price = float(item["price"]) if item is not None else 0.0
+                rc1, rc2 = st.columns(2, gap="small")
+                rate_in = rc1.number_input("Purchase Rate (৳ / unit)", min_value=0.0, step=1.0, value=cur_price,
+                                           key=f"tx_rate_{g}_{sl_key}")
+                rate_mode = rc2.selectbox("Unit Price update", ["Latest purchase rate", "Weighted average", "Keep current price"],
+                                          key=f"tx_ratemode_{g}")
+                if item is not None:
+                    if cur_price <= 0 and rate_in <= 0:
+                        st.warning("⚠️ এই আইটেমের Unit Price এখনো 0 — Purchase Rate না দিলে এর Issue বাজেটে ধরা পড়বে না।")
+                    elif cur_price > 0 and rate_in > 0 and abs(rate_in - cur_price) / cur_price > 0.25:
+                        st.warning(f"⚠️ বর্তমান দাম ৳{cur_price:,.2f}, নতুন Purchase Rate ৳{rate_in:,.2f} "
+                                   f"({(rate_in - cur_price) / cur_price * 100:+.0f}%) — দাম ঠিক আছে কিনা দেখে নিন।")
+                    else:
+                        st.caption(f"বর্তমান Unit Price ৳{cur_price:,.2f}। Purchase Rate বসালে নির্বাচিত নিয়মে Unit Price আপডেট হবে।")
             tx_date = dc.date_input("Date", value=date.today(), max_value=date.today(), key="tx_date")
             verified, need_verif = False, False
             if item is not None and ttype in ISSUE_TYPES:
@@ -3010,6 +3045,8 @@ def tab_transactions():
                 st.info(f"**{item['item_name']}** [{item['size'] or '-'}]  ·  Serial **{item['serial'] or '-'}**  ·  SL {item['sl_no']}  ·  "
                         f"ERP {item['prod_id']}  ·  Stock **{float(item['stock']):g}**  ·  "
                         f"Short: {max(float(item['erp']) - float(item['stock']), 0):g}")
+                if ttype in ISSUE_TYPES:
+                    _price_budget_warning(fac, item)
                 if qty > 0:
                     if ttype in ISSUE_TYPES and need_verif and not verified:
                         blocked = True
@@ -3054,7 +3091,7 @@ def tab_transactions():
                                      "Quantity / remarks bodle ba kichukkhon por abar korun.")
                         elif save_transaction(fac, item, qty, ttype, tx_date, notes, verified, xfer_ok,
                                               supplier.strip(), challan.strip(), po_pending, erp_open=erp_open,
-                                              price_open=price_open):
+                                              price_open=price_open, rate=rate_in, rate_mode=rate_mode):
                             st.session_state["tx_saved_gen"] = g
                             st.session_state["tx_gen"] = g + 1
                             done("✅ Transaction saved, stock updated. Form reset hoyeche - porer transaction-er jonno ready.")
@@ -3078,6 +3115,7 @@ def tab_transactions():
                          AND i.factory_name=transactions.factory_name LIMIT 1) AS serial_no,
                       prod_id, item_name, qty, trans_type,
                       COALESCE(supplier_name,'') AS supplier_name, COALESCE(challan_no,'') AS challan_no,
+                      unit_price_at_tx AS purchase_rate,
                       verification_status, notes, date, time FROM transactions WHERE 1=1{fsql}{extra}
                       ORDER BY id DESC LIMIT 300""", fp + ep)
         if not tdf.empty:
@@ -3085,9 +3123,10 @@ def tab_transactions():
             tdf["type"] = tdf["trans_type"].map(lambda c: TRANS_LABELS.get(c, c))
             tdf["status"] = tdf["verification_status"].fillna("N/A")
             show = tdf[["id", "factory_name", "officer_name", "sl_no", "serial_no", "prod_id", "item_name", "qty", "type",
-                        "supplier_name", "challan_no", "status", "notes", "date_time"]]
+                        "supplier_name", "challan_no", "purchase_rate", "status", "notes", "date_time"]]
             st.dataframe(show.style.apply(zebra_styles, axis=1), hide_index=True,
-                         use_container_width=True, height=340)
+                         use_container_width=True, height=340,
+                         column_config={"purchase_rate": st.column_config.NumberColumn("Purchase Rate (৳)", format="%.2f")})
         else:
             st.dataframe(tdf, hide_index=True, use_container_width=True, height=340)
         export_buttons(tdf, "transactions")
@@ -4417,7 +4456,8 @@ def erp_product_received_view():
                  COALESCE(i.serial_no,'') AS serial_no, t.sl_no, t.prod_id,
                  COALESCE(NULLIF(t.erp_code,''), t.prod_id) AS erp_code, COALESCE(t.erp_sl_ref,'') AS erp_sl_ref,
                  t.qty, COALESCE(t.supplier_name,'') AS supplier_name, COALESCE(t.challan_no,'') AS challan_no,
-                 COALESCE(t.erp_grn_status,'') AS erp_status, t.officer_name, COALESCE(t.notes,'') AS notes
+                 COALESCE(t.erp_grn_status,'') AS erp_status, t.officer_name, COALESCE(t.notes,'') AS notes,
+                 t.unit_price_at_tx AS purchase_rate
                  FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
                  WHERE t.trans_type='Supplier. Rec'{fsql} ORDER BY t.id DESC""", fp)
     st.markdown('<div class="section-title">Product Received · ERP & receiving history</div>', unsafe_allow_html=True)
@@ -4464,10 +4504,12 @@ def erp_product_received_view():
 
     _tab = lazy_tab_select(["📋 Receiving History (date-wise)", "📦 Product-wise Summary"], "lz_recv")
     if _tab == 0:
-        out = view[["id", "date", "item_name", "serial_no", "sl_no", "erp_code", "qty", "factory_name", "supplier_name",
+        out = view[["id", "date", "item_name", "serial_no", "sl_no", "erp_code", "qty", "purchase_rate", "factory_name", "supplier_name",
                     "challan_no", "erp_status", "officer_name", "erp_product_name", "erp_sl_ref", "notes"]].copy()
-        out.columns = ["ID", "Date", "Item Name", "Serial No", "SL No", "ERP Code", "Qty", "Factory", "Supplier",
-                       "Challan No", "ERP Status", "Officer", "ERP Product Name", "ERP SL / ID", "Remarks"]
+        out["purchase_rate"] = pd.to_numeric(out["purchase_rate"], errors="coerce")
+        out.insert(8, "amount", (out["qty"] * out["purchase_rate"]).round(2))
+        out.columns = ["ID", "Date", "Item Name", "Serial No", "SL No", "ERP Code", "Qty", "Purchase Rate (৳)", "Amount (৳)",
+                       "Factory", "Supplier", "Challan No", "ERP Status", "Officer", "ERP Product Name", "ERP SL / ID", "Remarks"]
         st.dataframe(out, hide_index=True, use_container_width=True, height=380)
         export_buttons(out, "product_received")
     if _tab == 1:
@@ -6219,6 +6261,10 @@ def tab_budget():
         with cols[i % 3]:
             st.markdown(card, unsafe_allow_html=True)
 
+    try:
+        render_budget_issue_check()
+    except Exception as e:
+        st.caption(f"Budget Issue Check লোড হয়নি: {e}")
     try:
         render_budget_forecast()
     except Exception as e:
@@ -8702,6 +8748,118 @@ def render_daily_summary_share(stamp=None):
 
 
 # ------------------------------------------------------------------
+#  13. Budget Issue Check, zero-price warning, set price
+# ------------------------------------------------------------------
+@tx
+def set_item_price(fac, sl, price):
+    old = q("SELECT COALESCE(unit_price,0) AS p, item_name FROM inventory WHERE sl_no=%s AND factory_name=%s", (sl, fac))
+    if not old:
+        raise ValueError("Item পাওয়া যায়নি")
+    run("UPDATE inventory SET unit_price=%s WHERE sl_no=%s AND factory_name=%s", (price, sl, fac))
+    audit("SET_PRICE", f"{fac}: {old[0]['item_name']} unit price {float(old[0]['p']):g} -> {price:g}")
+    return True
+
+
+def _price_budget_warning(fac, item):
+    """Shown on the Issue form: a zero price (or an unbudgeted category) means the issue will not show up in the budget."""
+    if float(item.get("price") or 0) <= 0:
+        st.warning("⚠️ এই আইটেমের দাম 0, তাই বাজেটে ধরা পড়বে না। Manager দিয়ে Inventory → Edit থেকে Unit Price বসান, "
+                   "অথবা Supplier Receipt-এ Purchase Rate দিন।")
+    try:
+        lines = {str(r["category_name"]).strip() for r in
+                 q_c("SELECT category_name FROM category_budgets WHERE factory_name=%s", (fac,))}
+        if lines:
+            r = q_c("SELECT COALESCE(category,'') AS category FROM inventory WHERE sl_no=%s AND factory_name=%s", (item["sl_no"], fac))
+            cat = str(r[0]["category"]).strip() if r else ""
+            if cat not in lines:
+                st.info(f"ℹ️ আইটেমের Category ‘{cat or 'ফাঁকা'}’-এর কোনো Budget লাইন নেই — টাকা শুধু মোট বাজেটে ধরা পড়বে, কোনো Category কার্ডে নয়।")
+    except Exception:
+        pass
+
+
+def _issue_budget_rows(period):
+    fsql, fp = fw(FAC, "t.")
+    today = local_now().date()
+    base = f"""SELECT t.id, t.factory_name, t.sl_no, t.date, t.time, t.item_name, COALESCE(i.size,'') AS size, t.qty,
+               COALESCE(i.unit_price,0) AS price, COALESCE(i.category,'') AS category
+               FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+               WHERE t.trans_type IN ('Issued','Internal Issue') AND t.qty>0{fsql}"""
+    if period == "আজ":
+        return qdf_c(base + " AND t.date=%s ORDER BY t.id DESC", fp + [today.strftime(DATE_FMT)])
+    since = today - timedelta(days=6) if period == "গত ৭ দিন" else today.replace(day=1)
+    years = sorted({today.year, since.year})
+    cond = " OR ".join(["t.date LIKE %s OR t.date LIKE %s OR t.date LIKE %s"] * len(years))
+    pats = []
+    for y in years:
+        pats += [f"%-{y}", f"{y}-%", f"%/{y}"]
+    df = qdf_c(base + f" AND ({cond}) ORDER BY t.id DESC LIMIT 3000", fp + pats)
+    if not df.empty:
+        d = _parse_dates(df["date"])
+        df = df[d.notna() & (d >= pd.Timestamp(since))]
+    return df
+
+
+def render_budget_issue_check():
+    """Budget page: every Issue of the chosen period with price, category and whether the money reached a budget line."""
+    st.markdown('<div class="section-title">🔎 Budget Issue Check — Issue বাজেটে ধরা পড়ছে কি?</div>', unsafe_allow_html=True)
+    period = st.radio("সময়", ["আজ", "গত ৭ দিন", "এই মাস"], horizontal=True, key="bic_period", label_visibility="collapsed")
+    df = _issue_budget_rows(period)
+    if df is None or df.empty:
+        st.info(f"{period}-এর মধ্যে কোনো Issue পাওয়া যায়নি।")
+        return
+    fsql, fp = fw(FAC)
+    bud = q_c(f"SELECT factory_name, category_name FROM category_budgets WHERE 1=1{fsql}", fp)
+    exact = {(r["factory_name"], str(r["category_name"]).strip()) for r in bud}
+    loose = {(r["factory_name"], str(r["category_name"]).strip().lower()) for r in bud}
+    df = df.copy()
+    df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0.0)
+    df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0.0)
+    df["amount"] = df["qty"] * df["price"]
+
+    def _status(r):
+        cat = str(r["category"] or "").strip()
+        if r["price"] <= 0:
+            return "❌ দাম 0 — টাকা 0, বাজেটে ধরা পড়েনি"
+        if (r["factory_name"], cat) in exact:
+            return f"✅ বাজেটে ধরা পড়েছে ({cat})"
+        if (r["factory_name"], cat.lower()) in loose:
+            return "⚠️ Category নামে বানান/বড়-ছোট হাতের পার্থক্য — কার্ডে ধরা পড়েনি"
+        return f"⚠️ ‘{cat or 'ফাঁকা'}’-এর Budget লাইন নেই — শুধু মোট বাজেটে"
+    df["status"] = df.apply(_status, axis=1)
+    n0 = int((df["price"] <= 0).sum())
+    nm = int((~df["status"].str.startswith("✅") & (df["price"] > 0)).sum())
+    k = st.columns(4)
+    k[0].metric("Issue এন্ট্রি", len(df))
+    k[1].metric("মোট মূল্য", f"৳{df['amount'].sum():,.0f}")
+    k[2].metric("❌ দাম 0", n0)
+    k[3].metric("⚠️ Category মেলেনি", nm)
+    show = pd.DataFrame({"Date": df["date"], "Time": df["time"], "Factory": df["factory_name"].map(short_fac), "Item": df["item_name"],
+                         "Size": df["size"], "Qty": df["qty"], "Unit price (৳)": df["price"], "Amount (৳)": df["amount"].round(2),
+                         "Category": df["category"], "বাজেটে ধরা পড়েছে?": df["status"]})
+    st.dataframe(show, hide_index=True, use_container_width=True, height=min(80 + 35 * len(show), 380),
+                 column_config={"Unit price (৳)": st.column_config.NumberColumn(format="%.2f"),
+                                "Amount (৳)": st.column_config.NumberColumn(format="%.0f")})
+    export_buttons(show, "budget_issue_check")
+    zero = df[df["price"] <= 0].drop_duplicates(["factory_name", "sl_no"])
+    if not zero.empty:
+        with st.expander(f"💲 দাম 0 আইটেমে দাম বসান ({len(zero)}টি) — Manager"):
+            lab = {f"{r['item_name']} [{r['size'] or '-'}] · {short_fac(r['factory_name'])}": r for r in zero.to_dict("records")}
+            pick = lab[st.selectbox("আইটেম", list(lab), key="bic_pick")]
+            newp = st.number_input("Unit Price (৳ প্রতি একক)", min_value=0.0, step=1.0, key=f"bic_price_{pick['factory_name']}_{pick['sl_no']}")
+            pw = mgr_check("bic_pw")
+            if st.button("💾 দাম সংরক্ষণ", key="bic_save", type="primary"):
+                if not guard(write=False):
+                    pass
+                elif not pw:
+                    st.error("Manager password দিন।")
+                elif newp <= 0:
+                    st.error("দাম 0-র বেশি হতে হবে।")
+                elif set_item_price(pick["factory_name"], int(pick["sl_no"]), float(newp)):
+                    done("দাম সংরক্ষিত — বাজেটে এখন থেকে এই আইটেমের Issue ধরা পড়বে।")
+            st.caption("দাম বদলালে ওই আইটেমের আগের Issue-র টাকাও নতুন দামে হিসাব হবে (বাজেট হিসাব বর্তমান দামের ওপর দাঁড়িয়ে)।")
+
+
+# ------------------------------------------------------------------
 #  7. Short / Excess resolution plan (ERP Audit)
 # ------------------------------------------------------------------
 PLAN_PHASES = {1: "Phase 1 · Quick fix (ERP update / PO-GRN entry)", 2: "Phase 2 · High-value Short/Excess (recount + documents)",
@@ -8718,8 +8876,19 @@ def _workdays(start, count, skip_friday=True):
     return out
 
 
+def active_store_officers():
+    """Registered, approved accounts that can be given Short/Excess work (Store Officers first, then the Store Manager)."""
+    try:
+        return q_c("""SELECT username, COALESCE(NULLIF(TRIM(full_name),''), username) AS full_name, role FROM users
+                      WHERE LOWER(COALESCE(status,'Active')) IN ('active','approved') AND role IN ('Store Officer','Store Manager')
+                      ORDER BY CASE WHEN role='Store Officer' THEN 0 ELSE 1 END, full_name""")
+    except Exception:
+        return []
+
+
 def build_short_excess_plan(base, officers, per_officer, start, skip_friday=True):
-    """base: one row per mismatched item with phase / weight already set. Returns (plan df, phase summary df, work days)."""
+    """base: one row per mismatched item with phase / weight already set. Returns (plan df, phase summary df, work days).
+    Every working day holds at most len(officers) x per_officer units of work, shared round-robin between the officers of that day."""
     if base.empty:
         return base, pd.DataFrame(), 0
     cap = max(len(officers) * float(per_officer), 0.5)
@@ -8735,7 +8904,10 @@ def build_short_excess_plan(base, officers, per_officer, start, skip_friday=True
     n_days = max(day_idx) + 1
     dates = _workdays(start, n_days + 1, skip_friday)   # +1 working day: manager verification & closing buffer
     base["target"] = [dates[i] for i in day_idx]
-    base["officer"] = [officers[i % len(officers)] for i in range(len(base))]
+    base["officer"] = officers[0]
+    for _d, ix in base.groupby("day_no").groups.items():
+        for j, i in enumerate(ix):
+            base.at[i, "officer"] = officers[j % len(officers)]
     summ = []
     for ph, g in base.groupby("phase"):
         summ.append({"Phase": PLAN_PHASES[ph], "Items": str(len(g)), "Short": str(int((g["variance"] < 0).sum())),
@@ -8762,6 +8934,119 @@ def save_plan_tasks(rows):
     return n
 
 
+def _pdf_clean(s):
+    """reportlab's built-in fonts cannot draw Bangla / emoji: keep Latin text only so nothing prints as black boxes."""
+    t = str("" if s is None else s)
+    for a_, b_ in (("\u2013", "-"), ("\u2014", "-"), ("\u2019", "'"), ("\u2018", "'"), ("\u201c", '"'), ("\u201d", '"')):
+        t = t.replace(a_, b_)
+    return html_lib.escape(t.encode("latin-1", "ignore").decode("latin-1").strip())
+
+
+def short_excess_plan_pdf(meta, plan, summ, off_df):
+    """Professional landscape PDF of the Short/Excess Correction Plan: items with UOM, quantities and values, assigned officer,
+    working days allowed and target date for every item, officer-wise task lists and signature boxes."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    except ImportError:
+        return None
+    ss = getSampleStyleSheet()
+    sm = ParagraphStyle("sm", parent=ss["BodyText"], fontSize=7, leading=8.6)
+    smb = ParagraphStyle("smb", parent=sm, fontName="Helvetica-Bold")
+    hw = ParagraphStyle("hw", parent=smb, textColor=colors.white)
+    h2 = ParagraphStyle("h2", parent=ss["Heading3"], spaceBefore=10, spaceAfter=4, textColor=colors.HexColor("#0F172A"))
+    P = lambda t, st_=sm: Paragraph(_pdf_clean(t), st_)
+    # a name written only in Bangla cannot be drawn by the built-in PDF fonts -> use the login username instead of leaving it blank
+    fix = {n_: (n_ if _pdf_clean(n_) else u_) for n_, u_ in zip(plan["officer_name"], plan["officer"])}
+    plan = plan.copy()
+    plan["officer_name"] = plan["officer_name"].map(fix)
+    off_df = off_df.copy()
+    off_df["Officer"] = off_df["Officer"].map(lambda n_: fix.get(n_, n_))
+    ORG, DARK = colors.HexColor("#E8590C"), colors.HexColor("#334155")
+    W = landscape(A4)[0] - 36
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=18, rightMargin=18, topMargin=22, bottomMargin=26,
+                            title="Short / Excess Correction Plan")
+
+    def grid(data, widths, head_bg=ORG, extra=None):
+        t = Table(data, colWidths=widths, repeatRows=1)
+        style = [("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#94A3B8")), ("BACKGROUND", (0, 0), (-1, 0), head_bg),
+                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")])]
+        t.setStyle(TableStyle(style + (extra or [])))
+        return t
+
+    story = [Paragraph("Short / Excess Correction Plan", ss["Title"]),
+             P(f"Audit Department report - generated {meta['generated']} by {meta['prepared_by']}")]
+    head = [[P("Unit / Factory", smb), P(meta["unit"]), P("Plan start date", smb), P(meta["start"]), P("Final target date", smb), P(meta["finish"])],
+            [P("Short items", smb), P(f"{meta['n_short']}  (BDT {meta['v_short']:,.0f})"), P("Excess items", smb),
+             P(f"{meta['n_exc']}  (BDT {meta['v_exc']:,.0f})"), P("Total working days", smb), P(f"{meta['n_days']}  (Friday off: {meta['fri']})")],
+            [P("Assigned officers", smb), P(meta["officers"]), P("Capacity", smb), P(f"{meta['per_off']:g} item(s) per officer per day"),
+             P("Items in plan", smb), P(str(meta["n_items"]))]]
+    ht = Table(head, colWidths=[78, 190, 78, 190, 90, W - 626])
+    ht.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.4, colors.grey), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#FFF4E6")), ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#FFF4E6")),
+                            ("BACKGROUND", (4, 0), (4, -1), colors.HexColor("#FFF4E6"))]))
+    story += [Spacer(1, 6), ht, Spacer(1, 6),
+              P("How to read the deadlines: every item shows the number of working days within which it must be resolved, counted from the plan start date "
+                "(Friday is a weekend day when 'Friday off' is Yes), and the target date is the last day for that item. The last working day is reserved for "
+                "Manager verification and closing.", sm)]
+
+    story.append(Paragraph("1. Phase-wise plan", h2))
+    sh = ["Phase", "Items", "Short", "Excess", "Value (BDT)", "Work days", "Deadline"]
+    rows = [[P(c, hw) for c in sh]]
+    for r in summ.to_dict("records"):
+        rows.append([P(r["Phase"]), P(r["Items"]), P(r["Short"]), P(r["Excess"]), P(r["Value (৳)"]), P(r["Work days"]), P(r["Deadline"], smb)])
+    story.append(grid(rows, [300, 50, 50, 55, 85, 90, W - 630]))
+
+    story.append(Paragraph("2. Officer-wise workload", h2))
+    oc = ["Officer", "Items", "Short", "Excess", "Value (BDT)", "First target", "Last target"]
+    rows = [[P(c, hw) for c in oc]]
+    for r in off_df.to_dict("records"):
+        rows.append([P(r["Officer"], smb), P(str(r["Items"])), P(str(r["Short"])), P(str(r["Excess"])), P(f"{r['Value']:,.0f}"),
+                     P(r["First"]), P(r["Last"])])
+    story.append(grid(rows, [250, 50, 50, 55, 90, 100, W - 595]))
+
+    story.append(Paragraph("3. Item-wise plan with deadlines", h2))
+    ic = ["#", "Day", "Item", "Size", "UOM", "Type", "Short/Excess Qty", "Value (BDT)", "Priority", "Assigned officer", "Deadline", "Action"]
+    wid = [20, 26, 128, 46, 30, 38, 52, 50, 40, 82, 150, 0]
+    wid[-1] = W - sum(wid)
+    rows, extra = [[P(c, hw) for c in ic]], []
+    for n, r in enumerate(plan.to_dict("records"), start=1):
+        dl = f"Resolve within {r['day_no']} working day{'s' if r['day_no'] != 1 else ''} - target date: {r['target'].strftime(DATE_FMT)}"
+        rows.append([P(str(n)), P(str(r["day_no"])), P(r["item_name"], smb), P(r["size"] or "-"), P(r["unit"]), P("Short" if r["type"] == "Shortage" else "Excess"),
+                     P(f"{r['variance']:+g}"), P(f"{r['abs_value']:,.0f}"), P(r["priority"]), P(r["officer_name"]), P(dl), P(r["action_en"])])
+        extra.append(("BACKGROUND", (5, n), (5, n), colors.HexColor("#FEE2E2" if r["variance"] < 0 else "#FEF3C7")))
+    story.append(grid(rows, wid, DARK, extra))
+
+    story.append(PageBreak())
+    story.append(Paragraph("4. Officer-wise task lists", h2))
+    for off, g in plan.groupby("officer_name", sort=False):
+        story.append(P(f"{off} - {len(g)} item(s), final target {g['target'].max().strftime(DATE_FMT)}", smb))
+        rows = [[P(c, hw) for c in ("Item", "Size", "UOM", "Type", "Qty", "Value (BDT)", "Target date", "Deadline instruction")]]
+        for r in g.sort_values(["day_no", "abs_value"], ascending=[True, False]).to_dict("records"):
+            rows.append([P(r["item_name"]), P(r["size"] or "-"), P(r["unit"]), P("Short" if r["type"] == "Shortage" else "Excess"), P(f"{r['variance']:+g}"),
+                         P(f"{r['abs_value']:,.0f}"), P(r["target"].strftime(DATE_FMT), smb),
+                         P(f"This item must be resolved within {r['day_no']} working day{'s' if r['day_no'] != 1 else ''}, target date: "
+                           f"{r['target'].strftime(DATE_FMT)}")])
+        story += [grid(rows, [190, 55, 32, 45, 48, 62, 70, W - 502], DARK), Spacer(1, 8)]
+
+    sig = Table([[P("Prepared by (Store)", smb), P("Store Manager", smb), P("Audit Department", smb)], ["", "", ""]],
+                colWidths=[W / 3] * 3, rowHeights=[14, 36])
+    sig.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.4, colors.grey), ("LINEABOVE", (0, 1), (-1, 1), 0.5, colors.black)]))
+    story += [Spacer(1, 12), sig]
+
+    def _page(canvas, _doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7)
+        canvas.drawString(18, 12, "KC & Windy Smart Inventory - Short / Excess Correction Plan")
+        canvas.drawRightString(landscape(A4)[0] - 18, 12, f"Page {canvas.getPageNumber()}")
+        canvas.restoreState()
+    doc.build(story, onFirstPage=_page, onLaterPages=_page)
+    return buf.getvalue()
+
+
 def short_excess_plan_view(aud, tasks):
     st.markdown('<div class="section-title">🗓 Short / Excess সমাধান পরিকল্পনা (Audit Department-এর জন্য)</div>', unsafe_allow_html=True)
     if aud is None or aud.empty or not (aud["variance"] != 0).any():
@@ -8785,6 +9070,12 @@ def short_excess_plan_view(aud, tasks):
             po_set.add((r["factory_name"], r["sl_no"]))
     except Exception:
         pass
+    units = {}
+    try:
+        for r in q_c(f"SELECT factory_name, sl_no, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit FROM inventory WHERE 1=1{FSQL}", FP):
+            units[(r["factory_name"], r["sl_no"])] = r["unit"]
+    except Exception:
+        pass
     ranks = mm["abs_value"].rank(ascending=False, method="first") / max(len(mm), 1)
     rows = []
     for (idx, r), rk in zip(mm.iterrows(), ranks):
@@ -8794,17 +9085,20 @@ def short_excess_plan_view(aud, tasks):
         if key in erp_set:
             cause, action, phase, weight = ("Issue-এর পর ERP balance আপডেট হয়নি",
                                             "Issue Ledger → ERP Balance Update-এ ERP balance বসান", 1, 0.5)
+            action_en = "Update the ERP balance after issue (Issue Ledger > ERP Balance Update)"
         elif key in po_set:
             cause, action, phase, weight = ("ERP PO/GRN এন্ট্রি বাকি", "ERP-তে PO/GRN এন্ট্রি সম্পূর্ণ করুন", 1, 0.5)
+            action_en = "Complete the pending ERP PO / GRN entry"
         else:
             cause = ("অজানা — Physical গণনা ও ডকুমেন্ট যাচাই দরকার" if short
                      else "Receipt/GRN বাদ পড়া বা ভুল Issue entry হতে পারে")
             action = "Recount → Issue/Receipt ledger মেলান → ERP/Physical adjust (Manager)"
+            action_en = "Recount, reconcile Issue/Receipt ledger, then adjust ERP/Physical (Manager)"
             phase, weight = (2 if tier in ("Critical", "High") else 3), 1.0
         rows.append({"factory_name": r["factory_name"], "sl_no": r["sl_no"], "prod_id": r["prod_id"], "item_name": r["item_name"],
-                     "size": r["size"], "type": "Shortage" if short else "Excess", "variance": float(r["variance"]),
-                     "abs_value": float(r["abs_value"]), "priority": tier, "cause": cause, "action": action,
-                     "phase": phase, "weight": weight})
+                     "size": r["size"], "unit": units.get(key, "Pcs"), "type": "Shortage" if short else "Excess",
+                     "variance": float(r["variance"]), "abs_value": float(r["abs_value"]), "priority": tier, "cause": cause,
+                     "action": action, "action_en": action_en, "phase": phase, "weight": weight})
     _short_excess_plan_panel(pd.DataFrame(rows), tasks)
 
 
@@ -8813,30 +9107,45 @@ def _short_excess_plan_panel(base, tasks):
     n_short, n_exc = int((base["variance"] < 0).sum()), int((base["variance"] > 0).sum())
     v_short = float(base.loc[base["variance"] < 0, "abs_value"].sum())
     v_exc = float(base.loc[base["variance"] > 0, "abs_value"].sum())
+    quick = int((base["phase"] == 1).sum())
     k = st.columns(4)
     k[0].metric("Short items", n_short, f"৳{v_short:,.0f}")
     k[1].metric("Excess items", n_exc, f"৳{v_exc:,.0f}")
-    quick = int((base["phase"] == 1).sum())
     k[2].metric("Quick fix (ERP entry)", quick)
     k[3].metric("Recount দরকার", len(base) - quick)
 
-    st.markdown("**পরিকল্পনার ধরন ঠিক করুন** — সংখ্যা বদলালে তারিখ নিজে থেকে বদলাবে।")
-    p1, p2, p3, p4 = st.columns(4)
-    officer_pool = ["Officer_Sagor", "Officer_Rahim", "Manager Admin"]
-    officers = p1.multiselect("কারা কাজ করবেন", officer_pool, default=officer_pool[:2], key="sep_officers")
-    per_off = p2.number_input("প্রতিদিন প্রতি জন (আইটেম)", min_value=1.0, max_value=60.0, value=8.0, step=1.0, key="sep_per")
-    start = p3.date_input("শুরুর তারিখ", value=local_now().date(), key="sep_start")
-    skip_fri = p4.checkbox("শুক্রবার ছুটি", value=True, key="sep_fri")
+    # ---- Step 1: who works, how fast, from when --------------------------------------------------
+    pool = active_store_officers()
+    by_user = {r["username"]: r for r in pool}
+    with st.container(border=True):
+        st.markdown("**① পরিকল্পনা সাজান** — সংখ্যা বদলালে তারিখ নিজে থেকে বদলাবে।")
+        if not pool:
+            st.warning("Users টেবিলে কোনো Active অফিসার পাওয়া যায়নি। Manager অ্যাকাউন্ট approve করার পর আবার দেখুন।")
+        default = [r["username"] for r in pool if r["role"] == "Store Officer"][:6] or [r["username"] for r in pool][:1]
+        officers = st.multiselect("কারা কাজ করবেন (নিবন্ধিত Active অফিসার)", [r["username"] for r in pool], default=default,
+                                  format_func=lambda u: f"{by_user[u]['full_name']} ({u}) · {by_user[u]['role']}",
+                                  key="sep_officers_v2", help="Users টেবিল থেকে নিজে আসে — নতুন অফিসার approve হলেই এখানে দেখা যাবে।")
+        p2, p3, p4 = st.columns(3)
+        per_off = p2.number_input("প্রতিদিন প্রতি জন (আইটেম)", min_value=1.0, max_value=60.0, value=8.0, step=1.0, key="sep_per")
+        start = p3.date_input("শুরুর তারিখ", value=local_now().date(), key="sep_start")
+        skip_fri = p4.checkbox("শুক্রবার ছুটি", value=True, key="sep_fri")
     if not officers:
         st.warning("অন্তত একজন অফিসার select করুন।")
         return
     plan, summ, n_days = build_short_excess_plan(base, officers, per_off, start, skip_fri)
+    plan["officer_name"] = plan["officer"].map(lambda u: by_user[u]["full_name"] if u in by_user else u)
     final = plan["target"].max()                              # date of the last item
     finish = _workdays(start, n_days, skip_fri)[-1]           # + 1 working day for Manager verification / closing
     daily_units = len(officers) * per_off
     total_units = float(plan["weight"].sum())
-    st.success(f"✅ এই ক্ষমতায় সব Short/Excess সমাধানে লাগবে **{n_days} কার্যদিবস** — সম্ভাব্য শেষ তারিখ **{finish.strftime(DATE_FMT)}** "
-               f"(সর্বশেষ আইটেম {final.strftime(DATE_FMT)}, তারপর ১ দিন Manager verification)।")
+
+    # ---- Step 2: result --------------------------------------------------------------------------
+    r1, r2, r3 = st.columns(3)
+    r1.metric("মোট কার্যদিবস", n_days)
+    r2.metric("শেষ তারিখ", finish.strftime(DATE_FMT))
+    r3.metric("দৈনিক ক্ষমতা", f"{daily_units:g} আইটেম")
+    st.success(f"✅ এই ক্ষমতায় সব Short/Excess সমাধানে লাগবে **{n_days} কার্যদিবস** — সর্বশেষ আইটেম {final.strftime(DATE_FMT)}, "
+               f"তারপর ১ দিন Manager verification, অর্থাৎ **{finish.strftime(DATE_FMT)}**-এর মধ্যে সব শেষ।")
     want = st.number_input("নির্দিষ্ট দিনের মধ্যে শেষ করতে চান? (কার্যদিবস, ঐচ্ছিক — 0 = না)", min_value=0, max_value=120, value=0, step=1, key="sep_target")
     if want and want > 1:
         need_cap = total_units / (want - 1)
@@ -8846,27 +9155,74 @@ def _short_excess_plan_panel(base, tasks):
         else:
             st.warning(f"{want} কার্যদিবসে শেষ করতে দৈনিক প্রায় {need_cap:.0f} একক কাজ লাগবে → প্রতিজন {per_off:g} আইটেম হলে "
                        f"**{need_off} জন অফিসার** লাগবে (এখন {len(officers)} জন)।")
+
     st.markdown("**ধাপ অনুযায়ী পরিকল্পনা**")
     st.dataframe(summ, hide_index=True, use_container_width=True)
+
+    og = plan.groupby("officer_name", sort=False)
+    off_df = pd.DataFrame([{"Officer": n, "Items": len(g), "Short": int((g["variance"] < 0).sum()), "Excess": int((g["variance"] > 0).sum()),
+                            "Value": float(g["abs_value"].sum()), "First": g["target"].min().strftime(DATE_FMT),
+                            "Last": g["target"].max().strftime(DATE_FMT)} for n, g in og])
+    st.markdown("**অফিসার অনুযায়ী কাজ**")
+    st.dataframe(off_df.rename(columns={"Value": "Value (৳)", "First": "প্রথম target", "Last": "শেষ target"}), hide_index=True,
+                 use_container_width=True, column_config={"Value (৳)": st.column_config.NumberColumn(format="%.0f")})
+
+    # ---- Step 3: PDF / Excel / tasks -------------------------------------------------------------
+    st.markdown("**② রিপোর্ট ডাউনলোড ও সংরক্ষণ**")
+    meta = {"unit": str(FAC), "start": start.strftime(DATE_FMT), "finish": finish.strftime(DATE_FMT), "n_days": n_days,
+            "fri": "Yes" if skip_fri else "No", "n_short": n_short, "v_short": v_short, "n_exc": n_exc, "v_exc": v_exc,
+            "officers": ", ".join((by_user[u]["full_name"] if (u in by_user and _pdf_clean(by_user[u]["full_name"])) else u) for u in officers),
+            "per_off": float(per_off),
+            "n_items": len(plan), "prepared_by": st.session_state.get("user") or "-", "generated": local_now().strftime("%d-%b-%Y %I:%M %p")}
+    show = plan.copy()
+    show["Target date"] = show["target"].apply(lambda d: d.strftime(DATE_FMT))
+    show["Deadline"] = show.apply(lambda r: f"This item must be resolved within {r['day_no']} working day{'s' if r['day_no'] != 1 else ''}, "
+                                            f"target date: {r['target'].strftime(DATE_FMT)}", axis=1)
+    out = pd.DataFrame({"Day": show["day_no"], "Phase": show["phase"].map(lambda p: PLAN_PHASES[p].split(" · ")[0]),
+                        "Factory": show["factory_name"], "ERP Code": show["prod_id"], "Item": show["item_name"], "Size": show["size"],
+                        "UOM": show["unit"], "Type": show["type"], "Short/Excess Qty": show["variance"], "Value (৳)": show["abs_value"].round(0),
+                        "Priority": show["priority"], "সম্ভাব্য কারণ": show["cause"], "করণীয়": show["action"],
+                        "Officer": show["officer_name"], "Working days allowed": show["day_no"], "Target date": show["Target date"],
+                        "Deadline": show["Deadline"]})
+    fname = f"Short_Excess_Plan_{local_now():%d%b%Y}".replace(" ", "")
+    b1, b2, b3 = st.columns(3)
+    if not _lazy_download(b1, "📄 PDF Report ডাউনলোড", lambda: short_excess_plan_pdf(meta, plan, summ, off_df), f"{fname}.pdf",
+                          "application/pdf", "sep_pdf_dl"):
+        pdf_now = short_excess_plan_pdf(meta, plan, summ, off_df)
+        if pdf_now:
+            b1.download_button("📄 PDF Report ডাউনলোড", pdf_now, f"{fname}.pdf", "application/pdf", key="sep_pdf_dl_b")
+        else:
+            b1.caption("PDF: 'pip install reportlab'")
+    xl_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if not _lazy_download(b2, "⬇️ Excel", lambda: _xlsx_bytes(out), f"{fname}.xlsx", xl_mime, "sep_xls_dl"):
+        b2.download_button("⬇️ Excel", _xlsx_bytes(out), f"{fname}.xlsx", xl_mime, key="sep_xls_dl_b")
+    open_keys = set()
+    if tasks is not None and not tasks.empty:
+        for r in tasks[tasks["status"] != "Closed"].to_dict("records"):
+            open_keys.add((r["factory_name"], str(r["prod_id"]), r["item_name"]))
+    fresh = [r for r in plan.to_dict("records") if (r["factory_name"], str(r["prod_id"]), r["item_name"]) not in open_keys]
+    if "CONSOLIDATED" in str(FAC):
+        b3.caption("Task সেভ করতে নির্দিষ্ট একটি factory select করুন।")
+    elif b3.button(f"💾 {len(fresh)}টি Correction Task তৈরি করুন", key="sep_save", type="primary", disabled=not fresh):
+        if guard():
+            trows = [{**r, "target": r["target"].strftime(DATE_FMT), "value": (r["abs_value"] if r["variance"] > 0 else -r["abs_value"])}
+                     for r in fresh]
+            n = save_plan_tasks(trows)
+            if n:
+                done(f"{n}টি Correction task তৈরি হয়েছে।")
+    st.caption(f"{len(fresh)}টি আইটেমের জন্য নতুন task হবে ({len(plan) - len(fresh)}টির open task আগে থেকেই আছে — সেগুলো বাদ)। "
+               "PDF-এ প্রতিটি আইটেমের নাম, Size, UOM, Short/Excess পরিমাণ ও মূল্য, দায়িত্বপ্রাপ্ত অফিসার, কত কার্যদিবসের মধ্যে ও কোন তারিখের মধ্যে সমাধান করতে হবে — সব থাকে।")
+
     summary_txt = (f"Short/Excess সমাধান পরিকল্পনা ({local_now():%d-%b-%Y}): মোট {n_short}টি Short (৳{v_short:,.0f}) ও {n_exc}টি Excess "
                    f"(৳{v_exc:,.0f}) আইটেম। {quick}টি আইটেম শুধু ERP এন্ট্রি/আপডেটের কারণে (দ্রুত সমাধান), বাকি {len(base) - quick}টিতে "
                    f"Physical recount ও ডকুমেন্ট যাচাই লাগবে। {len(officers)} জন অফিসার দৈনিক {per_off:g}টি করে কাজ করলে "
                    f"{n_days} কার্যদিবসে, অর্থাৎ {finish.strftime(DATE_FMT)}-এর মধ্যে সব আইটেমের সমাধান ও Manager verification সম্পন্ন হবে।")
-    st.markdown("**Audit Department-কে জানানোর সারাংশ** (কপি করে পাঠান)")
-    st.code(summary_txt, language=None)
-
-    show = plan.copy()
-    show["Target date"] = show["target"].apply(lambda d: d.strftime(DATE_FMT))
-    out = pd.DataFrame({"Day": show["day_no"], "Phase": show["phase"].map(lambda p: PLAN_PHASES[p].split(" · ")[0]),
-                        "Factory": show["factory_name"], "ERP Code": show["prod_id"], "Item": show["item_name"], "Size": show["size"],
-                        "Type": show["type"], "Variance": show["variance"], "Value (৳)": show["abs_value"].round(0),
-                        "Priority": show["priority"], "সম্ভাব্য কারণ": show["cause"], "করণীয়": show["action"],
-                        "Officer": show["officer"], "Target date": show["Target date"]})
+    with st.expander("📝 Audit Department-কে জানানোর সারাংশ (কপি করে পাঠান)"):
+        st.code(summary_txt, language=None)
     with st.expander(f"📋 আইটেম-ভিত্তিক বিস্তারিত পরিকল্পনা ({len(out)})", expanded=False):
         st.dataframe(out, hide_index=True, use_container_width=True, height=420,
-                     column_config={"Variance": st.column_config.NumberColumn(format="%+.2f")})
+                     column_config={"Short/Excess Qty": st.column_config.NumberColumn(format="%+.2f")})
         st.caption("'সম্ভাব্য কারণ' সিস্টেমের অনুমান (ERP update / PO-GRN pending আছে কি না দেখে) — Physical যাচাই ছাড়া চূড়ান্ত নয়।")
-        export_buttons(out, "short_excess_plan")
 
     st.markdown("**পরিকল্পনা কতদূর এগিয়েছে (Correction Task থেকে)**")
     if tasks is None or tasks.empty:
@@ -8884,23 +9240,180 @@ def _short_excess_plan_panel(base, tasks):
         g[3].metric("⏰ সময় পেরিয়েছে", overdue)
         st.progress(closed / total if total else 0.0)
 
-    st.markdown("**এই পরিকল্পনা Correction Task হিসেবে সেভ করুন**")
-    open_keys = set()
-    if tasks is not None and not tasks.empty:
-        for r in tasks[tasks["status"] != "Closed"].to_dict("records"):
-            open_keys.add((r["factory_name"], str(r["prod_id"]), r["item_name"]))
-    fresh = [r for r in plan.to_dict("records") if (r["factory_name"], str(r["prod_id"]), r["item_name"]) not in open_keys]
-    st.caption(f"{len(fresh)}টি আইটেমের জন্য নতুন task হবে ({len(plan) - len(fresh)}টির open task আগে থেকেই আছে — সেগুলো বাদ)। "
-               "task-এ Target date, Priority, কারণ ও করণীয় বসে যাবে; পরে '📝 Correction Plan' থেকে Edit/Close করতে পারবেন।")
-    if "CONSOLIDATED" in str(FAC):
-        st.info("Task সেভ করতে ওপরে নির্দিষ্ট একটি factory select করুন।")
-    elif st.button(f"💾 {len(fresh)}টি Correction Task তৈরি করুন", key="sep_save", type="primary", disabled=not fresh):
-        if guard():
-            rows = [{**r, "target": r["target"].strftime(DATE_FMT), "value": (r["abs_value"] if r["variance"] > 0 else -r["abs_value"])}
-                    for r in fresh]
-            n = save_plan_tasks(rows)
-            if n:
-                done(f"{n}টি Correction task তৈরি হয়েছে।")
+
+# ============================================================
+#  FULL-SCREEN SLIDING LOGIN / REGISTER PAGE (shown first, before anything else, until someone is signed in)
+# ============================================================
+_KC_LOGIN_CSS = """<style>
+[data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"], [data-testid="collapsedControl"],
+[data-testid="stHeader"], [data-testid="stToolbar"], header { display:none !important; }
+.stApp { background: radial-gradient(1200px 600px at 10% 0%, #dbeafe 0%, transparent 60%),
+                     radial-gradient(900px 500px at 100% 100%, #c7d2fe 0%, transparent 55%), #eef2ff !important; }
+.block-container { max-width: 1020px !important; padding-top: 7vh !important; padding-bottom: 3vh !important; }
+[data-testid="stHorizontalBlock"]:has(.kc-form-marker) {
+    background:#ffffff; border-radius:30px; box-shadow:0 30px 80px rgba(37,99,235,.22), 0 4px 14px rgba(15,23,42,.06);
+    gap:0 !important; overflow:hidden; min-height:560px; align-items:stretch !important; }
+[data-testid="stHorizontalBlock"]:has(.kc-mode-register) { flex-direction: row-reverse !important; }
+[data-testid="stHorizontalBlock"]:has(.kc-mode-login)    { animation: kcSlideL .75s cubic-bezier(.22,1,.36,1); }
+[data-testid="stHorizontalBlock"]:has(.kc-mode-register) { animation: kcSlideR .75s cubic-bezier(.22,1,.36,1); }
+@keyframes kcSlideL { from { opacity:0; transform: translateX(-90px) scale(.985); } to { opacity:1; transform:none; } }
+@keyframes kcSlideR { from { opacity:0; transform: translateX(90px) scale(.985); }  to { opacity:1; transform:none; } }
+[data-testid="stColumn"]:has(.kc-panel-marker), [data-testid="column"]:has(.kc-panel-marker) {
+    background: linear-gradient(145deg, #1d4ed8 0%, #3b82f6 55%, #60a5fa 100%); color:#fff; flex:1 1 46% !important;
+    border-radius: 30px 190px 190px 30px; position:relative; overflow:hidden; }
+[data-testid="stHorizontalBlock"]:has(.kc-mode-register) [data-testid="stColumn"]:has(.kc-panel-marker),
+[data-testid="stHorizontalBlock"]:has(.kc-mode-register) [data-testid="column"]:has(.kc-panel-marker) { border-radius: 190px 30px 30px 190px; }
+[data-testid="stColumn"]:has(.kc-panel-marker)::before, [data-testid="column"]:has(.kc-panel-marker)::before {
+    content:""; position:absolute; width:260px; height:260px; border-radius:50%; background:rgba(255,255,255,.08); top:-80px; left:-70px; }
+[data-testid="stColumn"]:has(.kc-panel-marker)::after, [data-testid="column"]:has(.kc-panel-marker)::after {
+    content:""; position:absolute; width:200px; height:200px; border-radius:50%; background:rgba(255,255,255,.07); bottom:-60px; right:40px; }
+[data-testid="stColumn"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"] {
+    min-height:560px; justify-content:center; align-items:center; text-align:center; padding:0 34px; position:relative; z-index:1; }
+.kc-panel-inner h1 { color:#fff !important; font-size:2.35rem; font-weight:800; margin:.4rem 0 .5rem 0; letter-spacing:-.5px; }
+.kc-panel-inner p  { color:rgba(255,255,255,.92) !important; font-size:1.02rem; margin:0 0 .6rem 0; }
+.kc-logo { width:78px; height:78px; object-fit:contain; background:#fff; border-radius:20px; padding:9px; box-shadow:0 10px 26px rgba(15,23,42,.25); }
+[data-testid="stColumn"]:has(.kc-panel-marker) button, [data-testid="column"]:has(.kc-panel-marker) button {
+    background:transparent !important; color:#fff !important; border:2px solid #fff !important; border-radius:14px !important;
+    min-width:170px; height:46px; font-weight:700 !important; transition:all .25s ease; }
+[data-testid="stColumn"]:has(.kc-panel-marker) button:hover, [data-testid="column"]:has(.kc-panel-marker) button:hover {
+    background:#fff !important; color:#1d4ed8 !important; transform:translateY(-2px); box-shadow:0 10px 24px rgba(0,0,0,.18); }
+[data-testid="stColumn"]:has(.kc-form-marker), [data-testid="column"]:has(.kc-form-marker) { flex:1 1 54% !important; padding:44px 54px !important; }
+[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stVerticalBlock"] { justify-content:center; min-height:470px; }
+.kc-form-title { font-size:1.55rem; font-weight:800; color:#0f172a; line-height:1.25; margin:0 0 .25rem 0; text-align:center; }
+.kc-form-sub { color:#64748b; text-align:center; margin:0 0 1rem 0; font-size:.95rem; }
+[data-testid="stColumn"]:has(.kc-form-marker) input, [data-testid="column"]:has(.kc-form-marker) input {
+    background:#eef1f6 !important; border:1.5px solid transparent !important; border-radius:12px !important; height:46px; color:#0f172a !important; }
+[data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="input"], [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="input"] {
+    background:#eef1f6 !important; border:1.5px solid transparent !important; border-radius:12px !important; }
+[data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="input"]:focus-within, [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="input"]:focus-within {
+    border-color:#3b82f6 !important; box-shadow:0 0 0 3px rgba(59,130,246,.18); }
+[data-testid="stFormSubmitButton"] button { background:linear-gradient(90deg,#1d4ed8,#3b82f6) !important; color:#fff !important; border:none !important;
+    border-radius:14px !important; height:48px; font-weight:700 !important; letter-spacing:.2px; box-shadow:0 10px 22px rgba(37,99,235,.35); transition:all .25s ease; }
+[data-testid="stFormSubmitButton"] button:hover { transform:translateY(-2px); box-shadow:0 14px 28px rgba(37,99,235,.45); }
+[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stForm"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stForm"] { border:none !important; padding:0 !important; }
+.kc-foot { text-align:center; color:#64748b; font-size:.8rem; margin-top:18px; }
+@media (max-width: 760px) {
+  .block-container { padding-top:3vh !important; }
+  [data-testid="stHorizontalBlock"]:has(.kc-mode-register) { flex-direction: column-reverse !important; }
+  [data-testid="stColumn"]:has(.kc-panel-marker), [data-testid="column"]:has(.kc-panel-marker),
+  [data-testid="stHorizontalBlock"]:has(.kc-mode-register) [data-testid="stColumn"]:has(.kc-panel-marker) { border-radius: 30px 30px 110px 110px; }
+  [data-testid="stColumn"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"] { min-height:300px; }
+  [data-testid="stColumn"]:has(.kc-form-marker), [data-testid="column"]:has(.kc-form-marker) { padding:28px 22px !important; }
+  .kc-panel-inner h1 { font-size:1.8rem; }
+}
+</style>"""
+
+_KC_APP_IN_CSS = """<style>
+@keyframes kcAppIn { from { opacity:0; transform: translateY(18px); } to { opacity:1; transform:none; } }
+@keyframes kcSideIn { from { opacity:0; transform: translateX(-34px); } to { opacity:1; transform:none; } }
+.block-container { animation: kcAppIn .85s cubic-bezier(.22,1,.36,1); }
+[data-testid="stSidebar"] > div { animation: kcSideIn .8s cubic-bezier(.22,1,.36,1); }
+</style>"""
+
+
+def _kc_set_mode(mode):
+    st.session_state["auth_mode"] = mode
+
+
+def _kc_sign_in(username, password):
+    """Same rules as before: password check, Pending/Active status, 12-hour session cookie. Returns a status string."""
+    u = username.strip()
+    rows = q("SELECT password, role, COALESCE(status,'Active') AS status FROM users WHERE username=%s", (u,))
+    if not (rows and verify_password(rows[0]["password"], password)):
+        return "bad"
+    if rows[0]["status"] == "Pending":
+        return "pending"
+    if rows[0]["status"] != "Active":
+        return "inactive"
+    st.session_state["user"] = u
+    st.session_state["role"] = rows[0]["role"]
+    st.session_state.pop("locked_factory", None)   # every new login must choose its unit
+    st.session_state.pop("_gate_pending", None)
+    token = create_login_session(u)
+    if token:
+        st.session_state["_cookie_set"] = token
+        st.session_state["_login_tok"] = token
+    log_event("LOGIN", f"User {u} logged in as {rows[0]['role']}.")
+    st.session_state["_just_logged_in"] = True
+    st.session_state["auth_mode"] = "login"
+    return "ok"
+
+
+def render_login_page():
+    """First screen of the website: blue curved panel + form, sliding between Sign in and Register."""
+    st.markdown(_KC_LOGIN_CSS, unsafe_allow_html=True)
+    mode = st.session_state.get("auth_mode", "login")
+    if mode not in ("login", "register", "forgot"):
+        mode = "login"
+    reg = mode == "register"
+    left, right = st.columns([46, 54], gap="small")
+    with left:
+        st.markdown('<div class="kc-panel-marker"></div>', unsafe_allow_html=True)
+        logo = f'<img class="kc-logo" src="data:image/png;base64,{WINDY_LOGO_B64}" alt="Windy Group">'
+        if reg:
+            st.markdown(f'<div class="kc-panel-inner">{logo}<h1>Welcome Back!</h1><p>Already have an account?</p></div>', unsafe_allow_html=True)
+            st.button("Login", key="kc_to_login", on_click=_kc_set_mode, args=("login",))
+        else:
+            st.markdown(f'<div class="kc-panel-inner">{logo}<h1>Hello, Welcome!</h1><p>Don\'t have an account?</p></div>', unsafe_allow_html=True)
+            st.button("Register", key="kc_to_register", on_click=_kc_set_mode, args=("register",))
+    with right:
+        st.markdown(f'<div class="kc-form-marker kc-mode-{"register" if reg else "login"}"></div>', unsafe_allow_html=True)
+        if mode == "login":
+            st.markdown('<div class="kc-form-title">Welcome to Windy Washing &amp; KC Washing Store Inventory</div>'
+                        '<div class="kc-form-sub">Sign in with your approved account to continue</div>', unsafe_allow_html=True)
+            with st.form("kc_login_form", clear_on_submit=False):
+                u = st.text_input("Username", placeholder="Username", key="kc_login_user", label_visibility="collapsed")
+                p = st.text_input("Password", type="password", placeholder="Password", key="kc_login_pass", label_visibility="collapsed")
+                go = st.form_submit_button("Login", use_container_width=True)
+            if go:
+                if not u.strip() or not p:
+                    st.error("Enter both username and password.")
+                else:
+                    res = _kc_sign_in(u, p)
+                    if res == "ok":
+                        done(f"Welcome, {u.strip()}!")
+                    elif res == "pending":
+                        st.warning("Your account is waiting for Store Manager approval.")
+                    elif res == "inactive":
+                        st.error("This account is not active. Contact the Store Manager.")
+                    else:
+                        st.error("Username or password is incorrect.")
+            st.button("Forgot password?", key="kc_to_forgot", on_click=_kc_set_mode, args=("forgot",))
+        elif mode == "forgot":
+            st.markdown('<div class="kc-form-title">Forgot password?</div>'
+                        '<div class="kc-form-sub">The Store Manager will set a temporary password for you</div>', unsafe_allow_html=True)
+            with st.form("kc_forgot_form", clear_on_submit=True):
+                ru = st.text_input("Username", placeholder="Your username", key="kc_fp_user", label_visibility="collapsed")
+                rs = st.form_submit_button("Request password reset", use_container_width=True)
+            if rs:
+                if not ru.strip():
+                    st.error("Enter your username.")
+                else:
+                    request_password_reset(ru.strip())
+                    st.success("If the account is active, the reset request has been sent to the Store Manager.")
+            st.button("← Back to login", key="kc_fp_back", on_click=_kc_set_mode, args=("login",))
+        else:
+            st.markdown('<div class="kc-form-title">Create your account</div>'
+                        '<div class="kc-form-sub">New accounts need Store Manager approval before sign-in</div>', unsafe_allow_html=True)
+            with st.form("kc_reg_form", clear_on_submit=False):
+                ru = st.text_input("Username", placeholder="Username (3–30: letters, digits, _ . -)", key="kc_reg_user", label_visibility="collapsed")
+                rn = st.text_input("Full name", placeholder="Full name", key="kc_reg_name", label_visibility="collapsed")
+                p1 = st.text_input("Password", type="password", placeholder="Password (min 8 characters)", key="kc_reg_pw1", label_visibility="collapsed")
+                p2 = st.text_input("Confirm password", type="password", placeholder="Confirm password", key="kc_reg_pw2", label_visibility="collapsed")
+                rg = st.form_submit_button("Register", use_container_width=True)
+            if rg:
+                if not USERNAME_RE.fullmatch(ru.strip()):
+                    st.error("Username must be 3–30 characters using letters, numbers, _ . or -.")
+                elif not rn.strip():
+                    st.error("Enter your full name.")
+                elif len(p1) < 8:
+                    st.error("Password must be at least 8 characters.")
+                elif p1 != p2:
+                    st.error("The passwords do not match.")
+                elif register_user(ru.strip(), rn.strip(), p1):
+                    st.session_state["auth_mode"] = "login"
+                    done("Registration request sent. The Store Manager must approve it before you can sign in.")
+    st.markdown('<div class="kc-foot">KC &amp; Windy Smart Inventory · Created by MD. Sagor Ali</div>', unsafe_allow_html=True)
 
 
 # ============================================================
@@ -8922,6 +9435,14 @@ except Exception as e:
 
 restore_login_from_cookie()
 show_flash()
+
+# First view of the website: nobody gets past this screen until signed in (a valid 12-hour session cookie signs the user back in).
+if not st.session_state.get("user"):
+    render_login_page()
+    render_session_cookie_js()   # also clears the browser cookie right after a sign-out
+    st.stop()
+if st.session_state.pop("_just_logged_in", False):   # smooth fade-in of the dashboard right after a successful sign-in
+    st.markdown(_KC_APP_IN_CSS, unsafe_allow_html=True)
 
 # Brand and account/login appear first; Workspace and Management remain clearly grouped below.
 try:   # home-screen shortcut:  <app link>/?page=count  opens Physical Count directly (once per session)
