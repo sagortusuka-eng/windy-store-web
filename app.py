@@ -4026,6 +4026,182 @@ def recon_panel(default_fac):
         recon_tracker(rec_fac)
 
 
+# ============================================================
+#  OPENING CHECK (new, ADDITIVE ONLY): Excel opening file vs software stock when the Excel has NO ERP code.
+#  Names are matched exactly first, then by similarity ("Bearing 6206" ~ "Bearing-6206"). Nothing is changed in stock.
+# ============================================================
+def _oc_norm(name, size=""):
+    t = f"{name or ''} {size or ''}".lower()
+    t = re.sub(r"[^a-z0-9.]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _oc_numbers(t):
+    return sorted(re.findall(r"\d+(?:\.\d+)?", t))
+
+
+def _oc_score(a, b):
+    ta, tb = a.split(), b.split()
+    r1 = difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+    r2 = difflib.SequenceMatcher(None, " ".join(sorted(ta)), " ".join(sorted(tb)), autojunk=False).ratio()
+    return max(r1, r2)
+
+
+def _oc_typo_hint(f, s_):
+    """File qty vs software qty: looks like a typing slip (6 -> 60, 12 -> 21, 105 -> 15 ...)?"""
+    try:
+        if abs(f - round(f)) > 1e-9 or abs(s_ - round(s_)) > 1e-9:
+            return ""
+        a, b = str(int(round(f))), str(int(round(s_)))
+    except Exception:
+        return ""
+    if a == b:
+        return ""
+    if f > 0 and s_ > 0 and (abs(s_ / f - 10) < 1e-9 or abs(f / s_ - 10) < 1e-9):
+        return "⚠️ ১০ গুণ — টাইপের ভুল হতে পারে"
+    if len(a) == len(b) and sorted(a) == sorted(b):
+        return "⚠️ অঙ্ক উল্টে গেছে — টাইপের ভুল হতে পারে"
+    if abs(len(a) - len(b)) == 1:
+        lo, hi = (a, b) if len(a) < len(b) else (b, a)
+        if any(hi[:i] + hi[i + 1:] == lo for i in range(len(hi))):
+            return "⚠️ একটা অঙ্ক বেশি/কম — টাইপের ভুল হতে পারে"
+    return ""
+
+
+def opening_check_build(fac, file_rows, min_score):
+    db_rows = recon_db_rows(fac)
+    moves = {int(r["sl_no"]): int(r["n"]) for r in q_c(
+        """SELECT sl_no, COUNT(*) AS n FROM transactions WHERE factory_name=%s AND trans_type<>%s GROUP BY sl_no""",
+        (fac, OPENING_TYPE))}
+    # 1) exact: ERP code (if the file has one) or identical name(+size) - the existing rule
+    matched, _left = recon_match(file_rows, db_rows)
+    used_db, assigned = set(), {}          # file index -> (db row, label, score)
+    for i, (fr, m, method) in enumerate(matched):
+        if m is not None:
+            used_db.add(m["sl_no"])
+            assigned[i] = (m, "হুবহু (" + method + ")", 1.0)
+    # 2) similarity for the rest (token index keeps it fast even for thousands of rows)
+    dbn = [(r, _oc_norm(r["item_name"], r["size"])) for r in db_rows if r["sl_no"] not in used_db]
+    inv = {}
+    for di, (_r, nm) in enumerate(dbn):
+        for tk in set(nm.split()):
+            if len(tk) >= 2:
+                inv.setdefault(tk, []).append(di)
+    cand_pairs, best_any = [], {}
+    for i, (fr, m, _method) in enumerate(matched):
+        if i in assigned:
+            continue
+        fn = _oc_norm(fr["name"], fr["size"])
+        votes = {}
+        for tk in set(fn.split()):
+            lst = inv.get(tk, [])
+            if 0 < len(lst) <= 400:
+                w = 1.0 / len(lst)
+                for di in lst:
+                    votes[di] = votes.get(di, 0.0) + w
+        top = sorted(votes, key=votes.get, reverse=True)[:15]
+        fnum = _oc_numbers(fn)
+        for di in top:
+            sc = _oc_score(fn, dbn[di][1])
+            same_num = (fnum == _oc_numbers(dbn[di][1]))
+            if i not in best_any or sc > best_any[i][1]:
+                best_any[i] = (di, sc, same_num)
+            if sc >= min_score and same_num:
+                cand_pairs.append((sc, i, di))
+    for sc, i, di in sorted(cand_pairs, reverse=True):
+        if i in assigned or dbn[di][0]["sl_no"] in used_db:
+            continue
+        assigned[i] = (dbn[di][0], f"কাছাকাছি নাম ({sc * 100:.0f}%)", sc)
+        used_db.add(dbn[di][0]["sl_no"])
+    out = []
+    for i, (fr, _m, _method) in enumerate(matched):
+        fq = float(fr["qty"])
+        if i in assigned:
+            m, label, sc = assigned[i]
+            sp = float(m["phys"])
+            diff = sp - fq
+            if abs(diff) < 1e-6:
+                res = "Match" if label.startswith("হুবহু") else "Match (নাম কাছাকাছি — দেখে নিন)"
+            else:
+                res = "Qty differs"
+            out.append({"Result": res, "File Item": fr["name"], "File Size": fr["size"], "File Qty": fq,
+                        "Software Item": m["item_name"], "Software Size": m["size"], "SL No": int(m["sl_no"]),
+                        "ERP Code": m["prod_id"], "Software Physical": sp, "Software − File": diff,
+                        "Name match": label, "Hint": _oc_typo_hint(fq, sp) if res == "Qty differs" else "",
+                        "Moves since opening": moves.get(int(m["sl_no"]), 0)})
+        else:
+            near = ""
+            if i in best_any and best_any[i][1] >= 0.5:
+                di, sc, same_num = best_any[i]
+                r = dbn[di][0]
+                near = f"{r['item_name']} [{r['size'] or '-'}] · SL {r['sl_no']} · {sc * 100:.0f}%" + ("" if same_num else " · সংখ্যা আলাদা")
+            out.append({"Result": "Not in software", "File Item": fr["name"], "File Size": fr["size"], "File Qty": fq,
+                        "Software Item": "", "Software Size": "", "SL No": None, "ERP Code": "", "Software Physical": None,
+                        "Software − File": None, "Name match": "মেলেনি", "Hint": ("সবচেয়ে কাছের: " + near) if near else "",
+                        "Moves since opening": 0})
+    for r in db_rows:
+        if r["sl_no"] in used_db:
+            continue
+        sp = float(r["phys"])
+        if abs(sp) < 1e-9:
+            continue
+        out.append({"Result": "Not in file", "File Item": "", "File Size": "", "File Qty": None,
+                    "Software Item": r["item_name"], "Software Size": r["size"], "SL No": int(r["sl_no"]),
+                    "ERP Code": r["prod_id"], "Software Physical": sp, "Software − File": sp, "Name match": "মেলেনি",
+                    "Hint": "", "Moves since opening": moves.get(int(r["sl_no"]), 0)})
+    return pd.DataFrame(out)
+
+
+def opening_check_panel(default_fac):
+    with st.expander("🔎 Opening Check — Excel-এ ERP code না থাকলে নাম মিলিয়ে (কাছাকাছি নামসহ)", expanded=False):
+        st.caption("প্রথম দিনের ওপেনিং Excel দিন। অ্যাপ নাম দিয়ে মেলাবে (হুবহু, না মিললে কাছাকাছি নাম) এবং যেখানে সংখ্যা আলাদা সেখানে "
+                   "কেন আলাদা সেটা দেখাবে — যেমন ৬ এর জায়গায় ৬০ বসে গেলে ধরিয়ে দেবে। স্টকে কিছু বদলায় না। "
+                   "যেসব আইটেমে ওপেনিংয়ের পর Issue/Receipt হয়ে গেছে সেগুলো শেষ কলামে দেখা যাবে।")
+        c1, c2 = st.columns(2)
+        fac = c1.selectbox("Factory", FACTORIES, index=FACTORIES.index(default_fac) if default_fac in FACTORIES else 0, key="oc_fac")
+        min_pct = c2.slider("নাম কতটা মিললে 'কাছাকাছি' ধরবেন (%)", 70, 98, 85, key="oc_pct")
+        up = st.file_uploader("প্রথম দিনের ওপেনিং Excel / CSV", type=["xlsx", "xls", "csv"], key="oc_file")
+        if not up:
+            return
+        raw = read_any(up)
+        cols = recon_detect(raw)
+        if cols is None or not cols["name"]:
+            st.error("Quantity ও Item Name কলাম পাওয়া যায়নি।")
+            st.write("Columns found:", list(raw.columns))
+            return
+        st.caption(f"পাওয়া কলাম → Item: {cols['name']} | Size: {cols['size'] or '—'} | Quantity: {cols['qty']} | ERP code: {cols['code'] or '—'}")
+        file_rows, skipped = recon_file_rows(raw, cols)
+        st.caption(f"ব্যবহারযোগ্য সারি: {len(file_rows):,} | বাদ: {skipped}")
+        if st.button("▶ Opening Check চালান", type="primary", key="oc_run", disabled=not file_rows):
+            with st.spinner("নাম মেলানো হচ্ছে ..."):
+                st.session_state["oc_result"] = {"fac": fac, "file": up.name, "df": opening_check_build(fac, file_rows, min_pct / 100.0)}
+        res = st.session_state.get("oc_result")
+        if not res or res["fac"] != fac:
+            st.info("ওপরে 'Opening Check চালান' চাপুন।")
+            return
+        df = res["df"]
+        counts = df["Result"].value_counts()
+        mc = st.columns(5)
+        mc[0].metric("Match", int(counts.get("Match", 0)))
+        mc[1].metric("Match (নাম কাছাকাছি)", int(counts.get("Match (নাম কাছাকাছি — দেখে নিন)", 0)))
+        mc[2].metric("Qty differs", int(counts.get("Qty differs", 0)))
+        mc[3].metric("Not in software", int(counts.get("Not in software", 0)))
+        mc[4].metric("Not in file", int(counts.get("Not in file", 0)))
+        typo = int((df["Hint"].astype(str).str.startswith("⚠️")).sum())
+        if typo:
+            st.warning(f"{typo}টি আইটেমে সংখ্যায় টাইপের ভুলের মতো দেখাচ্ছে (⚠️ Hint কলাম)।")
+        if int((df["Moves since opening"] > 0).sum()):
+            st.info("'Moves since opening' > 0 মানে ওই আইটেমে ওপেনিংয়ের পর Issue/Receipt হয়েছে — সেখানে অমিল স্বাভাবিক হতে পারে।")
+        opts = ["সব অমিল", "Qty differs", "Match (নাম কাছাকাছি — দেখে নিন)", "Not in software", "Not in file", "Match"]
+        pick = st.selectbox("দেখান", opts, key="oc_filter")
+        view = df[df["Result"] != "Match"] if pick == "সব অমিল" else df[df["Result"] == pick]
+        st.dataframe(view, hide_index=True, use_container_width=True, height=420, column_config={
+            "File Qty": st.column_config.NumberColumn(format="%.2f"),
+            "Software Physical": st.column_config.NumberColumn(format="%.2f"),
+            "Software − File": st.column_config.NumberColumn(format="%.2f")})
+        export_buttons(df, "opening_check_result")
+
+
 def tab_stock_report():
     st.title("Stock Report & ERP Reconciliation")
     st.caption("ERP Stock QTY, Physical Stock QTY, Stock Balance and values for the selected factory.")
@@ -4168,6 +4344,7 @@ def tab_stock_report():
 
     st.markdown("---")
     recon_panel(fac)
+    opening_check_panel(fac)
 
 
 @tx
@@ -8027,7 +8204,8 @@ _TT_SHORT = {"Issued": "Issue", "Internal Issue": "Internal Issue", "Supplier. R
 
 
 def ensure_req_audit_table():
-    if st.session_state.get("_req_audit_ready"):
+    if st.session_state.get("_req_audit_ready") or _once_flags().get("req_audit_table"):
+        st.session_state["_req_audit_ready"] = True
         return
     conn = get_conn()
     try:
@@ -8039,6 +8217,7 @@ def ensure_req_audit_table():
                 recorded_at TEXT, remarks TEXT DEFAULT '')""")
         conn.commit()
         st.session_state["_req_audit_ready"] = True
+        _once_flags()["req_audit_table"] = True
     except Exception:
         conn.rollback()
         raise
@@ -9533,20 +9712,90 @@ def set_prices_bulk(fac, pairs):
     return n or None
 
 
-def _health_df():
-    fsql, fp = fw(FAC, "i.")
+@tx
+def set_product_category_bulk(fac, sl_list, cat):
+    """Fills Product Category for the given items. Only items whose Product Category is still blank are touched."""
+    cat = _clean(cat)
+    if len(cat) < 2 or len(cat) > 60:
+        st.error("Product Category 2 theke 60 character-er moddhe hote hobe.")
+        return 0
+    known = {c.casefold(): c for c in get_product_categories()}
+    if cat.casefold() in known:
+        cat = known[cat.casefold()]
+    else:
+        run("INSERT INTO product_category_master (category_name, created_by, created_at) VALUES (%s,%s,%s)",
+            (cat, st.session_state.get("user", ""), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        _product_categories_cached.clear()
+    rows = run("""UPDATE inventory SET product_category=%s WHERE factory_name=%s AND sl_no = ANY(%s)
+                  AND COALESCE(TRIM(product_category),'')='' RETURNING sl_no""", (cat, fac, [int(x) for x in sl_list]))
+    n = len(rows or [])
+    audit("SET_PRODUCT_CAT", f"{fac}: {n} item(s) -> Product Category '{cat}' (Data Health)")
+    return n
+
+
+def _dh_product_cat_tool(nopc):
+    """Data Health -> Product Category ফাঁকা: pick items by Budget Category or by a word in the name, then fill them all at once."""
+    st.markdown("**একসাথে Product Category বসান** — আগে বাছুন কোন আইটেমগুলো, তারপর কোন Category।")
+    mode = st.radio("কীভাবে বাছবেন", ["Budget Category ধরে", "নামের শব্দ ধরে"], horizontal=True, key="dh_pc_mode")
+    sel = nopc.iloc[0:0]
+    if mode == "Budget Category ধরে":
+        cats = nopc["category"].replace("", "(ফাঁকা)").value_counts()
+        labels = {f"{c}  ({n:,}টি)": c for c, n in cats.items()}
+        pick = labels[st.selectbox("কোন Budget Category-র আইটেম", list(labels), key="dh_pc_cat")]
+        sel = nopc[nopc["category"].replace("", "(ফাঁকা)") == pick]
+    else:
+        kw = st.text_input("নামে যে শব্দ আছে (একাধিক হলে কমা দিয়ে, যেমন: bearing, bush)", key="dh_pc_kw")
+        words = [w.strip().lower() for w in kw.split(",") if w.strip()]
+        if words:
+            nm = nopc["item_name"].astype(str).str.lower()
+            sel = nopc[nm.apply(lambda x: any(w in x for w in words))]
+    st.caption(f"নির্বাচিত আইটেম: {len(sel):,}টি" + ("  (নিচে প্রথম ২০টি দেখানো হলো)" if len(sel) > 20 else ""))
+    if not sel.empty:
+        prev = sel[["sl_no", "prod_id", "item_name", "size", "category"]].head(20).copy()
+        prev.columns = ["SL", "ERP Code", "Item", "Size", "Budget Category"]
+        st.dataframe(prev, hide_index=True, use_container_width=True, height=min(80 + 35 * len(prev), 300))
+    NEW_PC = "➕ নতুন Category-র নাম লিখব"
+    tsel = st.selectbox("কোন Product Category বসাবেন", [SEL] + get_product_categories() + [NEW_PC], key="dh_pc_target")
+    if tsel == NEW_PC:
+        target = st.text_input("নতুন Product Category-র নাম", key="dh_pc_new")
+    else:
+        target = "" if tsel == SEL else tsel
+    pw = mgr_check("dh_pw_pc")
+    if st.button("💾 Product Category সংরক্ষণ", key="dh_pc_save", type="primary"):
+        if not guard(write=False):
+            pass
+        elif not pw:
+            st.error("Manager password দিন।")
+        elif sel.empty:
+            st.error("কোনো আইটেম নির্বাচিত নেই।")
+        elif not target.strip():
+            st.error("Product Category বাছুন বা নতুন নাম লিখুন।")
+        else:
+            n = set_product_category_bulk(FAC, [int(x) for x in sel["sl_no"]], target)
+            if n:
+                done(f"{n:,}টি আইটেমে Product Category ‘{_clean(target)}’ বসেছে।")
+    st.caption("শুধু Product Category বদলায় — স্টক, দাম বা Budget Category নয়। যেগুলোতে আগে থেকেই Category আছে সেগুলো ছোঁয়া হয় না।")
+
+
+@st.cache_data(ttl=180, show_spinner=False, max_entries=8)
+def _health_df_cached(fac, ver):
+    fsql, fp = fw(fac, "i.")
+    tsql, tp = fw(fac)
     df = qdf_c(f"""SELECT i.factory_name, i.sl_no, COALESCE(i.prod_id,'') AS prod_id, COALESCE(i.item_name,'') AS item_name,
                    COALESCE(i.size,'') AS size, COALESCE(i.category,'') AS category,
                    COALESCE(i.product_category,'') AS product_category,
                    COALESCE(i.unit_price,0) AS price, COALESCE(i.current_stock,0) AS stock,
-                   (SELECT COUNT(*) FROM transactions t WHERE t.sl_no=i.sl_no AND t.factory_name=i.factory_name
-                       AND t.trans_type IN ('Issued','Internal Issue')) AS issues
-                   FROM inventory i WHERE 1=1{fsql} ORDER BY i.factory_name, i.item_name""", fp)
+                   COALESCE(x.n,0) AS issues
+                   FROM inventory i
+                   LEFT JOIN (SELECT factory_name, sl_no, COUNT(*) AS n FROM transactions
+                              WHERE trans_type IN ('Issued','Internal Issue'){tsql} GROUP BY factory_name, sl_no) x
+                          ON x.factory_name=i.factory_name AND x.sl_no=i.sl_no
+                   WHERE 1=1{fsql} ORDER BY i.factory_name, i.item_name""", tp + fp)
     if df.empty:
         return df
     for c in ("price", "stock", "issues"):
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
-    fb, fbp = fw(FAC)
+    fb, fbp = fw(fac)
     bud = q_c(f"SELECT factory_name, category_name FROM category_budgets WHERE 1=1{fb}", fbp)
     lines = {(r["factory_name"], str(r["category_name"]).strip()) for r in bud}
     df["bud_ok"] = [(f, str(c).strip()) in lines for f, c in zip(df["factory_name"], df["category"])]
@@ -9556,6 +9805,19 @@ def _health_df():
     df["dup_code"] = real & (code_up != "") & pd.Series(list(zip(df["factory_name"], code_up)), index=df.index).duplicated(keep=False)
     return df
 
+
+def _health_df():
+    return _health_df_cached(FAC, _data_version())
+
+
+_DH_COLS = ["factory_name", "sl_no", "prod_id", "item_name", "size", "category", "product_category", "price", "stock", "issues"]
+_DH_NAMES = ["Factory", "SL", "ERP Code", "Item", "Size", "Budget Category", "Product Category", "Unit price (৳)", "Stock", "Issue entries"]
+
+
+def _dh_frame(frame, with_factory=True):
+    show = frame[_DH_COLS].copy()
+    show.columns = _DH_NAMES
+    return show if with_factory else show.drop(columns=["Factory"])
 
 def tab_data_health():
     st.title("🩺 Data Health")
@@ -9580,6 +9842,21 @@ def tab_data_health():
     for col, (lab, n) in zip(cols, counts):
         col.metric(lab, f"{n:,}")
     st.caption(f"মোট আইটেম: {len(df):,}")
+
+    def _all_xlsx():
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf) as w:
+            pd.DataFrame([(lab, n) for lab, n in counts] + [("মোট আইটেম", len(df))], columns=["Check", "Count"]).to_excel(
+                w, sheet_name="Summary", index=False)
+            for sheet, fr in (("Price 0", zero.sort_values(["issues", "item_name"], ascending=[False, True])),
+                              ("Budget mismatch", nobud), ("TEMP code", temp), ("Negative stock", neg.sort_values("stock")),
+                              ("Duplicate ERP code", dup.sort_values(["prod_id", "item_name"])), ("No Product Category", nopc)):
+                _dh_frame(fr).to_excel(w, sheet_name=sheet, index=False)
+        return buf.getvalue()
+    _xl_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    _xl_name = f"data_health_{local_now():%Y-%m-%d}.xlsx"
+    if not _lazy_download(st, "⬇️ সব Data Health রিপোর্ট — Excel (প্রতিটা চেকের আলাদা শিট)", _all_xlsx, _xl_name, _xl_mime, "xls_dh_all"):
+        st.download_button("⬇️ সব Data Health রিপোর্ট — Excel (প্রতিটা চেকের আলাদা শিট)", _all_xlsx(), _xl_name, _xl_mime, key="xls_dh_all_b")
     if sum(n for _, n in counts) == 0:
         st.success("🎉 সব ঠিক আছে — কোনো ডাটা-সমস্যা পাওয়া যায়নি।")
     can_fix = (not is_cons_view)
@@ -9588,10 +9865,7 @@ def tab_data_health():
     pick = lazy_tab_select([c[0] for c in counts], "lz_dh")
 
     def _show(frame, name, extra=None):
-        show = frame[["factory_name", "sl_no", "prod_id", "item_name", "size", "category", "product_category", "price", "stock", "issues"]].copy()
-        show.columns = ["Factory", "SL", "ERP Code", "Item", "Size", "Budget Category", "Product Category", "Unit price (৳)", "Stock", "Issue entries"]
-        if not is_cons_view:
-            show = show.drop(columns=["Factory"])
+        show = _dh_frame(frame, with_factory=is_cons_view)
         st.dataframe(show, hide_index=True, use_container_width=True, height=min(80 + 35 * len(show), 420))
         export_buttons(show, name)
 
@@ -9611,6 +9885,9 @@ def tab_data_health():
                                         column_config={"Unit Price (৳)": st.column_config.NumberColumn(format="%.2f", min_value=0.0, step=1.0)})
                 pairs = [(int(a), float(b)) for a, b in zip(edited["SL"], edited["Unit Price (৳)"]) if b and float(b) > 0]
                 st.caption(f"পরিবর্তন: {len(pairs)}টি আইটেমে নতুন দাম বসানো হয়েছে" + (f" · মোট {len(zero):,}টির মধ্যে প্রথম {len(view)}টি দেখানো হলো" if len(zero) > len(view) else ""))
+                with st.expander(f"📥 পুরো তালিকা ডাউনলোড ({len(zero):,}টি — CSV / Excel / PDF)"):
+                    export_buttons(_dh_frame(zero.sort_values(["issues", "item_name"], ascending=[False, True]), with_factory=False),
+                                   "health_zero_price")
                 pw = mgr_check("dh_pw_price")
                 if st.button("💾 দাম সংরক্ষণ", key="dh_price_save", type="primary"):
                     if not guard(write=False):
@@ -9680,8 +9957,11 @@ def tab_data_health():
         if nopc.empty:
             st.success("সব আইটেমের Product Category আছে।")
         else:
-            st.caption("Inventory → Edit থেকে Product Category বসান।")
-            _show(nopc, "health_no_product_category")
+            st.caption("Inventory → Edit থেকে একটা একটা করে, অথবা নিচের টুল দিয়ে একসাথে Product Category বসান।")
+            if can_fix:
+                _dh_product_cat_tool(nopc)
+            with st.expander(f"আইটেমের তালিকা ({len(nopc):,})"):
+                _show(nopc, "health_no_product_category")
 
 
 # ============================================================
