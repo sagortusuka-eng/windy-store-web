@@ -6543,11 +6543,7 @@ def tab_budget():
                       WHERE t.trans_type IN ('Issued','Internal Issue'){fw(FAC, 't.')[0]}
                       GROUP BY t.factory_name, i.category""", FP)
     cost = {(r["factory_name"], r["category"]): float(r["cost"] or 0) for r in cost_rows}
-    # Executive Overview & Budget Control lives here (not on the daily-entry home screen)
-    try:
-        tab_dashboard()
-    except Exception as e:
-        st.warning(f"Overview load kora jacche na: {e}")
+    # (Management Dashboard has its own tab now; it is no longer repeated inside Budget.)
     if bud.empty:
         st.info("Budget nei.")
         return
