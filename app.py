@@ -6550,6 +6550,15 @@ def tab_budget():
     bud["actual_cost"] = [cost.get((f, c), 0.0) for f, c in zip(bud.factory_name, bud.category_name)]
     bud["remaining"] = bud.allocated_budget - bud.actual_cost
     bud["status"] = bud.remaining.apply(lambda v: "SAFE" if v >= 0 else "OVER BUDGET")
+    # Top-of-page budget summary: total budget, total spent, remaining and % used (same numbers as the cards below)
+    _tb, _tc = float(bud["allocated_budget"].fillna(0).sum()), float(bud["actual_cost"].sum())
+    _tp = (_tc / _tb * 100.0) if _tb > 0 else (100.0 if _tc > 0 else 0.0)
+    _k1, _k2, _k3, _k4 = st.columns(4, gap="medium")
+    _k1.metric("Total Budget", f"\u09f3 {_tb:,.0f}")
+    _k2.metric("Total Spent", f"\u09f3 {_tc:,.0f}")
+    _k3.metric("Remaining", f"\u09f3 {_tb - _tc:,.0f}")
+    _k4.metric("Budget Used", f"{_tp:.1f}%")
+    st.markdown(budget_bar_html(_tp, "Total consumption"), unsafe_allow_html=True)
 
     st.markdown('<div class="section-title">Category Budget Cards</div>', unsafe_allow_html=True)
     cols = st.columns(3, gap="medium")
