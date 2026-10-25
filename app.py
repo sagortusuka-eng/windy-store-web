@@ -11251,7 +11251,7 @@ def _rpa_preview_html(model, ident):
                 f'<div style="text-align:right"><b>Page {pno} of {total}</b></div></div>')
         out.append(f'<div class="pg{" ls" if ls else ""}"><div class="bd">{head}{"".join(frags)}</div>{foot}</div>')
     css = _RPA_CSS.replace("__ORI__", "landscape" if ls else "portrait")
-    bar = '<div class="bar"><button onclick="window.print()">\U0001F5A8️ Print Report</button><span>Prints this report only (A4 ' + ("landscape" if ls else "portrait") + ')</span></div>'
+    bar = '<div class="bar"><button onclick="window.print()">\U0001F5A8️ Print Report</button><span>Preview the complete report first - scroll through every page. Print when ready (prints this report only, A4 ' + ("landscape" if ls else "portrait") + ').</span></div>'
     return f"<!doctype html><html><head><meta charset='utf-8'>{css}</head><body>{bar}<div class='wrap'>{''.join(out)}</div></body></html>", total
 
 
@@ -11564,8 +11564,8 @@ def _rpa_render(kind, ym, plabel):
         c.caption("Downloads need a newer Streamlit; use the classic view below.")
     html, pages = _rpa_preview_html(model, ident)
     components.html(html, height=900, scrolling=True)
-    c.caption(f"A4 {'landscape' if model['landscape'] else 'portrait'} · {pages} page(s) in preview · "
-              "use \U0001F5A8️ Print Report inside the preview to print only this report.")
+    c.caption(f"Preview the complete report first, then print when ready \u00b7 A4 {'landscape' if model['landscape'] else 'portrait'} \u00b7 "
+              f"{pages} page(s) in preview \u00b7 scroll inside the preview to review every page; \U0001F5A8\uFE0F Print Report is optional.")
 
 
 def tab_reports():
