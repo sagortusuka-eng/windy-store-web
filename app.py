@@ -11563,7 +11563,7 @@ def _rpa_render(kind, ym, plabel):
     if not (pdf_ok and xl_ok):
         c.caption("Downloads need a newer Streamlit; use the classic view below.")
     html, pages = _rpa_preview_html(model, ident)
-    components.html(html, height=900, scrolling=True)
+    components.html(html, height=(900 if model["landscape"] else 1240), scrolling=True)   # one full A4 page visible; scroll for the rest
     c.caption(f"Preview the complete report first, then print when ready \u00b7 A4 {'landscape' if model['landscape'] else 'portrait'} \u00b7 "
               f"{pages} page(s) in preview \u00b7 scroll inside the preview to review every page; \U0001F5A8\uFE0F Print Report is optional.")
 
