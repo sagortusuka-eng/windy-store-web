@@ -10860,6 +10860,714 @@ def _rp_budget(tp, plabel):
                  "used": "Used", "left": "Remaining", "pct": "Used %"}), "report_budget", f"Budget report - {plabel}")
 
 
+# ------------------------------------------------------------
+#  A4 CORPORATE REPORT LAYER (Reports page only, read-only).
+#  One "model" per report (header + metadata + KPI / table / bar blocks) drives the A4 preview, the PDF and the Excel file,
+#  so the three always match. PDF / Excel are built ONLY when their download button is clicked; the preview is capped.
+# ------------------------------------------------------------
+_RPA_GROUP = "WINDY GROUP"
+_RPA_PLANT_ALL = "KC Washing & Windy Washing Plant"
+_RPA_SYSTEM = "Smart Inventory Management System"
+_RPA_TITLES = {"summary": "INVENTORY SUMMARY REPORT", "stock": "STOCK REPORT", "issue": "ISSUE REPORT",
+               "purchase": "PURCHASE REPORT", "budget": "BUDGET REPORT"}
+_RPA_PREVIEW_ROWS = 150      # rows per table drawn in the on-screen preview (PDF / Excel always hold every row)
+
+
+def _rpa_bdt(v):
+    return f"BDT {float(v):,.0f}"
+
+
+def _rpa_fmt(v, fmt):
+    try:
+        if v is None or (not isinstance(v, str) and pd.isna(v)):
+            return "-" if fmt == "date" else ""
+    except Exception:
+        pass
+    if fmt == "money":
+        return f"{float(v):,.0f}"
+    if fmt == "qty":
+        return _rp_q(v)
+    if fmt == "int":
+        return f"{int(v):,}"
+    if fmt == "pct":
+        return f"{float(v):.1f}%"
+    if fmt == "date":
+        try:
+            return v.strftime(DATE_FMT)
+        except Exception:
+            return str(v)
+    s = str(v).strip()
+    return s if s else "-"
+
+
+@st.cache_data(ttl=180, show_spinner=False, max_entries=4)
+def _rp_invd(fac, ver):
+    """Stock list with the identifying fields (serial, ERP code) for the printed Stock report."""
+    fsql, fp = fw(fac)
+    df = qdf_c(f"""SELECT factory_name AS factory, COALESCE(item_name,'') AS item, COALESCE(size,'') AS size,
+                   COALESCE(serial_no,'') AS serial, COALESCE(prod_id,'') AS erp,
+                   COALESCE(NULLIF(category,''),'Uncategorized') AS category, COALESCE(current_stock,0) AS stock,
+                   COALESCE(unit_price,0) AS price, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit
+                   FROM inventory WHERE 1=1{fsql} ORDER BY factory_name, item_name, size""", fp)
+    if df.empty:
+        return df
+    df["stock"] = pd.to_numeric(df["stock"], errors="coerce").fillna(0.0)
+    df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0.0)
+    df["value"] = df["stock"].clip(lower=0) * df["price"]
+    return df
+
+
+@st.cache_data(ttl=180, show_spinner=False, max_entries=4)
+def _rp_txd(fac, ver):
+    """Purchase / issue lines with date, serial, ERP code, challan, status (same rows and value basis as _rp_tx)."""
+    fsql, fp = fw(fac, "t.")
+    df = qdf_c(f"""SELECT t.id, t.factory_name, t.date, t.trans_type, t.qty, COALESCE(t.item_name,'') AS item,
+                   COALESCE(i.serial_no,'') AS serial, COALESCE(NULLIF(t.prod_id,''), i.prod_id, '') AS erp,
+                   COALESCE(t.officer_name,'') AS officer, COALESCE(t.supplier_name,'') AS supplier,
+                   COALESCE(t.challan_no,'') AS challan, COALESCE(t.verification_status,'') AS status,
+                   COALESCE(NULLIF(i.category,''),'Uncategorized') AS category, COALESCE(i.unit_price,0) AS price
+                   FROM transactions t
+                   LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                   WHERE t.trans_type IN ('Supplier. Rec','Issued','Internal Issue'){fsql}""", fp)
+    cols = ["id", "factory", "date", "ym", "kind", "qty", "item", "serial", "erp", "officer", "supplier", "challan",
+            "status", "category", "amount"]
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    d = _parse_dates(df["date"])
+    qty = pd.to_numeric(df["qty"], errors="coerce").fillna(0.0)
+    price = pd.to_numeric(df["price"], errors="coerce").fillna(0.0)
+    out = pd.DataFrame({
+        "id": df["id"], "factory": df["factory_name"], "date": d, "ym": d.dt.strftime("%Y-%m").fillna(""),
+        "kind": df["trans_type"].eq("Supplier. Rec").map({True: "Purchase", False: "Issue"}), "qty": qty,
+        "item": df["item"], "serial": df["serial"], "erp": df["erp"], "officer": df["officer"], "supplier": df["supplier"],
+        "challan": df["challan"], "status": df["status"], "category": df["category"], "amount": qty * price})
+    return out.sort_values(["date", "id"], kind="stable")[cols]
+
+
+def _rpa_table(title, cols, df, note="", xcols=(), total=None, main=False):
+    """cols / xcols: (key, header, fmt, weight, align). xcols appear in the Excel file only."""
+    return {"t": "table", "title": title, "note": note, "cols": list(cols), "xcols": list(xcols), "df": df,
+            "total": total, "main": main}
+
+
+def _rpa_status_stock(s):
+    return "Negative" if s < 0 else ("Out of stock" if s == 0 else ("Low" if s <= 5 else "In stock"))
+
+
+def _rpa_model_stock(fac):
+    inv = _rp_invd(fac, _data_version())
+    blocks = []
+    if inv.empty:
+        return {"landscape": False, "blocks": [{"t": "text", "text": "No inventory items for this selection."}]}
+    st_ = inv["stock"]
+    blocks.append({"t": "kpis", "items": [
+        ("Inventory items", f"{len(inv):,}"), ("Stock value", _rpa_bdt(inv["value"].sum())),
+        ("In stock", f"{int((st_ > 0).sum()):,}"), ("Low stock (1-5)", f"{int(((st_ > 0) & (st_ <= 5)).sum()):,}"),
+        ("Zero / negative", f"{int((st_ <= 0).sum()):,}")]})
+    t = pd.DataFrame({
+        "sl": range(1, len(inv) + 1),
+        "item": inv["item"] + inv["size"].map(lambda s: f" [{s}]" if str(s).strip() else ""),
+        "serial": inv["serial"], "erp": inv["erp"], "factory": inv["factory"].map(short_fac),
+        "stock": inv["stock"], "status": st_.map(_rpa_status_stock),
+        "unit": inv["unit"], "price": inv["price"], "value": inv["value"], "category": inv["category"]})
+    cols = [("sl", "SL", "int", 0.5, "r"), ("item", "Item", "text", 3.2, "l"), ("serial", "Serial", "text", 1.5, "l"),
+            ("erp", "ERP Code", "text", 1.5, "l"), ("factory", "Factory", "text", 1.1, "l"),
+            ("stock", "Current Stock", "qty", 1.2, "r"), ("status", "Status", "text", 1.1, "l")]
+    xc = [("unit", "Unit", "text", 1, "l"), ("price", "Unit Price (BDT)", "money", 1, "r"),
+          ("value", "Stock Value (BDT)", "money", 1, "r"), ("category", "Category", "text", 1, "l")]
+    blocks.append(_rpa_table("Stock position", cols, t, xcols=xc, main=True))
+    return {"landscape": False, "blocks": blocks}
+
+
+def _rpa_flow_rows(fac, kind, ym):
+    d = _rp_txd(fac, _data_version())
+    d = d[d["kind"] == kind]
+    return d[d["ym"] == ym] if ym else d
+
+
+def _rpa_model_flow(fac, kind, ym, plabel):
+    d = _rpa_flow_rows(fac, kind, ym)
+    word = "Purchases" if kind == "Purchase" else "Issues"
+    if d.empty:
+        return {"landscape": True, "blocks": [{"t": "text", "text": f"No {word.lower()} in this period."}]}
+    val = float(d["amount"].sum())
+    blocks = [{"t": "kpis", "items": [
+        (f"{word} value", _rpa_bdt(val)), ("Total quantity", _rp_q(d["qty"].sum())), ("Entries", f"{len(d):,}"),
+        ("Distinct items", f"{d['item'].nunique():,}"), ("Average / entry", _rpa_bdt(val / len(d)))]}]
+    base = pd.DataFrame({"sl": range(1, len(d) + 1), "date": d["date"].values, "item": d["item"].values,
+                         "qty": d["qty"].values, "factory": d["factory"].map(short_fac).values,
+                         "erp": d["erp"].values, "serial": d["serial"].values, "officer": d["officer"].values,
+                         "supplier": d["supplier"].values, "challan": d["challan"].values,
+                         "status": d["status"].values, "value": d["amount"].values, "category": d["category"].values})
+    if kind == "Issue":
+        cols = [("sl", "SL", "int", 0.5, "r"), ("date", "Date", "date", 1.1, "l"), ("item", "Item", "text", 3.0, "l"),
+                ("serial", "Serial", "text", 1.3, "l"), ("erp", "ERP Code", "text", 1.3, "l"), ("qty", "Qty", "qty", 0.8, "r"),
+                ("officer", "Officer", "text", 1.5, "l"), ("factory", "Factory", "text", 1.0, "l"),
+                ("status", "Status", "text", 1.1, "l")]
+        xc = [("value", "Value (BDT)", "money", 1, "r"), ("category", "Category", "text", 1, "l")]
+        total = None
+    else:
+        cols = [("sl", "SL", "int", 0.5, "r"), ("date", "Date", "date", 1.1, "l"), ("item", "Item", "text", 3.2, "l"),
+                ("qty", "Qty", "qty", 0.8, "r"), ("supplier", "Supplier", "text", 2.0, "l"),
+                ("challan", "Challan", "text", 1.3, "l"), ("value", "Purchase Value (BDT)", "money", 1.4, "r"),
+                ("factory", "Factory", "text", 1.0, "l")]
+        xc = [("erp", "ERP Code", "text", 1, "l"), ("category", "Category", "text", 1, "l")]
+        total = {"item": "Total", "qty": float(d["qty"].sum()), "value": val}
+    blocks.append(_rpa_table(f"{word} register", cols, base, xcols=xc, total=total, main=True))
+    return {"landscape": True, "blocks": blocks}
+
+
+def _rpa_model_budget(fac, ym, plabel):
+    bud = _rp_bud(fac, _data_version())
+    if bud.empty:
+        return {"landscape": True, "blocks": [{"t": "text", "text": "No budget lines are configured for this view."}]}
+    cons = "CONSOLIDATED" in str(fac)
+    iss = _rpa_flow_rows(fac, "Issue", ym)
+    spend = iss.groupby(["factory", "category"], as_index=False)["amount"].sum().rename(columns={"amount": "used"})
+    v = bud.merge(spend, on=["factory", "category"], how="left")
+    v["used"] = v["used"].fillna(0.0)
+    v["left"] = v["allocated"] - v["used"]
+    v["pct"] = (v["used"] / v["allocated"].where(v["allocated"] > 0) * 100.0).fillna(0.0)
+    v = v.sort_values("pct", ascending=False)
+    alloc, used = float(v["allocated"].sum()), float(v["used"].sum())
+    n_over = int((v["pct"] > BUDGET_ALERT_PCT).sum())
+    blocks = [{"t": "kpis", "items": [
+        ("Allocated budget", _rpa_bdt(alloc)), ("Used (issues)", _rpa_bdt(used)), ("Remaining", _rpa_bdt(alloc - used)),
+        ("Utilization", f"{(used / alloc * 100.0 if alloc > 0 else 0):.1f}%"), ("Lines over alert", f"{n_over:,}")]}]
+    t = pd.DataFrame({
+        "dept": v["department"] + (v["factory"].map(lambda f: f" ({short_fac(f)})") if cons else ""),
+        "category": v["category"], "alloc": v["allocated"], "used": v["used"], "left": v["left"], "pct": v["pct"],
+        "status": v["pct"].map(lambda p: "On track" if p < 70 else ("Watch" if p <= BUDGET_ALERT_PCT else "Over limit"))})
+    cols = [("dept", "Department", "text", 2.0, "l"), ("category", "Category", "text", 2.4, "l"),
+            ("alloc", "Budget (BDT)", "money", 1.3, "r"), ("used", "Used (BDT)", "money", 1.3, "r"),
+            ("left", "Remaining (BDT)", "money", 1.4, "r"), ("pct", "Utilization", "pct", 1.0, "r"),
+            ("status", "Status", "text", 1.1, "l")]
+    total = {"dept": "Total", "alloc": alloc, "used": used, "left": alloc - used,
+             "pct": (used / alloc * 100.0 if alloc > 0 else 0.0)}
+    blocks.append(_rpa_table("Budget vs actual by category", cols, t, total=total, main=True,
+                             note=f"Used = issues in {plabel}, matched to the budget category."))
+    return {"landscape": True, "blocks": blocks}
+
+
+def _rpa_model_summary(fac, ym, plabel):
+    ver = _data_version()
+    tx = _rp_tx(fac, ver)
+    tp = tx[tx["ym"] == ym] if ym else tx
+    inv = _rp_inv(fac, ver)
+    bud = _rp_bud(fac, ver)
+    pur, iss = tp[tp["kind"] == "Purchase"], tp[tp["kind"] == "Issue"]
+    pv, iv = float(pur["amount"].sum()), float(iss["amount"].sum())
+    allocated = float(bud["allocated"].sum()) if not bud.empty else 0.0
+    bu = f"{iv / allocated * 100.0:.1f}%" if allocated > 0 else "n/a"
+    blocks = [{"t": "kpis", "items": [
+        ("Inventory items", f"{len(inv):,}"), ("Stock value", _rpa_bdt(inv["value"].sum() if not inv.empty else 0)),
+        ("Purchases", _rpa_bdt(pv)), ("Issues", _rpa_bdt(iv)), ("Budget used", bu)]}]
+    months = sorted([m for m in tx["ym"].unique() if m])[-6:]
+    if months:
+        g = tx[tx["ym"].isin(months)].groupby(["ym", "kind"])["amount"].sum().unstack(fill_value=0)
+        tr = pd.DataFrame({"m": [_rp_ym_label(m) for m in months],
+                           "p": [float(g.loc[m, "Purchase"]) if (m in g.index and "Purchase" in g.columns) else 0.0 for m in months],
+                           "i": [float(g.loc[m, "Issue"]) if (m in g.index and "Issue" in g.columns) else 0.0 for m in months]})
+        blocks.append(_rpa_table("Purchases vs Issues - last 6 months", [
+            ("m", "Month", "text", 1.5, "l"), ("p", "Purchases (BDT)", "money", 1.5, "r"), ("i", "Issues (BDT)", "money", 1.5, "r")], tr))
+    cat = iss.groupby("category")["amount"].sum().sort_values(ascending=False).head(6)
+    blocks.append({"t": "bars", "title": "Where issues went - by category", "note": f"Period: {plabel}",
+                   "pairs": [(str(k), float(x)) for k, x in cat.items() if x > 0]})
+    top = iss.groupby("item").agg(qty=("qty", "sum"), value=("amount", "sum")).sort_values("value", ascending=False).head(8)
+    top = top.reset_index()
+    top.insert(0, "sl", range(1, len(top) + 1))
+    blocks.append(_rpa_table("Top issued items", [("sl", "SL", "int", 0.5, "r"), ("item", "Item", "text", 3.5, "l"),
+                                                  ("qty", "Qty", "qty", 1, "r"), ("value", "Value (BDT)", "money", 1.3, "r")],
+                             top, note=f"Period: {plabel}"))
+    return {"landscape": False, "blocks": blocks}
+
+
+@st.cache_data(ttl=180, show_spinner=False, max_entries=10)
+def _rpa_model(fac, ver, kind, ym, plabel):
+    m = {"stock": lambda: _rpa_model_stock(fac), "issue": lambda: _rpa_model_flow(fac, "Issue", ym, plabel),
+         "purchase": lambda: _rpa_model_flow(fac, "Purchase", ym, plabel), "budget": lambda: _rpa_model_budget(fac, ym, plabel),
+         "summary": lambda: _rpa_model_summary(fac, ym, plabel)}[kind]()
+    m["kind"], m["title"] = kind, _RPA_TITLES[kind]
+    return m
+
+
+def _rpa_identity(fac, kind, plabel):
+    """Header / metadata / footer values; the generated time and user are read fresh (never cached)."""
+    now = local_now().strftime("%d-%b-%Y %I:%M %p")
+    user = str(st.session_state.get("user") or "Guest")
+    plant = _RPA_PLANT_ALL if "CONSOLIDATED" in str(fac) else str(fac)
+    unit = "All units (Consolidated)" if "CONSOLIDATED" in str(fac) else str(fac)
+    return {"group": _RPA_GROUP, "plant": plant, "title": _RPA_TITLES[kind], "period": plabel, "now": now, "user": user,
+            "meta": [("Factory / Unit", unit), ("Report Type", _RPA_TITLES[kind].title()), ("Reporting Period", plabel),
+                     ("Generated Date", now), ("Generated By", user)]}
+
+
+# ---------- A4 HTML preview (also the print document) ----------
+_RPA_CSS = """<style>
+*{box-sizing:border-box}body{margin:0;background:#E5E7EB;font-family:'Segoe UI',Arial,Helvetica,sans-serif;color:#111827}
+.bar{position:sticky;top:0;z-index:5;background:#1F2937;padding:8px 14px;display:flex;gap:10px;align-items:center}
+.bar button{background:#0F766E;color:#fff;border:0;border-radius:6px;padding:7px 16px;font-weight:700;cursor:pointer;font-size:13px}
+.bar span{color:#D1D5DB;font-size:12px}
+.wrap{padding:16px 0}
+.pg{background:#fff;margin:0 auto 16px auto;padding:14mm 14mm 10mm 14mm;box-shadow:0 2px 10px rgba(0,0,0,.25);display:flex;flex-direction:column;width:210mm;min-height:297mm}
+.pg.ls{width:297mm;min-height:210mm}
+.bd{flex:1}
+.lh{text-align:center;border-bottom:2px solid #0F172A;padding-bottom:6px;margin-bottom:8px}
+.lh .g{font-size:20px;font-weight:800;letter-spacing:3px}.lh .p{font-size:12px;color:#374151;margin-top:2px}
+.lh .t{font-size:15px;font-weight:800;margin-top:6px;letter-spacing:1px}
+.rh{font-size:10px;color:#6B7280;border-bottom:1px solid #9CA3AF;padding-bottom:3px;margin-bottom:8px;display:flex;justify-content:space-between}
+table.mt{width:100%;border-collapse:collapse;font-size:10.5px;margin-bottom:10px}
+table.mt td{border:1px solid #9CA3AF;padding:3px 7px}table.mt td.k{background:#F3F4F6;font-weight:700;width:17%}
+table.kp{width:100%;border-collapse:collapse;margin:4px 0 12px 0}
+table.kp td{border:1px solid #9CA3AF;padding:5px 8px;text-align:center;width:20%}
+table.kp .l{font-size:8.5px;text-transform:uppercase;letter-spacing:.6px;color:#4B5563}table.kp .v{font-size:12.5px;font-weight:800;margin-top:2px}
+.st{font-size:11.5px;font-weight:800;margin:10px 0 1px 0}.sn{font-size:9px;color:#6B7280;margin-bottom:4px}
+table.dt{width:100%;border-collapse:collapse;font-size:9.5px;margin-bottom:6px}
+table.dt th{background:#E5E7EB;border:1px solid #6B7280;padding:4px 5px;text-align:left;font-weight:700}
+table.dt td{border:1px solid #9CA3AF;padding:3px 5px;vertical-align:top;word-break:break-word}
+table.dt tr:nth-child(even) td{background:#F9FAFB}
+table.dt .r{text-align:right;white-space:nowrap}table.dt tr.tot td{font-weight:800;background:#F3F4F6;border-top:2px solid #374151}
+.neg{color:#B91C1C;font-weight:700}.wat{color:#B45309;font-weight:700}
+.bb{background:#E5E7EB;height:9px}.bb i{display:block;height:9px;background:#374151}
+.ft{border-top:1px solid #6B7280;margin-top:10px;padding-top:4px;font-size:8.5px;color:#4B5563;display:flex;justify-content:space-between;gap:10px}
+.ft b{color:#111827}.note{font-size:9px;color:#6B7280;margin-top:6px}
+@media print{@page{size:A4 __ORI__;margin:0}body{background:#fff}.bar{display:none}.wrap{padding:0}
+.pg{margin:0;box-shadow:none;page-break-after:always;break-after:page}.pg:last-child{page-break-after:auto}}
+</style>"""
+
+
+def _rpa_cell_cls(txt):
+    t = str(txt)
+    if t in ("Negative", "Out of stock", "Over limit"):
+        return " neg"
+    if t in ("Low", "Watch"):
+        return " wat"
+    return ""
+
+
+def _rpa_tbl_html(tb, rows_df, with_total, cols=None):
+    cols = cols or tb["cols"]
+    tw = sum(c[3] for c in cols) or 1.0
+    th = "".join(f'<th class="{"r" if c[4] == "r" else ""}" style="width:{c[3] / tw * 100:.1f}%">{_rp_e(c[1])}</th>' for c in cols)
+    body = []
+    for r in rows_df.itertuples(index=False):
+        d = r._asdict() if hasattr(r, "_asdict") else {}
+        tds = []
+        for c in cols:
+            txt = _rpa_fmt(d.get(c[0]), c[2])
+            tds.append(f'<td class="{"r" if c[4] == "r" else ""}{_rpa_cell_cls(txt) if c[0] == "status" else ""}">{_rp_e(txt)}</td>')
+        body.append("<tr>" + "".join(tds) + "</tr>")
+    if with_total and tb.get("total"):
+        tt = tb["total"]
+        body.append('<tr class="tot">' + "".join(
+            f'<td class="{"r" if c[4] == "r" else ""}">{_rp_e(_rpa_fmt(tt[c[0]], c[2])) if c[0] in tt else ""}</td>' for c in cols) + "</tr>")
+    return f'<table class="dt"><thead><tr>{th}</tr></thead><tbody>{"".join(body)}</tbody></table>'
+
+
+def _rpa_bars_html(pairs):
+    if not pairs:
+        return '<div class="note">No data for this period.</div>'
+    mx, tot = max(v for _, v in pairs) or 1.0, sum(v for _, v in pairs) or 1.0
+    rows = "".join(f'<tr><td>{_rp_e(l)}</td><td style="width:38%"><div class="bb"><i style="width:{max(v / mx * 100, 1.5):.1f}%"></i></div></td>'
+                   f'<td class="r">{v:,.0f}</td><td class="r">{v / tot * 100:.0f}%</td></tr>' for l, v in pairs)
+    return ('<table class="dt"><thead><tr><th>Category</th><th>Share</th><th class="r">Value (BDT)</th><th class="r">%</th></tr></thead>'
+            f'<tbody>{rows}</tbody></table>')
+
+
+def _rpa_preview_html(model, ident):
+    ls = model["landscape"]
+    cap, first_cost, cont_cost = (22, 11, 3) if ls else (36, 12, 3)
+    pages, cur, used, first = [], [], 0, True
+    capnote = ""
+
+    def newpage():
+        nonlocal cur, used, first
+        pages.append(cur)
+        cur, used, first = [], 0, False
+
+    used = first_cost
+    for b in model["blocks"]:
+        t = b["t"]
+        if t == "kpis":
+            if used + 3 > cap and cur:
+                newpage()
+            cur.append("<table class='kp'><tr>" + "".join(
+                f'<td><div class="l">{_rp_e(l)}</div><div class="v">{_rp_e(v)}</div></td>' for l, v in b["items"]) + "</tr></table>")
+            used += 3
+        elif t == "text":
+            cur.append(f'<div class="note" style="font-size:11px">{_rp_e(b["text"])}</div>')
+            used += 2
+        elif t == "bars":
+            need = 3 + len(b["pairs"])
+            if used + need > cap and cur:
+                newpage()
+            cur.append(f'<div class="st">{_rp_e(b["title"])}</div><div class="sn">{_rp_e(b["note"])}</div>' + _rpa_bars_html(b["pairs"]))
+            used += need
+        else:
+            df = b["df"]
+            total_rows = len(df)
+            shown = df.head(_RPA_PREVIEW_ROWS)
+            if total_rows > _RPA_PREVIEW_ROWS:
+                capnote = (f"Preview shows the first {_RPA_PREVIEW_ROWS:,} of {total_rows:,} rows. "
+                           "The PDF and Excel downloads contain every row.")
+            i, head_done, n = 0, False, len(shown)
+            while i < n or (n == 0 and not head_done):
+                room = cap - used - (3 if not head_done else 1)
+                if room < 3 and cur:
+                    newpage()
+                    room = cap - used - 1
+                take = max(1, min(room, n - i)) if n else 0
+                chunk = shown.iloc[i:i + take]
+                last = (i + take >= n) and total_rows <= _RPA_PREVIEW_ROWS
+                if not head_done:
+                    cur.append(f'<div class="st">{_rp_e(b["title"])}</div>' + (f'<div class="sn">{_rp_e(b["note"])}</div>' if b["note"] else ""))
+                    used += 2
+                else:
+                    cur.append('<div class="sn">(continued)</div>')
+                    used += 1
+                cur.append(_rpa_tbl_html(b, chunk, last))
+                used += take + 1
+                head_done = True
+                i += take
+                if i < n:
+                    newpage()
+                if n == 0:
+                    break
+    if capnote:
+        cur.append(f'<div class="note">{_rp_e(capnote)}</div>')
+    pages.append(cur)
+    total = len(pages)
+    out = []
+    for pno, frags in enumerate(pages, 1):
+        if pno == 1:
+            head = (f'<div class="lh"><div class="g">{_rp_e(ident["group"])}</div><div class="p">{_rp_e(ident["plant"])}</div>'
+                    f'<div class="t">{_rp_e(ident["title"])}</div></div><table class="mt">'
+                    + "".join(f'<tr><td class="k">{_rp_e(a)}</td><td>{_rp_e(b)}</td></tr>' for a, b in ident["meta"]) + "</table>")
+        else:
+            head = (f'<div class="rh"><span><b>{_rp_e(ident["group"])}</b> - {_rp_e(ident["title"])}</span>'
+                    f'<span>{_rp_e(ident["period"])}</span></div>')
+        foot = (f'<div class="ft"><div><b>Windy Group • {_RPA_PLANT_ALL}</b><br>{_RPA_SYSTEM}</div>'
+                f'<div style="text-align:center">Generated by: {_rp_e(ident["user"])}<br>Generated: {_rp_e(ident["now"])}</div>'
+                f'<div style="text-align:right"><b>Page {pno} of {total}</b></div></div>')
+        out.append(f'<div class="pg{" ls" if ls else ""}"><div class="bd">{head}{"".join(frags)}</div>{foot}</div>')
+    css = _RPA_CSS.replace("__ORI__", "landscape" if ls else "portrait")
+    bar = '<div class="bar"><button onclick="window.print()">\U0001F5A8️ Print Report</button><span>Prints this report only (A4 ' + ("landscape" if ls else "portrait") + ')</span></div>'
+    return f"<!doctype html><html><head><meta charset='utf-8'>{css}</head><body>{bar}<div class='wrap'>{''.join(out)}</div></body></html>", total
+
+
+# ---------- PDF ----------
+def _rpa_pdf(model, ident):
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.pdfgen import canvas as rl_canvas
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.graphics.shapes import Drawing, Rect
+
+    ls = model["landscape"]
+    page = landscape(A4) if ls else A4
+    M = 14 * mm
+    fw_ = page[0] - 2 * M
+    C = _pdf_clean
+    sty = lambda n, **k: ParagraphStyle(n, fontName=k.pop("fontName", "Helvetica"), **k)
+    s_c = sty("c", fontSize=7.8, leading=9.6)
+    s_r = sty("r", fontSize=7.8, leading=9.6, alignment=2)
+    s_h = sty("h", fontSize=7.8, leading=9.6, fontName="Helvetica-Bold")
+    s_hr = sty("hr", fontSize=7.8, leading=9.6, fontName="Helvetica-Bold", alignment=2)
+    s_b = sty("b", fontSize=7.8, leading=9.6, fontName="Helvetica-Bold")
+    s_br = sty("br", fontSize=7.8, leading=9.6, fontName="Helvetica-Bold", alignment=2)
+    s_t = sty("t", fontSize=10.5, leading=13, fontName="Helvetica-Bold", spaceBefore=8, spaceAfter=1)
+    s_n = sty("n", fontSize=7.5, leading=9, textColor=colors.HexColor("#6B7280"), spaceAfter=3)
+    grid, dark = colors.HexColor("#9CA3AF"), colors.HexColor("#6B7280")
+
+    class NC(rl_canvas.Canvas):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self._saved = []
+
+        def showPage(self):
+            self._saved.append(dict(self.__dict__))
+            self._startPage()
+
+        def save(self):
+            n = len(self._saved)
+            for st_ in self._saved:
+                self.__dict__.update(st_)
+                self._footer(n)
+                super().showPage()
+            super().save()
+
+        def _footer(self, n):
+            w = self._pagesize[0]
+            self.setStrokeColor(dark)
+            self.setLineWidth(0.6)
+            self.line(M, 14 * mm, w - M, 14 * mm)
+            self.setFillColor(colors.HexColor("#111827"))
+            self.setFont("Helvetica-Bold", 7.5)
+            self.drawString(M, 10.2 * mm, C(f"Windy Group \u00b7 {_RPA_PLANT_ALL}").replace("&amp;", "&"))
+            self.setFont("Helvetica", 7.2)
+            self.setFillColor(colors.HexColor("#4B5563"))
+            self.drawString(M, 6.8 * mm, _RPA_SYSTEM)
+            self.drawCentredString(w / 2 + 20 * mm, 10.2 * mm, C("Generated by: " + ident["user"]).replace("&amp;", "&"))
+            self.drawCentredString(w / 2 + 20 * mm, 6.8 * mm, "Generated: " + ident["now"])
+            self.setFont("Helvetica-Bold", 8)
+            self.setFillColor(colors.HexColor("#111827"))
+            self.drawRightString(w - M, 10.2 * mm, f"Page {self._pageNumber} of {n}")
+
+    def later(c, d):
+        c.saveState()
+        c.setFont("Helvetica", 7.5)
+        c.setFillColor(colors.HexColor("#6B7280"))
+        c.drawString(M, page[1] - 9 * mm, C(f"{ident['group']} - {ident['title']}").replace("&amp;", "&"))
+        c.drawRightString(page[0] - M, page[1] - 9 * mm, C(ident["period"]).replace("&amp;", "&"))
+        c.setStrokeColor(grid)
+        c.line(M, page[1] - 10.5 * mm, page[0] - M, page[1] - 10.5 * mm)
+        c.restoreState()
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=page, leftMargin=M, rightMargin=M, topMargin=14 * mm, bottomMargin=19 * mm,
+                            title=f"{ident['title']} - {ident['period']}", author="Windy Group")
+    el = []
+    el.append(Paragraph(C(ident["group"]), sty("g", fontSize=19, leading=23, fontName="Helvetica-Bold", alignment=1)))
+    el.append(Paragraph(C(ident["plant"]), sty("p", fontSize=10.5, leading=13, alignment=1, textColor=colors.HexColor("#374151"))))
+    el.append(Paragraph(C(ident["title"]), sty("tt", fontSize=13.5, leading=17, fontName="Helvetica-Bold", alignment=1, spaceBefore=4)))
+    ln = Table([[""]], colWidths=[fw_], rowHeights=[3])
+    ln.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, -1), 1.6, colors.HexColor("#0F172A"))]))
+    el += [ln, Spacer(1, 5)]
+    mt = Table([[Paragraph(C(a), s_h), Paragraph(C(b), s_c)] for a, b in ident["meta"]], colWidths=[fw_ * 0.2, fw_ * 0.8])
+    mt.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.4, grid), ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F3F4F6")),
+                            ("TOPPADDING", (0, 0), (-1, -1), 2.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5)]))
+    el += [mt, Spacer(1, 8)]
+
+    for b in model["blocks"]:
+        t = b["t"]
+        if t == "text":
+            el.append(Paragraph(C(b["text"]), s_c))
+        elif t == "kpis":
+            n = len(b["items"])
+            cells = [[Paragraph(C(l).upper(), sty("kl", fontSize=6.5, leading=8, alignment=1, textColor=colors.HexColor("#4B5563"))) for l, _ in b["items"]],
+                     [Paragraph(C(v), sty("kv", fontSize=9.5, leading=12, alignment=1, fontName="Helvetica-Bold")) for _, v in b["items"]]]
+            kt = Table(cells, colWidths=[fw_ / n] * n)
+            kt.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, grid), ("TOPPADDING", (0, 0), (-1, -1), 3.5),
+                                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5)]))
+            el += [kt, Spacer(1, 6)]
+        elif t == "bars":
+            el.append(Paragraph(C(b["title"]), s_t))
+            el.append(Paragraph(C(b["note"]), s_n))
+            pairs = b["pairs"]
+            if not pairs:
+                el.append(Paragraph("No data for this period.", s_c))
+                continue
+            mx, tot = max(v for _, v in pairs) or 1.0, sum(v for _, v in pairs) or 1.0
+            bw = fw_ * 0.38
+            rows = [[Paragraph("Category", s_h), Paragraph("Share", s_h), Paragraph("Value (BDT)", s_hr), Paragraph("%", s_hr)]]
+            for l, v in pairs:
+                dr = Drawing(bw - 8, 7)
+                dr.add(Rect(0, 0, bw - 8, 7, fillColor=colors.HexColor("#E5E7EB"), strokeColor=None))
+                dr.add(Rect(0, 0, max((bw - 8) * v / mx, 2), 7, fillColor=colors.HexColor("#374151"), strokeColor=None))
+                rows.append([Paragraph(C(l), s_c), dr, Paragraph(f"{v:,.0f}", s_r), Paragraph(f"{v / tot * 100:.0f}%", s_r)])
+            bt = Table(rows, colWidths=[fw_ * 0.3, bw, fw_ * 0.2, fw_ * 0.12], repeatRows=1)
+            bt.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.4, grid), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E5E7EB")),
+                                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 0), (-1, -1), 2.5),
+                                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5)]))
+            el.append(bt)
+        else:
+            cols = b["cols"]
+            tw = sum(c[3] for c in cols) or 1.0
+            widths = [fw_ * c[3] / tw for c in cols]
+            rows = [[Paragraph(C(c[1]), s_hr if c[4] == "r" else s_h) for c in cols]]
+            df = b["df"]
+            stat_cells = []
+            for ri, r in enumerate(df.itertuples(index=False), 1):
+                d = r._asdict()
+                row = []
+                for ci, c in enumerate(cols):
+                    txt = _rpa_fmt(d.get(c[0]), c[2])
+                    if c[0] == "status" and _rpa_cell_cls(txt):
+                        stat_cells.append((ri, ci, "#B91C1C" if "neg" in _rpa_cell_cls(txt) else "#B45309"))
+                    row.append(Paragraph(C(txt), s_r if c[4] == "r" else s_c))
+                rows.append(row)
+            if b.get("total"):
+                tt = b["total"]
+                rows.append([Paragraph(C(_rpa_fmt(tt[c[0]], c[2])) if c[0] in tt else "", s_br if c[4] == "r" else s_b) for c in cols])
+            el.append(Paragraph(C(b["title"]), s_t))
+            if b["note"]:
+                el.append(Paragraph(C(b["note"]), s_n))
+            if len(rows) == 1:
+                el.append(Paragraph("No rows.", s_c))
+                continue
+            tb = Table(rows, colWidths=widths, repeatRows=1)
+            ts = [("GRID", (0, 0), (-1, -1), 0.4, grid), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E5E7EB")),
+                  ("LINEBELOW", (0, 0), (-1, 0), 0.9, dark), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                  ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F9FAFB")]),
+                  ("TOPPADDING", (0, 0), (-1, -1), 2.6), ("BOTTOMPADDING", (0, 0), (-1, -1), 2.6),
+                  ("LEFTPADDING", (0, 0), (-1, -1), 3.5), ("RIGHTPADDING", (0, 0), (-1, -1), 3.5)]
+            if b.get("total"):
+                ts += [("LINEABOVE", (0, -1), (-1, -1), 1.2, colors.HexColor("#374151")), ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F3F4F6"))]
+            tb.setStyle(TableStyle(ts))
+            el.append(tb)
+            el.append(Spacer(1, 4))
+    doc.build(el, onFirstPage=lambda c, d: None, onLaterPages=later, canvasmaker=NC)
+    return buf.getvalue()
+
+
+# ---------- Excel ----------
+def _rpa_xlsx(model, ident):
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = {"summary": "Inventory Summary", "stock": "Stock Report", "issue": "Issue Report",
+                "purchase": "Purchase Report", "budget": "Budget Report"}[model["kind"]]
+    thin = Side(style="thin", color="9CA3AF")
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    hfill = PatternFill("solid", fgColor="E5E7EB")
+    zfill = PatternFill("solid", fgColor="F9FAFB")
+    ncols = 4
+    for b in model["blocks"]:
+        if b["t"] == "table":
+            ncols = max(ncols, len(b["cols"]) + len(b["xcols"]))
+        elif b["t"] == "bars":
+            ncols = max(ncols, 3)
+        elif b["t"] == "kpis":
+            ncols = max(ncols, 2)
+    last = get_column_letter(ncols)
+    lines = [(ident["group"], 16, True), (ident["plant"], 11, False), (ident["title"], 14, True),
+             (f"Reporting Period: {ident['period']}", 11, False)]
+    for i, (txt, sz, bold) in enumerate(lines, 1):
+        ws.merge_cells(f"A{i}:{last}{i}")
+        c = ws[f"A{i}"]
+        c.value, c.font, c.alignment = txt, Font(bold=bold, size=sz), Alignment(horizontal="center")
+    ws.merge_cells(f"A5:{last}5")
+    ws["A5"].value = (f"Factory / Unit: {ident['meta'][0][1]}   |   Generated: {ident['now']}   |   Generated By: {ident['user']}")
+    ws["A5"].font = Font(size=9, color="4B5563")
+    ws["A5"].alignment = Alignment(horizontal="center")
+    r = 7
+    widths = [10] * ncols
+    freeze = None
+    filt = None
+    fmts = {"money": "#,##0", "qty": "#,##0.##", "int": "#,##0", "date": "DD-MMM-YYYY", "pct": '0.0"%"'}
+    for b in model["blocks"]:
+        t = b["t"]
+        if t == "text":
+            ws.cell(r, 1, b["text"])
+            r += 2
+        elif t == "kpis":
+            for l, v in b["items"]:
+                a, c = ws.cell(r, 1, l), ws.cell(r, 2, v)
+                a.font, a.fill = Font(bold=True), hfill
+                for x in (a, c):
+                    x.border = box
+                c.alignment = Alignment(horizontal="right")
+                widths[0], widths[1] = max(widths[0], len(l) + 3), max(widths[1], len(str(v)) + 3)
+                r += 1
+            r += 1
+        elif t == "bars":
+            ws.cell(r, 1, b["title"]).font = Font(bold=True, size=11)
+            r += 1
+            tot = sum(v for _, v in b["pairs"]) or 1.0
+            for j, h in enumerate(["Category", "Value (BDT)", "Share %"], 1):
+                c = ws.cell(r, j, h)
+                c.font, c.fill, c.border = Font(bold=True), hfill, box
+                c.alignment = Alignment(horizontal="left" if j == 1 else "right")
+            r += 1
+            for l, v in b["pairs"]:
+                ws.cell(r, 1, l).border = box
+                c2, c3 = ws.cell(r, 2, v), ws.cell(r, 3, v / tot * 100.0)
+                c2.number_format, c3.number_format = "#,##0", '0.0"%"'
+                c2.border = c3.border = box
+                widths[0] = max(widths[0], len(str(l)) + 3)
+                r += 1
+            r += 1
+        else:
+            allc = b["cols"] + b["xcols"]
+            ws.cell(r, 1, b["title"]).font = Font(bold=True, size=11)
+            r += 1
+            if b["note"]:
+                ws.cell(r, 1, b["note"]).font = Font(size=9, color="6B7280")
+                r += 1
+            hr = r
+            for j, c in enumerate(allc, 1):
+                x = ws.cell(r, j, c[1])
+                x.font, x.fill, x.border = Font(bold=True), hfill, box
+                x.alignment = Alignment(horizontal="right" if c[4] == "r" else "left", vertical="center", wrap_text=True)
+                widths[j - 1] = max(widths[j - 1], len(c[1]) + 3)
+            r += 1
+            for k, row in enumerate(b["df"].itertuples(index=False)):
+                d = row._asdict()
+                for j, c in enumerate(allc, 1):
+                    v = d.get(c[0])
+                    if c[2] == "date":
+                        v = None if pd.isna(v) else v.to_pydatetime()
+                    elif c[2] in ("money", "qty", "int", "pct"):
+                        v = None if pd.isna(v) else float(v)
+                    else:
+                        v = "" if v is None else str(v)
+                    x = ws.cell(r, j, v)
+                    x.border = box
+                    if c[2] in fmts:
+                        x.number_format = fmts[c[2]]
+                    x.alignment = Alignment(horizontal="right" if c[4] == "r" else "left", vertical="top")
+                    if k % 2:
+                        x.fill = zfill
+                    if c[0] == "status" and str(v) in ("Negative", "Out of stock", "Over limit"):
+                        x.font = Font(bold=True, color="B91C1C")
+                    elif c[0] == "status" and str(v) in ("Low", "Watch"):
+                        x.font = Font(bold=True, color="B45309")
+                    ln_ = len(str(v)) + 2 if v is not None else 4
+                    widths[j - 1] = max(widths[j - 1], min(ln_, 48))
+                r += 1
+            if b.get("total"):
+                for j, c in enumerate(allc, 1):
+                    tt = b["total"]
+                    x = ws.cell(r, j, tt.get(c[0]) if c[0] in tt else None)
+                    x.font, x.border = Font(bold=True), Border(left=thin, right=thin, bottom=thin, top=Side(style="medium", color="374151"))
+                    if c[2] in fmts:
+                        x.number_format = fmts[c[2]]
+                    x.alignment = Alignment(horizontal="right" if c[4] == "r" else "left")
+                r += 1
+            if b["main"]:
+                freeze = f"A{hr + 1}"
+                filt = f"A{hr}:{get_column_letter(len(allc))}{hr + len(b['df'])}"
+                ws.print_title_rows = f"{hr}:{hr}"
+            r += 1
+    for j, w in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(j)].width = min(max(w, 8), 50)
+    if freeze:
+        ws.freeze_panes = freeze
+        ws.auto_filter.ref = filt
+    ws.page_setup.orientation = "landscape" if model["landscape"] else "portrait"
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.oddFooter.left.text = "Windy Group - " + _RPA_PLANT_ALL
+    ws.oddFooter.right.text = "Page &P of &N"
+    bio = io.BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+
+def _rpa_render(kind, ym, plabel):
+    """A4 preview + PDF / Excel / Print for the open report. Heavy files are built only when their button is clicked."""
+    ver = _data_version()
+    model = _rpa_model(FAC, ver, kind, ym, plabel)
+    ident = _rpa_identity(FAC, kind, plabel)
+    slug = f"{kind}_report_{re.sub(r'[^A-Za-z0-9]+', '_', plabel).strip('_')}"
+    a, b, c = st.columns([1, 1, 3])
+    pdf_ok = _lazy_download(a, "\U0001F4C4 Download PDF", lambda: _rpa_pdf(model, ident), f"{slug}.pdf", "application/pdf", f"rpa_pdf_{kind}")
+    xl_ok = _lazy_download(b, "\U0001F4CA Download Excel", lambda: _rpa_xlsx(model, ident), f"{slug}.xlsx",
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", f"rpa_xls_{kind}")
+    if not (pdf_ok and xl_ok):
+        c.caption("Downloads need a newer Streamlit; use the classic view below.")
+    html, pages = _rpa_preview_html(model, ident)
+    components.html(html, height=900, scrolling=True)
+    c.caption(f"A4 {'landscape' if model['landscape'] else 'portrait'} · {pages} page(s) in preview · "
+              "use \U0001F5A8️ Print Report inside the preview to print only this report.")
+
+
 def tab_reports():
     st.title("\U0001F4D1 Reports")
     st.caption("Read-only, easy-to-read summaries of stock, issues, purchases and budget. Nothing on this page changes any data.")
@@ -10888,8 +11596,12 @@ def tab_reports():
         pm = tx[tx["ym"] == _rp_ym_prev(ym)]
         prev = pm if not pm.empty else None
     pick = lazy_tab_select(["\U0001F4CC Summary", "\U0001F4E6 Stock", "\U0001F4E4 Issues", "\U0001F4E5 Purchases", "\U0001F4B0 Budget"], "lz_rp")
+    classic = st.toggle("Classic dashboard view", value=False, key="rp_classic",
+                        help="Switch to the earlier card layout. The A4 report view is the default.")
     try:
-        if pick == 0:
+        if not classic:
+            _rpa_render(["summary", "stock", "issue", "purchase", "budget"][pick], ym, plabel)
+        elif pick == 0:
             _rp_summary(tx, tp, prev, ym, plabel)
         elif pick == 1:
             _rp_stock()
