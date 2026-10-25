@@ -4068,6 +4068,12 @@ def _oc_typo_hint(f, s_):
     return ""
 
 
+def _oc_size_conflict(a, b):
+    """Both items HAVE a size and the sizes differ -> they are different items (V Belt-A A-54 vs V Belt-A A-78)."""
+    x, y = norm_size(a), norm_size(b)
+    return bool(x and y and x != y)
+
+
 def opening_check_build(fac, file_rows, min_score, ignore_code=False):
     """Order of matching: (1) ERP code - but ONLY if the item names also agree, (2) identical name(+size), (3) similar name.
     A code that points to a clearly different item is reported as a code conflict instead of being trusted."""
@@ -4095,7 +4101,8 @@ def opening_check_build(fac, file_rows, min_score, ignore_code=False):
             continue
         r0 = free[0]
         sc = _oc_score(fns[i], dbn_all[r0["sl_no"]]) if fns[i] else 1.0
-        if sc >= 0.75 and _oc_numbers(fns[i]) == _oc_numbers(dbn_all[r0["sl_no"]]):
+        if (sc >= 0.75 and _oc_numbers(fns[i]) == _oc_numbers(dbn_all[r0["sl_no"]])
+                and not _oc_size_conflict(fr["size"], r0["size"])):
             assigned[i] = (r0, "ERP code + নাম মিল", 1.0)
             used_db.add(r0["sl_no"])
         else:
@@ -4106,12 +4113,18 @@ def opening_check_build(fac, file_rows, min_score, ignore_code=False):
             continue
         cands = by_name.get(norm_name(fr["name"]), [])
         ns = norm_size(fr["size"])
-        if cands and ns:
-            sized = [c for c in cands if norm_size(c["size"]) == ns]
-            cands = sized or cands
-        free = [c for c in cands if c["sl_no"] not in used_db]
+        if ns:
+            same = [c for c in cands if norm_size(c["size"]) == ns]
+            blank = [c for c in cands if not norm_size(c["size"])]
+            pool = same or blank                     # a different size is NEVER accepted
+            label = "হুবহু নাম" if same else "নাম মিল (সফটওয়্যারে সাইজ নেই)"
+        else:
+            sizes = {norm_size(c["size"]) for c in cands}
+            pool = cands if len(sizes) <= 1 else []   # several sizes in software and none in Excel -> ambiguous, not guessed
+            label = "হুবহু নাম" if (pool and not norm_size(pool[0]["size"])) else "নাম মিল (Excel-এ সাইজ নেই)"
+        free = [c for c in pool if c["sl_no"] not in used_db]
         if free:
-            assigned[i] = (free[0], "হুবহু নাম", 1.0)
+            assigned[i] = (free[0], label, 1.0)
             used_db.add(free[0]["sl_no"])
     # (3) similar name for the rest (token index keeps it fast for thousands of rows)
     dbn = [(r, dbn_all[r["sl_no"]]) for r in db_rows if r["sl_no"] not in used_db]
@@ -4135,7 +4148,7 @@ def opening_check_build(fac, file_rows, min_score, ignore_code=False):
         fnum = _oc_numbers(fn)
         for di in sorted(votes, key=votes.get, reverse=True)[:15]:
             sc = _oc_score(fn, dbn[di][1])
-            same_num = (fnum == _oc_numbers(dbn[di][1]))
+            same_num = (fnum == _oc_numbers(dbn[di][1])) and not _oc_size_conflict(file_rows[i]["size"], dbn[di][0]["size"])
             if i not in best_any or sc > best_any[i][1]:
                 best_any[i] = (di, sc, same_num)
             if sc >= min_score and same_num:
@@ -4173,7 +4186,7 @@ def opening_check_build(fac, file_rows, min_score, ignore_code=False):
             if i in best_any and best_any[i][1] >= 0.5:
                 di, sc, same_num = best_any[i]
                 r = dbn[di][0]
-                near = f"{r['item_name']} [{r['size'] or '-'}] · SL {r['sl_no']} · {sc * 100:.0f}%" + ("" if same_num else " · সংখ্যা আলাদা")
+                near = f"{r['item_name']} [{r['size'] or '-'}] · SL {r['sl_no']} · {sc * 100:.0f}%" + ("" if same_num else " · সাইজ/সংখ্যা আলাদা")
             out.append({"Result": "Not in software", "File Item": fr["name"], "File Size": fr["size"], "File Qty": fq,
                         "Software Item": "", "Software Size": "", "SL No": None, "ERP Code": "", "Software Physical": None,
                         "Software − File": None, "Name match": "মেলেনি", "Code note": code_note,
