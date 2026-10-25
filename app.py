@@ -9615,64 +9615,102 @@ _KC_LOGIN_CSS = """<style>
 [data-testid="stHeader"], [data-testid="stToolbar"], header { display:none !important; }
 .stApp { background: radial-gradient(1200px 600px at 10% 0%, #dbeafe 0%, transparent 60%),
                      radial-gradient(900px 500px at 100% 100%, #c7d2fe 0%, transparent 55%), #eef2ff !important; }
-.block-container { max-width: 1020px !important; padding-top: 2.5vh !important; padding-bottom: 3vh !important; }
+.block-container { max-width: 1060px !important; padding-top: 3vh !important; padding-bottom: 2vh !important; }
+/* ---- main split card ---- */
 [data-testid="stHorizontalBlock"]:has(.kc-form-marker) {
-    background:#ffffff; border-radius:30px; box-shadow:0 30px 80px rgba(37,99,235,.22), 0 4px 14px rgba(15,23,42,.06);
-    gap:0 !important; overflow:hidden; min-height:560px; align-items:stretch !important; }
+    background:#ffffff; border-radius:28px; border:1px solid rgba(148,163,184,.28);
+    box-shadow:0 24px 60px rgba(30,64,175,.14), 0 2px 8px rgba(15,23,42,.05);
+    gap:0 !important; overflow:hidden; min-height:540px; align-items:stretch !important; }
 [data-testid="stHorizontalBlock"]:has(.kc-mode-register) { flex-direction: row-reverse !important; }
 [data-testid="stHorizontalBlock"]:has(.kc-mode-login)    { animation: kcSlideL .75s cubic-bezier(.22,1,.36,1); }
 [data-testid="stHorizontalBlock"]:has(.kc-mode-register) { animation: kcSlideR .75s cubic-bezier(.22,1,.36,1); }
 @keyframes kcSlideL { from { opacity:0; transform: translateX(-90px) scale(.985); } to { opacity:1; transform:none; } }
 @keyframes kcSlideR { from { opacity:0; transform: translateX(90px) scale(.985); }  to { opacity:1; transform:none; } }
+/* ---- left blue panel ---- */
 [data-testid="stColumn"]:has(.kc-panel-marker), [data-testid="column"]:has(.kc-panel-marker) {
-    background: linear-gradient(145deg, #1d4ed8 0%, #3b82f6 55%, #60a5fa 100%); color:#fff; flex:1 1 46% !important;
-    border-radius: 30px 190px 190px 30px; position:relative; overflow:hidden; }
+    background: linear-gradient(145deg, #1e40af 0%, #2563eb 50%, #60a5fa 100%); color:#fff; flex:1 1 44% !important;
+    border-radius: 28px 170px 170px 28px; position:relative; overflow:hidden; }
 [data-testid="stHorizontalBlock"]:has(.kc-mode-register) [data-testid="stColumn"]:has(.kc-panel-marker),
-[data-testid="stHorizontalBlock"]:has(.kc-mode-register) [data-testid="column"]:has(.kc-panel-marker) { border-radius: 190px 30px 30px 190px; }
+[data-testid="stHorizontalBlock"]:has(.kc-mode-register) [data-testid="column"]:has(.kc-panel-marker) { border-radius: 170px 28px 28px 170px; }
 [data-testid="stColumn"]:has(.kc-panel-marker)::before, [data-testid="column"]:has(.kc-panel-marker)::before {
     content:""; position:absolute; width:260px; height:260px; border-radius:50%; background:rgba(255,255,255,.08); top:-80px; left:-70px; }
 [data-testid="stColumn"]:has(.kc-panel-marker)::after, [data-testid="column"]:has(.kc-panel-marker)::after {
     content:""; position:absolute; width:200px; height:200px; border-radius:50%; background:rgba(255,255,255,.07); bottom:-60px; right:40px; }
 [data-testid="stColumn"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"] {
-    min-height:560px; justify-content:center; align-items:center; text-align:center; padding:0 34px; position:relative; z-index:1; }
-.kc-panel-inner h1 { color:#fff !important; font-size:2.35rem; font-weight:800; margin:.4rem 0 .5rem 0; letter-spacing:-.5px; }
-.kc-panel-inner p  { color:rgba(255,255,255,.92) !important; font-size:1.02rem; margin:0 0 .6rem 0; }
+    min-height:540px; justify-content:center; align-items:center; text-align:center; padding:0 34px; position:relative; z-index:1; gap:.5rem; }
+.kc-panel-inner h1 { color:#fff !important; font-size:2.2rem; font-weight:800; margin:.9rem 0 .35rem 0; letter-spacing:-.4px; line-height:1.15; }
+.kc-panel-inner p  { color:rgba(255,255,255,.92) !important; font-size:1rem; margin:0 0 .5rem 0; }
+.kc-panel-inner p.kc-sub { font-size:.86rem; color:rgba(255,255,255,.78) !important; max-width:250px; margin:0 auto 1.1rem auto; line-height:1.45; }
 .kc-logo { width:78px; height:78px; object-fit:contain; background:#fff; border-radius:20px; padding:9px; box-shadow:0 10px 26px rgba(15,23,42,.25); }
 [data-testid="stColumn"]:has(.kc-panel-marker) button, [data-testid="column"]:has(.kc-panel-marker) button {
-    background:transparent !important; color:#fff !important; border:2px solid #fff !important; border-radius:14px !important;
-    min-width:170px; height:46px; font-weight:700 !important; transition:all .25s ease; }
+    background:transparent !important; color:#fff !important; border:2px solid #fff !important; border-radius:12px !important;
+    min-width:170px; height:44px; font-weight:700 !important; transition:all .25s ease; }
 [data-testid="stColumn"]:has(.kc-panel-marker) button:hover, [data-testid="column"]:has(.kc-panel-marker) button:hover {
     background:#fff !important; color:#1d4ed8 !important; transform:translateY(-2px); box-shadow:0 10px 24px rgba(0,0,0,.18); }
-[data-testid="stColumn"]:has(.kc-form-marker), [data-testid="column"]:has(.kc-form-marker) { flex:1 1 54% !important; padding:44px 54px !important; }
-[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stVerticalBlock"] { justify-content:center; min-height:470px; }
-.kc-form-title { font-size:1.55rem; font-weight:800; color:#0f172a; line-height:1.25; margin:0 0 .25rem 0; text-align:center; }
-.kc-form-sub { color:#64748b; text-align:center; margin:0 0 1rem 0; font-size:.95rem; }
-[data-testid="stColumn"]:has(.kc-form-marker) input, [data-testid="column"]:has(.kc-form-marker) input {
-    background:transparent !important; border:none !important; border-radius:12px !important; height:46px; color:#0f172a !important; }
-[data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="input"], [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="input"] {
-    background:#f8fafc !important; border:1.5px solid #94a3b8 !important; border-radius:12px !important; transition:border-color .2s, box-shadow .2s; }
-[data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="input"]:focus-within, [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="input"]:focus-within {
-    border-color:#3b82f6 !important; box-shadow:0 0 0 3px rgba(59,130,246,.18); }
-[data-testid="stFormSubmitButton"] button { background:linear-gradient(90deg,#1d4ed8,#3b82f6) !important; color:#fff !important; border:none !important;
-    border-radius:14px !important; height:48px; font-weight:700 !important; letter-spacing:.2px; box-shadow:0 10px 22px rgba(37,99,235,.35); transition:all .25s ease; }
-[data-testid="stFormSubmitButton"] button:hover { transform:translateY(-2px); box-shadow:0 14px 28px rgba(37,99,235,.45); }
+/* ---- right form side (shared by Login / Register / Forgot password) ---- */
+[data-testid="stColumn"]:has(.kc-form-marker), [data-testid="column"]:has(.kc-form-marker) { flex:1 1 56% !important; padding:38px 52px !important; }
+[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stVerticalBlock"] { justify-content:center; min-height:460px; }
+.kc-form-title { font-size:1.4rem; font-weight:800; color:#0f172a; line-height:1.3; margin:0 0 .3rem 0; text-align:center; }
+.kc-form-sub { color:#64748b; text-align:center; margin:0 0 .6rem 0; font-size:.92rem; }
 [data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stForm"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stForm"] { border:none !important; padding:0 !important; }
-[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stForm"] [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stForm"] [data-testid="stVerticalBlock"] { min-height:0 !important; justify-content:flex-start !important; gap:.85rem !important; }
-.kc-foot { text-align:center; color:#64748b; font-size:.8rem; margin-top:18px; }
-.kc-brand { text-align:center; margin:26px auto 0 auto; max-width:760px; }
-.kc-brand .b1 { font-size:1.55rem; font-weight:800; color:#0f172a; letter-spacing:-.3px; line-height:1.25; }
-.kc-brand .b2 { font-size:1.02rem; font-weight:600; color:#1d4ed8; margin-top:.25rem; }
-.kc-brand .b3 { font-size:.98rem; color:#334155; margin-top:.15rem; }
-.kc-brand .b4 { font-size:.82rem; color:#64748b; letter-spacing:2px; margin-top:.6rem; font-weight:600; }
-.kc-brand .b5 { font-size:.8rem; color:#64748b; margin-top:1.1rem; padding-top:.8rem; border-top:1px solid #cbd5e1; }
+[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stForm"] [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stForm"] [data-testid="stVerticalBlock"] { min-height:0 !important; justify-content:flex-start !important; gap:.8rem !important; }
+/* labels */
+[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stWidgetLabel"] p, [data-testid="column"]:has(.kc-form-marker) [data-testid="stWidgetLabel"] p {
+    font-size:.82rem !important; font-weight:600 !important; color:#334155 !important; margin:0 0 2px 0 !important; }
+/* input boxes: one clean bordered box, no inner double border */
+[data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="input"], [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="input"] {
+    background:#ffffff !important; border:1.5px solid #cbd5e1 !important; border-radius:10px !important; min-height:46px;
+    box-shadow:none !important; transition:border-color .2s ease, box-shadow .2s ease; }
+[data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="input"]:hover, [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="input"]:hover { border-color:#94a3b8 !important; }
+[data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="input"]:focus-within, [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="input"]:focus-within {
+    border-color:#2563eb !important; box-shadow:0 0 0 3px rgba(37,99,235,.15) !important; }
+[data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="base-input"], [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="base-input"] {
+    background:transparent !important; border:none !important; box-shadow:none !important; }
+[data-testid="stColumn"]:has(.kc-form-marker) input, [data-testid="column"]:has(.kc-form-marker) input {
+    background:transparent !important; border:none !important; box-shadow:none !important; height:44px; padding:0 14px !important;
+    color:#0f172a !important; font-size:.95rem !important; }
+[data-testid="stColumn"]:has(.kc-form-marker) input::placeholder, [data-testid="column"]:has(.kc-form-marker) input::placeholder { color:#94a3b8 !important; }
+[data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="input"] button, [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="input"] button { color:#64748b !important; }
+/* primary button */
+[data-testid="stFormSubmitButton"] button { background:linear-gradient(90deg,#1d4ed8,#2563eb) !important; color:#fff !important; border:none !important;
+    border-radius:10px !important; height:46px; font-weight:700 !important; letter-spacing:.3px; box-shadow:0 6px 16px rgba(37,99,235,.28); transition:all .2s ease; }
+[data-testid="stFormSubmitButton"] button:hover { transform:translateY(-1px); box-shadow:0 10px 22px rgba(37,99,235,.38); }
+/* secondary buttons (Forgot password? / Back to login) look like clean links */
+[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stButton"] button, [data-testid="column"]:has(.kc-form-marker) [data-testid="stButton"] button {
+    background:transparent !important; border:none !important; box-shadow:none !important; color:#1d4ed8 !important;
+    font-weight:600 !important; font-size:.88rem !important; padding:.2rem .4rem !important; min-height:0 !important; height:auto !important; }
+[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stButton"] button:hover, [data-testid="column"]:has(.kc-form-marker) [data-testid="stButton"] button:hover { text-decoration:underline; color:#1e40af !important; }
+.kc-secure { text-align:center; color:#64748b; font-size:.76rem; margin-top:.6rem; letter-spacing:.2px; }
+/* ---- information section under the card ---- */
+.kc-brand { max-width:1020px; margin:22px auto 0 auto; text-align:center; }
+.kc-brand .eyebrow { font-size:.72rem; letter-spacing:2.6px; font-weight:700; color:#64748b; }
+.kc-brand .b2 { font-size:1.3rem; font-weight:800; color:#0f172a; margin-top:.2rem; letter-spacing:-.2px; }
+.kc-brand .b3 { font-size:.95rem; font-weight:600; color:#1d4ed8; margin-top:.1rem; }
+.kc-brand .b4 { font-size:.76rem; color:#64748b; letter-spacing:2px; margin-top:.4rem; font-weight:600; }
+.kc-feats { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:18px; text-align:left; }
+.kc-feat { background:rgba(255,255,255,.8); border:1px solid #dbe3f0; border-radius:14px; padding:13px 16px; display:flex; gap:12px; align-items:flex-start; }
+.kc-feat .ic { font-size:1.25rem; line-height:1.2; }
+.kc-feat .t { font-weight:700; color:#0f172a; font-size:.9rem; }
+.kc-feat .d { color:#64748b; font-size:.79rem; margin-top:2px; line-height:1.4; }
+.kc-foot { text-align:center; color:#94a3b8; font-size:.74rem; margin-top:18px; line-height:1.65; }
+/* ---- tablet / mobile ---- */
+@media (max-width: 900px) {
+  .kc-panel-inner h1 { font-size:1.9rem; }
+  [data-testid="stColumn"]:has(.kc-form-marker), [data-testid="column"]:has(.kc-form-marker) { padding:32px 30px !important; }
+}
 @media (max-width: 760px) {
-  .block-container { padding-top:3vh !important; }
+  .block-container { padding-top:2vh !important; }
+  [data-testid="stHorizontalBlock"]:has(.kc-form-marker) { min-height:0; }
   [data-testid="stHorizontalBlock"]:has(.kc-mode-register) { flex-direction: column-reverse !important; }
   [data-testid="stColumn"]:has(.kc-panel-marker), [data-testid="column"]:has(.kc-panel-marker),
-  [data-testid="stHorizontalBlock"]:has(.kc-mode-register) [data-testid="stColumn"]:has(.kc-panel-marker) { border-radius: 30px 30px 110px 110px; }
-  [data-testid="stColumn"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"] { min-height:300px; }
-  [data-testid="stColumn"]:has(.kc-form-marker), [data-testid="column"]:has(.kc-form-marker) { padding:28px 22px !important; }
-  .kc-panel-inner h1 { font-size:1.8rem; }
+  [data-testid="stHorizontalBlock"]:has(.kc-mode-register) [data-testid="stColumn"]:has(.kc-panel-marker),
+  [data-testid="stHorizontalBlock"]:has(.kc-mode-register) [data-testid="column"]:has(.kc-panel-marker) { border-radius: 28px 28px 90px 90px; }
+  [data-testid="stColumn"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"] { min-height:250px; padding:20px 24px; }
+  [data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stVerticalBlock"] { min-height:0; }
+  [data-testid="stColumn"]:has(.kc-form-marker), [data-testid="column"]:has(.kc-form-marker) { padding:26px 20px !important; }
+  .kc-panel-inner h1 { font-size:1.6rem; margin-top:.6rem; }
+  .kc-form-title { font-size:1.2rem; }
+  .kc-feats { grid-template-columns:1fr; gap:10px; }
 }
 </style>"""
 
@@ -9724,10 +9762,10 @@ def render_login_page():
         st.markdown('<div class="kc-panel-marker"></div>', unsafe_allow_html=True)
         logo = f'<img class="kc-logo" src="data:image/png;base64,{WINDY_LOGO_B64}" alt="Windy Group">'
         if reg:
-            st.markdown(f'<div class="kc-panel-inner">{logo}<h1>Welcome Back!</h1><p>Already have an account?</p></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="kc-panel-inner">{logo}<h1>Welcome Back!</h1><p class="kc-sub">Smart inventory control for efficient operations.</p><p>Already have an account?</p></div>', unsafe_allow_html=True)
             st.button("Login", key="kc_to_login", on_click=_kc_set_mode, args=("login",))
         else:
-            st.markdown(f'<div class="kc-panel-inner">{logo}<h1>Hello, Welcome!</h1><p>Don\'t have an account?</p></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="kc-panel-inner">{logo}<h1>Hello, Welcome!</h1><p class="kc-sub">Smart inventory control for efficient operations.</p><p>Don\'t have an account?</p></div>', unsafe_allow_html=True)
             st.button("Register", key="kc_to_register", on_click=_kc_set_mode, args=("register",))
     with right:
         st.markdown(f'<div class="kc-form-marker kc-mode-{"register" if reg else "login"}"></div>', unsafe_allow_html=True)
@@ -9735,8 +9773,8 @@ def render_login_page():
             st.markdown('<div class="kc-form-title">Welcome to Windy Washing &amp; KC Washing Store Inventory</div>'
                         '<div class="kc-form-sub">Sign in with your approved account to continue</div>', unsafe_allow_html=True)
             with st.form("kc_login_form", clear_on_submit=False):
-                u = st.text_input("Username", placeholder="Username", key="kc_login_user", label_visibility="collapsed")
-                p = st.text_input("Password", type="password", placeholder="Password", key="kc_login_pass", label_visibility="collapsed")
+                u = st.text_input("Username", placeholder="Enter your username", key="kc_login_user", label_visibility="visible")
+                p = st.text_input("Password", type="password", placeholder="Enter your password", key="kc_login_pass", label_visibility="visible")
                 go = st.form_submit_button("Login", use_container_width=True)
             if go:
                 if not u.strip() or not p:
@@ -9756,7 +9794,7 @@ def render_login_page():
             st.markdown('<div class="kc-form-title">Forgot password?</div>'
                         '<div class="kc-form-sub">The Store Manager will set a temporary password for you</div>', unsafe_allow_html=True)
             with st.form("kc_forgot_form", clear_on_submit=True):
-                ru = st.text_input("Username", placeholder="Your username", key="kc_fp_user", label_visibility="collapsed")
+                ru = st.text_input("Username", placeholder="Your username", key="kc_fp_user", label_visibility="visible")
                 rs = st.form_submit_button("Request password reset", use_container_width=True)
             if rs:
                 if not ru.strip():
@@ -9769,10 +9807,10 @@ def render_login_page():
             st.markdown('<div class="kc-form-title">Create your account</div>'
                         '<div class="kc-form-sub">New accounts need Store Manager approval before sign-in</div>', unsafe_allow_html=True)
             with st.form("kc_reg_form", clear_on_submit=False):
-                ru = st.text_input("Username", placeholder="Username (3–30: letters, digits, _ . -)", key="kc_reg_user", label_visibility="collapsed")
-                rn = st.text_input("Full name", placeholder="Full name", key="kc_reg_name", label_visibility="collapsed")
-                p1 = st.text_input("Password", type="password", placeholder="Password (min 8 characters)", key="kc_reg_pw1", label_visibility="collapsed")
-                p2 = st.text_input("Confirm password", type="password", placeholder="Confirm password", key="kc_reg_pw2", label_visibility="collapsed")
+                ru = st.text_input("Username", placeholder="Username (3–30: letters, digits, _ . -)", key="kc_reg_user", label_visibility="visible")
+                rn = st.text_input("Full name", placeholder="Full name", key="kc_reg_name", label_visibility="visible")
+                p1 = st.text_input("Password", type="password", placeholder="Password (min 8 characters)", key="kc_reg_pw1", label_visibility="visible")
+                p2 = st.text_input("Confirm password", type="password", placeholder="Confirm password", key="kc_reg_pw2", label_visibility="visible")
                 rg = st.form_submit_button("Register", use_container_width=True)
             if rg:
                 if not USERNAME_RE.fullmatch(ru.strip()):
@@ -9786,12 +9824,19 @@ def render_login_page():
                 elif register_user(ru.strip(), rn.strip(), p1):
                     st.session_state["auth_mode"] = "login"
                     done("Registration request sent. The Store Manager must approve it before you can sign in.")
+    with right:
+        st.markdown('<div class="kc-secure">🔒 Authorized Personnel Only · Secure Inventory Management Portal</div>', unsafe_allow_html=True)
     st.markdown('<div class="kc-brand">'
-                '<div class="b1">Welcome to Windy Group</div>'
+                '<div class="eyebrow">WELCOME TO WINDY GROUP</div>'
                 '<div class="b2">KC Washing &amp; Windy Washing Plant</div>'
                 '<div class="b3">Smart Inventory Management System</div>'
                 '<div class="b4">Secure • Efficient • Organized</div>'
-                '<div class="b5">Created &amp; Developed by MD Sagor Ali</div>'
+                '<div class="kc-feats">'
+                '<div class="kc-feat"><div class="ic">📦</div><div><div class="t">Inventory Control</div><div class="d">Manage stock and product records efficiently</div></div></div>'
+                '<div class="kc-feat"><div class="ic">📊</div><div><div class="t">Smart Tracking</div><div class="d">Monitor transactions and inventory activity</div></div></div>'
+                '<div class="kc-feat"><div class="ic">🔐</div><div><div class="t">Secure Access</div><div class="d">Authorized access for approved users</div></div></div>'
+                '</div>'
+                '<div class="kc-foot">© 2026 Windy Group • Smart Inventory Management System<br>Created &amp; Developed by MD Sagor Ali</div>'
                 '</div>', unsafe_allow_html=True)
 
 
