@@ -10499,6 +10499,413 @@ def tab_high_value():
 
 
 # ============================================================
+#  REPORTS (new page, ADDITIVE ONLY, read-only): the same live data the other pages use, laid out as clean, easy-to-read
+#  reports (summary, stock, issues, purchases, budget). Nothing here writes to the database or changes another page.
+#  SPEED: data is loaded once per (factory, data-version) and cached; only the report that is open is built.
+# ============================================================
+NAV_REPORTS = "\U0001F4D1 Reports"
+if NAV_REPORTS not in TAB_NAMES:   # first item under "Management", directly above ERP Audit
+    TAB_NAMES.insert(TAB_NAMES.index(NAV_ERP_AUDIT), NAV_REPORTS)
+
+_RP_CSS = """<style>
+.rp-sub{color:#64748B;font-size:.86rem;margin:2px 0 6px 0}
+.rp-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin:6px 0 14px 0}
+.rp-kpi{background:#fff;border:1px solid #E2E8F0;border-left:4px solid #0F766E;border-radius:14px;padding:12px 15px;box-shadow:0 1px 3px rgba(15,23,42,.05)}
+.rp-kpi.blue{border-left-color:#2563EB}.rp-kpi.amber{border-left-color:#F59E0B}.rp-kpi.red{border-left-color:#DC2626}.rp-kpi.slate{border-left-color:#64748B}
+.rp-kl{font-size:.68rem;letter-spacing:1.2px;font-weight:700;color:#64748B;text-transform:uppercase}
+.rp-kv{font-size:1.55rem;font-weight:800;color:#172033;line-height:1.25;margin-top:2px}
+.rp-ks{font-size:.78rem;color:#64748B;margin-top:2px}
+.rp-ks .up{color:#B45309;font-weight:700}.rp-ks .dn{color:#0F766E;font-weight:700}
+.rp-card{background:#fff;border:1px solid #E2E8F0;border-radius:14px;padding:14px 16px;margin-bottom:14px;box-shadow:0 1px 3px rgba(15,23,42,.05)}
+.rp-ct{font-size:.95rem;font-weight:800;color:#172033;margin:0}
+.rp-cn{font-size:.76rem;color:#94A3B8;margin:1px 0 10px 0}
+.rp-br{display:grid;grid-template-columns:minmax(90px,36%) 1fr auto;gap:10px;align-items:center;margin:7px 0;font-size:.84rem}
+.rp-bl{color:#334155;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rp-bt{background:#EEF2F7;border-radius:99px;height:10px;overflow:hidden}
+.rp-bf{height:100%;border-radius:99px;background:linear-gradient(90deg,#0F766E,#14B8A6)}
+.rp-bf.blue{background:linear-gradient(90deg,#2563EB,#60A5FA)}.rp-bf.amber{background:linear-gradient(90deg,#D97706,#FBBF24)}
+.rp-bv{color:#172033;font-weight:700;white-space:nowrap}
+.rp-bv small{color:#94A3B8;font-weight:600;margin-left:5px}
+.rp-tw{overflow-x:auto}
+.rp-t{width:100%;border-collapse:collapse;font-size:.83rem}
+.rp-t th{background:#F1F5F9;color:#475569;font-size:.7rem;letter-spacing:.8px;text-transform:uppercase;text-align:left;padding:8px 10px;border-bottom:1px solid #E2E8F0;white-space:nowrap}
+.rp-t td{padding:8px 10px;border-bottom:1px solid #F1F5F9;color:#1E293B}
+.rp-t tr:nth-child(even) td{background:#FAFBFD}
+.rp-t .n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.rp-chip{display:inline-block;padding:2px 9px;border-radius:99px;font-size:.72rem;font-weight:700;white-space:nowrap}
+.rp-chip.ok{background:#DCFCE7;color:#166534}.rp-chip.watch{background:#FEF3C7;color:#92400E}.rp-chip.over{background:#FEE2E2;color:#991B1B}
+.rp-pb{background:#EEF2F7;border-radius:99px;height:8px;min-width:90px;overflow:hidden}
+.rp-pf{height:100%;border-radius:99px}
+.rp-trend{display:flex;gap:10px;align-items:flex-end;overflow-x:auto;padding-bottom:2px}
+.rp-tcol{flex:1;min-width:64px;text-align:center}
+.rp-tbars{height:130px;display:flex;align-items:flex-end;justify-content:center;gap:5px;border-bottom:1px solid #E2E8F0}
+.rp-tb{width:40%;max-width:26px;border-radius:5px 5px 0 0;min-height:2px}
+.rp-tb.p{background:#2563EB}.rp-tb.i{background:#0F766E}
+.rp-tl{font-size:.76rem;font-weight:700;color:#334155;margin-top:5px}
+.rp-tv{font-size:.68rem;color:#64748B;line-height:1.35}
+.rp-leg{font-size:.76rem;color:#64748B;margin-top:8px}
+.rp-leg i{display:inline-block;width:10px;height:10px;border-radius:3px;margin:0 4px 0 10px;vertical-align:-1px}
+.rp-empty{color:#94A3B8;font-size:.86rem;padding:12px 2px}
+@media (max-width:640px){.rp-br{grid-template-columns:1fr auto}.rp-bt{grid-column:1/-1;order:3}.rp-kv{font-size:1.3rem}}
+</style>"""
+
+
+def _rp_e(x):
+    return html_lib.escape(str("" if x is None else x)).replace("$", "&#36;")
+
+
+def _rp_money(v):
+    return f"\u09f3{float(v):,.0f}"
+
+
+def _rp_q(v):
+    s = f"{float(v):,.2f}"
+    return s.rstrip("0").rstrip(".") if "." in s else s
+
+
+def _rp_short(v):
+    v = float(v)
+    a = abs(v)
+    if a >= 1e7:
+        return f"{v / 1e7:.2f} Cr"
+    if a >= 1e5:
+        return f"{v / 1e5:.1f} L"
+    if a >= 1e3:
+        return f"{v / 1e3:.1f}K"
+    return f"{v:,.0f}"
+
+
+def _rp_ym_prev(ym):
+    y, m = int(ym[:4]), int(ym[5:7]) - 1
+    if m == 0:
+        y, m = y - 1, 12
+    return f"{y:04d}-{m:02d}"
+
+
+def _rp_ym_label(ym):
+    try:
+        return datetime.strptime(ym + "-01", "%Y-%m-%d").strftime("%b-%Y")
+    except Exception:
+        return ym
+
+
+def _rp_delta(cur, prev):
+    if prev is None or prev <= 0:
+        return ""
+    ch = (cur - prev) / prev * 100.0
+    cls, arrow = ("up", "\u25B2") if ch > 0 else ("dn", "\u25BC")
+    return f' <span class="{cls}">{arrow} {abs(ch):.0f}% vs prev. month</span>'
+
+
+def _rp_kpi(label, value, sub="", tone=""):
+    return (f'<div class="rp-kpi {tone}"><div class="rp-kl">{_rp_e(label)}</div><div class="rp-kv">{value}</div>'
+            f'<div class="rp-ks">{sub}</div></div>')
+
+
+def _rp_kpis(items):
+    return '<div class="rp-kpis">' + "".join(items) + "</div>"
+
+
+def _rp_card(title, body, note=""):
+    n = f'<div class="rp-cn">{_rp_e(note)}</div>' if note else '<div class="rp-cn"></div>'
+    return f'<div class="rp-card"><div class="rp-ct">{_rp_e(title)}</div>{n}{body}</div>'
+
+
+def _rp_empty(msg):
+    return f'<div class="rp-empty">{_rp_e(msg)}</div>'
+
+
+def _rp_bars(pairs, tone="", money=True):
+    pairs = [(str(l), float(v)) for l, v in pairs if float(v) > 0]
+    if not pairs:
+        return _rp_empty("No data for this period.")
+    mx = max(v for _, v in pairs)
+    tot = sum(v for _, v in pairs) or 1.0
+    rows = []
+    for l, v in pairs:
+        vt = _rp_money(v) if money else _rp_q(v)
+        rows.append(f'<div class="rp-br"><div class="rp-bl" title="{_rp_e(l)}">{_rp_e(l)}</div>'
+                    f'<div class="rp-bt"><div class="rp-bf {tone}" style="width:{max(v / mx * 100, 1.5):.1f}%"></div></div>'
+                    f'<div class="rp-bv">{vt}<small>{v / tot * 100:.0f}%</small></div></div>')
+    return "".join(rows)
+
+
+def _rp_tbl(heads, rows, num=()):
+    th = "".join(f'<th class="{"n" if i in num else ""}">{_rp_e(h)}</th>' for i, h in enumerate(heads))
+    body = "".join("<tr>" + "".join(f'<td class="{"n" if i in num else ""}">{c}</td>' for i, c in enumerate(r)) + "</tr>"
+                   for r in rows)
+    return f'<div class="rp-tw"><table class="rp-t"><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>'
+
+
+def _rp_show(html):
+    st.markdown(html, unsafe_allow_html=True)
+
+
+@st.cache_data(ttl=180, show_spinner=False, max_entries=6)
+def _rp_tx(fac, ver):
+    """Purchases and issues, one light row each, with the month worked out once (cached until data changes)."""
+    fsql, fp = fw(fac, "t.")
+    df = qdf_c(f"""SELECT t.factory_name, t.date, t.trans_type, t.qty, COALESCE(t.item_name,'') AS item_name,
+                   COALESCE(t.officer_name,'') AS officer, COALESCE(t.supplier_name,'') AS supplier,
+                   COALESCE(NULLIF(i.category,''),'Uncategorized') AS category, COALESCE(i.unit_price,0) AS price
+                   FROM transactions t
+                   LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                   WHERE t.trans_type IN ('Supplier. Rec','Issued','Internal Issue'){fsql}""", fp)
+    cols = ["factory", "ym", "kind", "qty", "item", "officer", "supplier", "category", "price", "amount"]
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    d = _parse_dates(df["date"])
+    qty = pd.to_numeric(df["qty"], errors="coerce").fillna(0.0)
+    price = pd.to_numeric(df["price"], errors="coerce").fillna(0.0)
+    return pd.DataFrame({
+        "factory": df["factory_name"], "ym": d.dt.strftime("%Y-%m").fillna(""),
+        "kind": df["trans_type"].eq("Supplier. Rec").map({True: "Purchase", False: "Issue"}),
+        "qty": qty, "item": df["item_name"], "officer": df["officer"], "supplier": df["supplier"],
+        "category": df["category"], "price": price, "amount": qty * price})[cols]
+
+
+@st.cache_data(ttl=180, show_spinner=False, max_entries=6)
+def _rp_inv(fac, ver):
+    fsql, fp = fw(fac)
+    df = qdf_c(f"""SELECT factory_name AS factory, COALESCE(item_name,'') AS item, COALESCE(size,'') AS size,
+                   COALESCE(NULLIF(category,''),'Uncategorized') AS category, COALESCE(current_stock,0) AS stock,
+                   COALESCE(unit_price,0) AS price, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit
+                   FROM inventory WHERE 1=1{fsql}""", fp)
+    if df.empty:
+        return pd.DataFrame(columns=["factory", "item", "size", "category", "stock", "price", "unit", "value"])
+    df["stock"] = pd.to_numeric(df["stock"], errors="coerce").fillna(0.0)
+    df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0.0)
+    df["value"] = df["stock"].clip(lower=0) * df["price"]
+    return df
+
+
+@st.cache_data(ttl=180, show_spinner=False, max_entries=6)
+def _rp_bud(fac, ver):
+    fsql, fp = fw(fac)
+    df = qdf_c(f"""SELECT factory_name AS factory, COALESCE(department_name,'') AS department,
+                   COALESCE(category_name,'') AS category, COALESCE(allocated_budget,0) AS allocated
+                   FROM category_budgets WHERE 1=1{fsql}""", fp)
+    if not df.empty:
+        df["allocated"] = pd.to_numeric(df["allocated"], errors="coerce").fillna(0.0)
+    return df
+
+
+def _rp_download(df, name, title):
+    if df is not None and not df.empty:
+        with st.expander("\u2B07 Download this report\u2019s data"):
+            export_buttons(df, name, title=title)
+
+
+def _rp_trend(tx, months):
+    g = tx[tx["ym"].isin(months)].groupby(["ym", "kind"])["amount"].sum().unstack(fill_value=0)
+    mx = max(float(g.max().max()) if not g.empty else 0.0, 1.0)
+    cols = []
+    for m in months:
+        p = float(g.loc[m, "Purchase"]) if (m in g.index and "Purchase" in g.columns) else 0.0
+        i = float(g.loc[m, "Issue"]) if (m in g.index and "Issue" in g.columns) else 0.0
+        cols.append(f'<div class="rp-tcol"><div class="rp-tbars">'
+                    f'<div class="rp-tb p" style="height:{p / mx * 100:.1f}%" title="Purchases {_rp_money(p)}"></div>'
+                    f'<div class="rp-tb i" style="height:{i / mx * 100:.1f}%" title="Issues {_rp_money(i)}"></div></div>'
+                    f'<div class="rp-tl">{_rp_e(_rp_ym_label(m))}</div>'
+                    f'<div class="rp-tv">{_rp_short(p)}<br>{_rp_short(i)}</div></div>')
+    leg = ('<div class="rp-leg"><i style="background:#2563EB"></i>Purchases (top number)'
+           '<i style="background:#0F766E"></i>Issues (bottom number)</div>')
+    return '<div class="rp-trend">' + "".join(cols) + "</div>" + leg
+
+
+def _rp_summary(tx, tp, prev, ym, plabel):
+    inv = _rp_inv(FAC, _data_version())
+    bud = _rp_bud(FAC, _data_version())
+    pur, iss = tp[tp["kind"] == "Purchase"], tp[tp["kind"] == "Issue"]
+    pv, iv = float(pur["amount"].sum()), float(iss["amount"].sum())
+    pp = float(prev[prev["kind"] == "Purchase"]["amount"].sum()) if prev is not None else None
+    pi = float(prev[prev["kind"] == "Issue"]["amount"].sum()) if prev is not None else None
+    allocated = float(bud["allocated"].sum()) if not bud.empty else 0.0
+    low = int((inv["stock"] <= 5).sum()) if not inv.empty else 0
+    in_stock = int((inv["stock"] > 0).sum()) if not inv.empty else 0
+    if allocated > 0:
+        pct = iv / allocated * 100.0
+        tone = "red" if pct > BUDGET_ALERT_PCT else ("amber" if pct >= 70 else "")
+        bk = _rp_kpi("Budget used", f"{pct:.1f}%", f"{_rp_money(allocated - iv)} left of {_rp_money(allocated)}", tone)
+    else:
+        bk = _rp_kpi("Budget used", "\u2014", "No budget configured", "slate")
+    _rp_show(_rp_kpis([
+        _rp_kpi("Inventory items", f"{len(inv):,}", f"{low:,} low / negative (\u2264 5)", "slate"),
+        _rp_kpi("Stock value", _rp_money(inv["value"].sum() if not inv.empty else 0), f"{in_stock:,} items in stock"),
+        _rp_kpi("Purchases", _rp_money(pv), f"{_rp_q(pur['qty'].sum())} qty \u00b7 {len(pur):,} receipts{_rp_delta(pv, pp)}", "blue"),
+        _rp_kpi("Issues", _rp_money(iv), f"{_rp_q(iss['qty'].sum())} qty \u00b7 {len(iss):,} entries{_rp_delta(iv, pi)}", "amber"),
+        bk]))
+    months = sorted([m for m in tx["ym"].unique() if m])[-6:]
+    a, b = st.columns([1.25, 1], gap="medium")
+    with a:
+        _rp_show(_rp_card("Purchases vs Issues \u2014 last 6 months", _rp_trend(tx, months) if months else
+                          _rp_empty("No dated transactions yet."), "Value in \u09f3 (L = lakh, Cr = crore)"))
+    with b:
+        cat = iss.groupby("category")["amount"].sum().sort_values(ascending=False).head(6)
+        _rp_show(_rp_card("Where issues went \u2014 by category", _rp_bars(cat.items(), "amber"), f"Period: {plabel}"))
+    top = iss.groupby("item").agg(qty=("qty", "sum"), value=("amount", "sum")).sort_values("value", ascending=False).head(8)
+    rows = [[_rp_e(i), _rp_q(r.qty), _rp_money(r.value)] for i, r in top.iterrows()]
+    _rp_show(_rp_card("Top issued items", _rp_tbl(["Item", "Qty", "Value"], rows, num=(1, 2)) if rows else
+                      _rp_empty("No issues in this period."), f"Period: {plabel}"))
+    _rp_download(top.reset_index().rename(columns={"item": "Item", "qty": "Qty", "value": "Value"}),
+                 "report_summary_top_items", "Top issued items")
+
+
+def _rp_stock():
+    inv = _rp_inv(FAC, _data_version())
+    if inv.empty:
+        _rp_show(_rp_card("Stock position", _rp_empty("No inventory items.")))
+        return
+    cons = "CONSOLIDATED" in str(FAC)
+    zero, neg = int((inv["stock"] == 0).sum()), int((inv["stock"] < 0).sum())
+    lowc = int(((inv["stock"] > 0) & (inv["stock"] <= 5)).sum())
+    noprice = int(((inv["stock"] > 0) & (inv["price"] <= 0)).sum())
+    _rp_show(_rp_kpis([
+        _rp_kpi("Total stock value", _rp_money(inv["value"].sum()), f"{int((inv['stock'] > 0).sum()):,} items in stock"),
+        _rp_kpi("Inventory items", f"{len(inv):,}", f"{inv['category'].nunique():,} categories", "slate"),
+        _rp_kpi("Low stock (1\u20135)", f"{lowc:,}", "Items to reorder soon", "amber"),
+        _rp_kpi("Zero / negative", f"{zero + neg:,}", f"{zero:,} zero \u00b7 {neg:,} negative", "red"),
+        _rp_kpi("Missing price", f"{noprice:,}", "In stock but price is 0", "slate")]))
+    inv = inv.assign(is_low=(inv["stock"] <= 5).astype(int))
+    g = inv.groupby("category").agg(items=("item", "size"), value=("value", "sum"), low=("is_low", "sum")).sort_values("value", ascending=False)
+    tot = float(g["value"].sum()) or 1.0
+    a, b = st.columns([1, 1.2], gap="medium")
+    with a:
+        _rp_show(_rp_card("Stock value by category", _rp_bars(g["value"].head(8).items()), "Top 8 categories"))
+    with b:
+        rows = [[_rp_e(c), f"{int(r['items']):,}", _rp_money(r["value"]), f"{r['value'] / tot * 100:.1f}%", f"{int(r['low']):,}"]
+                for c, r in g.head(12).iterrows()]
+        _rp_show(_rp_card("Category summary", _rp_tbl(["Category", "Items", "Value", "Share", "Low / zero"], rows, num=(1, 2, 3, 4))))
+    heads = ["Item", "Size", "Stock", "Unit", "Value"] + (["Factory"] if cons else [])
+    top = inv.sort_values("value", ascending=False).head(10)
+    rows = [[_rp_e(r["item"]), _rp_e(r["size"]), _rp_q(r["stock"]), _rp_e(r["unit"]), _rp_money(r["value"])]
+            + ([_rp_e(short_fac(r["factory"]))] if cons else []) for _, r in top.iterrows()]
+    _rp_show(_rp_card("Highest value stock", _rp_tbl(heads, rows, num=(2, 4)), "Top 10 items by stock value"))
+    lowdf = inv[inv["stock"] <= 5].sort_values("stock").head(12)
+    rows = [[_rp_e(r["item"]), _rp_e(r["size"]), f'<span class="rp-chip {"over" if r["stock"] <= 0 else "watch"}">{_rp_q(r["stock"])}</span>',
+             _rp_e(r["unit"])] + ([_rp_e(short_fac(r["factory"]))] if cons else []) for _, r in lowdf.iterrows()]
+    _rp_show(_rp_card("Low / negative stock", _rp_tbl(["Item", "Size", "Stock", "Unit"] + (["Factory"] if cons else []), rows, num=(2,))
+                      if rows else _rp_empty("No low-stock items."), "12 lowest items (stock \u2264 5)"))
+    _rp_download(inv[["factory", "item", "size", "category", "stock", "unit", "price", "value"]].rename(columns=str.title),
+                 "report_stock_position", "Stock position")
+
+
+def _rp_flow(tp, kind, plabel, prev):
+    d = tp[tp["kind"] == kind]
+    word = "Purchases" if kind == "Purchase" else "Issues"
+    if d.empty:
+        _rp_show(_rp_card(word, _rp_empty(f"No {word.lower()} in this period."), f"Period: {plabel}"))
+        return
+    val = float(d["amount"].sum())
+    pv = float(prev[prev["kind"] == kind]["amount"].sum()) if prev is not None else None
+    other = "supplier" if kind == "Purchase" else "officer"
+    olabel = "Suppliers" if kind == "Purchase" else "Officers"
+    d = d.assign(**{other: d[other].replace("", "\u2014")})
+    _rp_show(_rp_kpis([
+        _rp_kpi(f"{word} value", _rp_money(val), _rp_delta(val, pv).strip(), "blue" if kind == "Purchase" else "amber"),
+        _rp_kpi("Total quantity", _rp_q(d["qty"].sum()), f"{len(d):,} entries", "slate"),
+        _rp_kpi("Distinct items", f"{d['item'].nunique():,}", f"{d['category'].nunique():,} categories", "slate"),
+        _rp_kpi(olabel, f"{d[other].nunique():,}", "In this period", "slate"),
+        _rp_kpi("Average per entry", _rp_money(val / len(d)), "Value", "")]))
+    tone = "blue" if kind == "Purchase" else "amber"
+    a, b = st.columns(2, gap="medium")
+    with a:
+        _rp_show(_rp_card(f"{word} by category", _rp_bars(d.groupby("category")["amount"].sum().sort_values(ascending=False).head(8).items(), tone),
+                          f"Period: {plabel}"))
+    with b:
+        _rp_show(_rp_card(f"{word} by {other}", _rp_bars(d.groupby(other)["amount"].sum().sort_values(ascending=False).head(8).items(), tone),
+                          f"Period: {plabel}"))
+    top = d.groupby("item").agg(qty=("qty", "sum"), value=("amount", "sum"), n=("qty", "size")).sort_values("value", ascending=False)
+    rows = [[_rp_e(i), _rp_q(r.qty), f"{int(r.n):,}", _rp_money(r.value)] for i, r in top.head(10).iterrows()]
+    _rp_show(_rp_card(f"Top 10 items \u2014 {word.lower()}", _rp_tbl(["Item", "Qty", "Entries", "Value"], rows, num=(1, 2, 3)),
+                      f"Period: {plabel}"))
+    _rp_download(top.reset_index().rename(columns={"item": "Item", "qty": "Qty", "value": "Value", "n": "Entries"}),
+                 f"report_{word.lower()}", f"{word} report - {plabel}")
+
+
+def _rp_budget(tp, plabel):
+    bud = _rp_bud(FAC, _data_version())
+    if bud.empty:
+        _rp_show(_rp_card("Budget vs actual", _rp_empty("No budget lines are configured for this view.")))
+        return
+    cons = "CONSOLIDATED" in str(FAC)
+    iss = tp[tp["kind"] == "Issue"]
+    spend = iss.groupby(["factory", "category"], as_index=False)["amount"].sum().rename(columns={"amount": "used"})
+    v = bud.merge(spend, on=["factory", "category"], how="left")
+    v["used"] = v["used"].fillna(0.0)
+    v["left"] = v["allocated"] - v["used"]
+    v["pct"] = (v["used"] / v["allocated"].where(v["allocated"] > 0) * 100.0).fillna(0.0)
+    v = v.sort_values("pct", ascending=False)
+    alloc, used = float(v["allocated"].sum()), float(v["used"].sum())
+    n_over = int((v["pct"] > BUDGET_ALERT_PCT).sum())
+    _rp_show(_rp_kpis([
+        _rp_kpi("Allocated budget", _rp_money(alloc), f"{len(v):,} budget lines", "slate"),
+        _rp_kpi("Used (issues)", _rp_money(used), f"Period: {plabel}", "amber"),
+        _rp_kpi("Remaining", _rp_money(alloc - used), f"{(used / alloc * 100.0 if alloc > 0 else 0):.1f}% used", "red" if alloc - used < 0 else ""),
+        _rp_kpi("Lines over alert", f"{n_over:,}", f"Alert limit {BUDGET_ALERT_PCT:g}%", "red" if n_over else "")]))
+    rows = []
+    for _, r in v.iterrows():
+        p = float(r["pct"])
+        col = "#16A34A" if p < 70 else ("#F59E0B" if p <= BUDGET_ALERT_PCT else "#DC2626")
+        chip = ("ok", "On track") if p < 70 else (("watch", "Watch") if p <= BUDGET_ALERT_PCT else ("over", "Over limit"))
+        cell = (f'<div class="rp-pb"><div class="rp-pf" style="width:{min(p, 100):.1f}%;background:{col}"></div></div>')
+        rows.append([_rp_e(r["department"]) + (f' <span style="color:#94A3B8">\u00b7 {_rp_e(short_fac(r["factory"]))}</span>' if cons else ""),
+                     _rp_e(r["category"]), _rp_money(r["allocated"]), _rp_money(r["used"]), _rp_money(r["left"]),
+                     f'{p:.1f}%', cell, f'<span class="rp-chip {chip[0]}">{chip[1]}</span>'])
+    _rp_show(_rp_card("Budget vs actual \u2014 by category",
+                      _rp_tbl(["Department", "Category", "Allocated", "Used", "Remaining", "Used %", "Progress", "Status"], rows, num=(2, 3, 4, 5)),
+                      f"Used = issues in {plabel}, matched to the budget category (same basis as the Dashboard)."))
+    _rp_download(v[["factory", "department", "category", "allocated", "used", "left", "pct"]].rename(
+        columns={"factory": "Factory", "department": "Department", "category": "Category", "allocated": "Allocated",
+                 "used": "Used", "left": "Remaining", "pct": "Used %"}), "report_budget", f"Budget report - {plabel}")
+
+
+def tab_reports():
+    st.title("\U0001F4D1 Reports")
+    st.caption("Read-only, easy-to-read summaries of stock, issues, purchases and budget. Nothing on this page changes any data.")
+    ver = _data_version()
+    try:
+        tx = _rp_tx(FAC, ver)
+    except Exception as e:
+        st.error(f"Report data could not be loaded: {e}")
+        return
+    st.markdown(_RP_CSS, unsafe_allow_html=True)
+    cur = local_now().strftime("%Y-%m")
+    months = sorted([m for m in tx["ym"].unique() if m], reverse=True)
+    opts = [cur] + [m for m in months if m != cur]
+    labels = [_rp_ym_label(m) for m in opts] + ["All time"]
+    c1, c2 = st.columns([3, 1.2])
+    with c2:
+        choice = st.selectbox("Reporting period", labels, key="rp_period", label_visibility="collapsed")
+    idx = labels.index(choice) if choice in labels else 0
+    ym = opts[idx] if idx < len(opts) else None
+    plabel = labels[idx] if idx < len(labels) else "All time"
+    with c1:
+        _rp_show(f'<div class="rp-sub"><b>{_rp_e(FAC)}</b> \u00b7 Period: <b>{_rp_e(plabel)}</b> \u00b7 {len(tx):,} purchase / issue entries analysed</div>')
+    tp = tx[tx["ym"] == ym] if ym else tx
+    prev = None
+    if ym:
+        pm = tx[tx["ym"] == _rp_ym_prev(ym)]
+        prev = pm if not pm.empty else None
+    pick = lazy_tab_select(["\U0001F4CC Summary", "\U0001F4E6 Stock", "\U0001F4E4 Issues", "\U0001F4E5 Purchases", "\U0001F4B0 Budget"], "lz_rp")
+    try:
+        if pick == 0:
+            _rp_summary(tx, tp, prev, ym, plabel)
+        elif pick == 1:
+            _rp_stock()
+        elif pick == 2:
+            _rp_flow(tp, "Issue", plabel, prev)
+        elif pick == 3:
+            _rp_flow(tp, "Purchase", plabel, prev)
+        else:
+            _rp_budget(tp, plabel)
+    except Exception as e:
+        st.error(f"This report could not be built: {e}")
+
+
+
+
+# ============================================================
 #  MAIN
 # ============================================================
 st.session_state["_dbstat"] = {"n": 0, "t": 0.0, "slow": (0.0, "")}   # fresh counters for this page run
@@ -10583,7 +10990,7 @@ if unit_gate_required():   # signed-in officer who has not chosen a unit yet: no
 autoset_uom_once()
 
 # Render only the selected module; the sidebar buttons update NAV_KEY.
-RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, tab_global_inventory, tab_physical_count, tab_erp_audit, tab_issue_ledger,
+RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, tab_global_inventory, tab_physical_count, tab_reports, tab_erp_audit, tab_issue_ledger,
              tab_transfer_history, tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet,
              tab_stock_cover, tab_data_health, tab_log_sheet, tab_high_value]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
