@@ -9615,12 +9615,16 @@ _KC_LOGIN_CSS = """<style>
 [data-testid="stHeader"], [data-testid="stToolbar"], header { display:none !important; }
 .stApp { background: radial-gradient(1200px 600px at 10% 0%, #dbeafe 0%, transparent 60%),
                      radial-gradient(900px 500px at 100% 100%, #c7d2fe 0%, transparent 55%), #eef2ff !important; }
-.block-container { max-width: 1060px !important; padding-top: 3vh !important; padding-bottom: 2vh !important; }
+.block-container { max-width: 1060px !important; padding-top: clamp(12px, 2.5vh, 32px) !important; padding-bottom: 14px !important; }
+/* the app injects many <style>-only markdown blocks before this page; each one leaves an empty gap above the card. Collapse them here
+   (their CSS keeps working; this rule exists only while the login page is shown). */
+[data-testid="stElementContainer"]:has(style), .element-container:has(style),
+[data-testid="stElementContainer"]:has(iframe[height="0"]), .element-container:has(iframe[height="0"]) { display:none !important; }
 /* ---- main split card ---- */
 [data-testid="stHorizontalBlock"]:has(.kc-form-marker) {
     background:#ffffff; border-radius:28px; border:1px solid rgba(148,163,184,.28);
     box-shadow:0 24px 60px rgba(30,64,175,.14), 0 2px 8px rgba(15,23,42,.05);
-    gap:0 !important; overflow:hidden; min-height:540px; align-items:stretch !important; }
+    gap:0 !important; overflow:hidden; min-height:520px; align-items:stretch !important; }
 [data-testid="stHorizontalBlock"]:has(.kc-mode-register) { flex-direction: row-reverse !important; }
 [data-testid="stHorizontalBlock"]:has(.kc-mode-login)    { animation: kcSlideL .75s cubic-bezier(.22,1,.36,1); }
 [data-testid="stHorizontalBlock"]:has(.kc-mode-register) { animation: kcSlideR .75s cubic-bezier(.22,1,.36,1); }
@@ -9637,7 +9641,7 @@ _KC_LOGIN_CSS = """<style>
 [data-testid="stColumn"]:has(.kc-panel-marker)::after, [data-testid="column"]:has(.kc-panel-marker)::after {
     content:""; position:absolute; width:200px; height:200px; border-radius:50%; background:rgba(255,255,255,.07); bottom:-60px; right:40px; }
 [data-testid="stColumn"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"] {
-    min-height:540px; justify-content:center; align-items:center; text-align:center; padding:0 34px; position:relative; z-index:1; gap:.5rem; }
+    min-height:520px; justify-content:center; align-items:center; text-align:center; padding:0 34px; position:relative; z-index:1; gap:.5rem; }
 .kc-panel-inner h1 { color:#fff !important; font-size:2.2rem; font-weight:800; margin:.9rem 0 .35rem 0; letter-spacing:-.4px; line-height:1.15; }
 .kc-panel-inner p  { color:rgba(255,255,255,.92) !important; font-size:1rem; margin:0 0 .5rem 0; }
 .kc-panel-inner p.kc-sub { font-size:.86rem; color:rgba(255,255,255,.78) !important; max-width:250px; margin:0 auto 1.1rem auto; line-height:1.45; }
@@ -9649,7 +9653,7 @@ _KC_LOGIN_CSS = """<style>
     background:#fff !important; color:#1d4ed8 !important; transform:translateY(-2px); box-shadow:0 10px 24px rgba(0,0,0,.18); }
 /* ---- right form side (shared by Login / Register / Forgot password) ---- */
 [data-testid="stColumn"]:has(.kc-form-marker), [data-testid="column"]:has(.kc-form-marker) { flex:1 1 56% !important; padding:38px 52px !important; }
-[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stVerticalBlock"] { justify-content:center; min-height:460px; }
+[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stVerticalBlock"] { justify-content:center; min-height:440px; }
 .kc-form-title { font-size:1.4rem; font-weight:800; color:#0f172a; line-height:1.3; margin:0 0 .3rem 0; text-align:center; }
 .kc-form-sub { color:#64748b; text-align:center; margin:0 0 .6rem 0; font-size:.92rem; }
 [data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stForm"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stForm"] { border:none !important; padding:0 !important; }
@@ -9682,24 +9686,28 @@ _KC_LOGIN_CSS = """<style>
 [data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stButton"] button:hover, [data-testid="column"]:has(.kc-form-marker) [data-testid="stButton"] button:hover { text-decoration:underline; color:#1e40af !important; }
 .kc-secure { text-align:center; color:#64748b; font-size:.76rem; margin-top:.6rem; letter-spacing:.2px; }
 /* ---- information section under the card ---- */
-.kc-brand { max-width:1020px; margin:22px auto 0 auto; text-align:center; }
+.kc-top { text-align:center; margin:0 auto; line-height:1.4; }
+.kc-top .t1 { font-size:.74rem; letter-spacing:2.6px; font-weight:700; color:#475569; }
+.kc-top .t2 { font-size:.78rem; color:#94a3b8; font-style:italic; margin-top:1px; }
+.kc-brand { max-width:1020px; margin:0 auto; text-align:center; }
 .kc-brand .eyebrow { font-size:.72rem; letter-spacing:2.6px; font-weight:700; color:#64748b; }
-.kc-brand .b2 { font-size:1.3rem; font-weight:800; color:#0f172a; margin-top:.2rem; letter-spacing:-.2px; }
+.kc-brand .b2 { font-size:1.2rem; font-weight:800; color:#0f172a; margin-top:.1rem; letter-spacing:-.2px; }
 .kc-brand .b3 { font-size:.95rem; font-weight:600; color:#1d4ed8; margin-top:.1rem; }
-.kc-brand .b4 { font-size:.76rem; color:#64748b; letter-spacing:2px; margin-top:.4rem; font-weight:600; }
-.kc-feats { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:18px; text-align:left; }
-.kc-feat { background:rgba(255,255,255,.8); border:1px solid #dbe3f0; border-radius:14px; padding:13px 16px; display:flex; gap:12px; align-items:flex-start; }
-.kc-feat .ic { font-size:1.25rem; line-height:1.2; }
-.kc-feat .t { font-weight:700; color:#0f172a; font-size:.9rem; }
-.kc-feat .d { color:#64748b; font-size:.79rem; margin-top:2px; line-height:1.4; }
-.kc-foot { text-align:center; color:#94a3b8; font-size:.74rem; margin-top:18px; line-height:1.65; }
+.kc-brand .b4 { font-size:.74rem; color:#64748b; letter-spacing:2px; margin-top:.25rem; font-weight:600; }
+.kc-feats { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:12px; text-align:left; }
+.kc-feat { background:rgba(255,255,255,.7); border:1px solid #dbe3f0; border-radius:12px; padding:9px 14px; display:flex; gap:10px; align-items:flex-start; }
+.kc-feat .ic { font-size:1.1rem; line-height:1.25; }
+.kc-feat .t { font-weight:700; color:#0f172a; font-size:.86rem; }
+.kc-feat .d { color:#64748b; font-size:.76rem; margin-top:1px; line-height:1.35; }
+.kc-foot { text-align:center; color:#94a3b8; font-size:.72rem; margin-top:12px; line-height:1.6; }
 /* ---- tablet / mobile ---- */
 @media (max-width: 900px) {
   .kc-panel-inner h1 { font-size:1.9rem; }
   [data-testid="stColumn"]:has(.kc-form-marker), [data-testid="column"]:has(.kc-form-marker) { padding:32px 30px !important; }
 }
 @media (max-width: 760px) {
-  .block-container { padding-top:2vh !important; }
+  .block-container { padding-top:10px !important; }
+  .kc-top .t2 { display:none; }
   [data-testid="stHorizontalBlock"]:has(.kc-form-marker) { min-height:0; }
   [data-testid="stHorizontalBlock"]:has(.kc-mode-register) { flex-direction: column-reverse !important; }
   [data-testid="stColumn"]:has(.kc-panel-marker), [data-testid="column"]:has(.kc-panel-marker),
@@ -9753,6 +9761,8 @@ def _kc_sign_in(username, password):
 def render_login_page():
     """First screen of the website: blue curved panel + form, sliding between Sign in and Register."""
     st.markdown(_KC_LOGIN_CSS, unsafe_allow_html=True)
+    st.markdown('<div class="kc-top"><div class="t1">WINDY GROUP • DIGITAL INVENTORY SYSTEM</div>'
+                '<div class="t2">Smarter Stock Management • Better Control • Efficient Operations</div></div>', unsafe_allow_html=True)
     mode = st.session_state.get("auth_mode", "login")
     if mode not in ("login", "register", "forgot"):
         mode = "login"
