@@ -2607,14 +2607,6 @@ def load_budget_data():
 
 def tab_dashboard():
     """Management dashboard: purchase, issue, inventory and budget using live database records."""
-    # Layout only: the app injects many <style>-only markdown blocks above the top bar; each leaves an empty element with a row gap,
-    # which pushed the Dashboard ~100px down. Collapse just those empty blocks (their CSS still applies). Active on the Dashboard only.
-    st.markdown("""<style>
-.block-container:has(.kc-dash-marker) [data-testid="stElementContainer"]:has(style):has(~ :has(.topbar-meta)),
-.block-container:has(.kc-dash-marker) .element-container:has(style):has(~ :has(.topbar-meta)),
-.block-container:has(.kc-dash-marker) [data-testid="stElementContainer"]:has(.kc-dash-marker),
-.block-container:has(.kc-dash-marker) .element-container:has(.kc-dash-marker) { display:none !important; }
-</style><span class="kc-dash-marker"></span>""", unsafe_allow_html=True)
     st.title("Management Dashboard")
     st.caption("Purchases, stock issues and budget performance for the selected factory.")
     viewer_name = html_lib.escape(str(st.session_state.get("user") or "Store team"))
