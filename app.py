@@ -9694,14 +9694,17 @@ _KC_LOGIN_CSS = """<style>
 .kc-brand .b2 { font-size:1.2rem; font-weight:800; color:#0f172a; margin-top:.1rem; letter-spacing:-.2px; }
 .kc-brand .b3 { font-size:.95rem; font-weight:600; color:#1d4ed8; margin-top:.1rem; }
 .kc-brand .b4 { font-size:.74rem; color:#64748b; letter-spacing:2px; margin-top:.25rem; font-weight:600; }
-.kc-feats { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:12px; text-align:left; }
-.kc-feat { background:rgba(255,255,255,.7); border:1px solid #dbe3f0; border-radius:12px; padding:9px 14px; display:flex; gap:10px; align-items:flex-start; }
-.kc-feat .ic { font-size:1.1rem; line-height:1.25; }
-.kc-feat .t { font-weight:700; color:#0f172a; font-size:.86rem; }
-.kc-feat .d { color:#64748b; font-size:.76rem; margin-top:1px; line-height:1.35; }
+.kc-sect { font-size:.72rem; letter-spacing:2.4px; font-weight:700; color:#475569; margin-top:14px; }
+.kc-sectsub { font-size:.8rem; color:#64748b; margin-top:2px; }
+.kc-groups { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-top:10px; text-align:left; }
+.kc-group { background:rgba(255,255,255,.75); border:1px solid #dbe3f0; border-radius:12px; padding:10px 14px 8px 14px; }
+.kc-group .gh { font-size:.66rem; letter-spacing:1.6px; font-weight:700; color:#1d4ed8; margin-bottom:5px; }
+.kc-group .gi { font-size:.82rem; color:#334155; line-height:1.85; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.kc-group .gi span { display:inline-block; width:1.5em; }
 .kc-foot { text-align:center; color:#94a3b8; font-size:.72rem; margin-top:12px; line-height:1.6; }
 /* ---- tablet / mobile ---- */
 @media (max-width: 900px) {
+  .kc-groups { grid-template-columns:1fr 1fr; }
   .kc-panel-inner h1 { font-size:1.9rem; }
   [data-testid="stColumn"]:has(.kc-form-marker), [data-testid="column"]:has(.kc-form-marker) { padding:32px 30px !important; }
 }
@@ -9718,7 +9721,7 @@ _KC_LOGIN_CSS = """<style>
   [data-testid="stColumn"]:has(.kc-form-marker), [data-testid="column"]:has(.kc-form-marker) { padding:26px 20px !important; }
   .kc-panel-inner h1 { font-size:1.6rem; margin-top:.6rem; }
   .kc-form-title { font-size:1.2rem; }
-  .kc-feats { grid-template-columns:1fr; gap:10px; }
+  .kc-groups { grid-template-columns:1fr; gap:10px; }
 }
 </style>"""
 
@@ -9836,16 +9839,36 @@ def render_login_page():
                     done("Registration request sent. The Store Manager must approve it before you can sign in.")
     with right:
         st.markdown('<div class="kc-secure">🔒 Authorized Personnel Only · Secure Inventory Management Portal</div>', unsafe_allow_html=True)
+    _groups = [
+        ("STORE OPERATIONS", [("📦", "Inventory", "Stock, item, quantity and product records"),
+                              ("🔄", "Transactions", "Issue, Receive and Stock Movement"),
+                              ("📥", "Receiving", "Supplier, challan and received product records"),
+                              ("📝", "Issue Ledger", "Item-wise issue history and tracking")]),
+        ("ERP &amp; CONTROL", [("⚖️", "ERP Audit", "ERP matching, variance and pending control"),
+                              ("🔍", "Physical Count", "Physical Count and stock verification"),
+                              ("📊", "Stock Report", "Stock Report, Global Inventory and analysis"),
+                              ("🛡️", "Data Health", "Data Health, Log Sheet and controlled access")]),
+        ("PLANNING &amp; MANAGEMENT", [("💰", "Budget", "Budget planning"),
+                                      ("📈", "Forecast", "Inventory forecasting"),
+                                      ("⏳", "Stock Cover", "How long current stock will last"),
+                                      ("📋", "Requisition", "Store requisition")]),
+        ("MOVEMENT &amp; SERVICE", [("🔁", "Transfer History", "Stock transfer records"),
+                                   ("🛠️", "Repair &amp; Returns", "Repair and return management"),
+                                   ("📅", "Daily Worksheet", "Daily Worksheet and operational records"),
+                                   ("🧾", "Log Sheet", "Activity and operational log")]),
+    ]
+    _group_html = "".join(
+        '<div class="kc-group"><div class="gh">' + g + '</div>' +
+        "".join(f'<div class="gi" title="{d}"><span>{ic}</span>{nm}</div>' for ic, nm, d in items) + '</div>'
+        for g, items in _groups)
     st.markdown('<div class="kc-brand">'
                 '<div class="eyebrow">WELCOME TO WINDY GROUP</div>'
                 '<div class="b2">KC Washing &amp; Windy Washing Plant</div>'
                 '<div class="b3">Smart Inventory Management System</div>'
                 '<div class="b4">Secure • Efficient • Organized</div>'
-                '<div class="kc-feats">'
-                '<div class="kc-feat"><div class="ic">📦</div><div><div class="t">Inventory Control</div><div class="d">Manage stock and product records efficiently</div></div></div>'
-                '<div class="kc-feat"><div class="ic">📊</div><div><div class="t">Smart Tracking</div><div class="d">Monitor transactions and inventory activity</div></div></div>'
-                '<div class="kc-feat"><div class="ic">🔐</div><div><div class="t">Secure Access</div><div class="d">Authorized access for approved users</div></div></div>'
-                '</div>'
+                '<div class="kc-sect">WHAT CAN YOU MANAGE?</div>'
+                '<div class="kc-sectsub">Stock, transactions, ERP control, receiving, verification, transfers, repairs and planning, all in one secure system.</div>'
+                f'<div class="kc-groups">{_group_html}</div>'
                 '<div class="kc-foot">© 2026 Windy Group • Smart Inventory Management System<br>Created &amp; Developed by MD Sagor Ali</div>'
                 '</div>', unsafe_allow_html=True)
 
