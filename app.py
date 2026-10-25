@@ -6721,8 +6721,10 @@ def tab_daily_sheet():
     st.dataframe(view, hide_index=True, use_container_width=True, height=420)
     exp = view.copy()
     if not exp.empty:
-        exp.insert(0, "Date", d.strftime(DATE_FMT))
-        exp.insert(0, "Unit", fac)
+        if "Date" not in exp.columns:
+            exp.insert(0, "Date", d.strftime(DATE_FMT))
+        if "Factory" not in exp.columns:
+            exp.insert(0, "Factory", fac)   # "Unit" is already the UOM column, so the factory goes in as "Factory"
     export_buttons(exp, f"daily_work_sheet_{short_fac(fac)}_{d:%Y%m%d}",
                    title=f"Daily Work Sheet - {fac} - Date: {d.strftime(DATE_FMT)}")
     st.download_button("🖨️ Download print sheet (HTML → open & Print)", sheet_html(d, fac, df, auto),
