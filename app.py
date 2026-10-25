@@ -1142,6 +1142,8 @@ def init_db():
         "ALTER TABLE repair_returns ADD COLUMN IF NOT EXISTS gate_pass_no TEXT",
         "ALTER TABLE repair_returns ADD COLUMN IF NOT EXISTS return_type TEXT",
         "ALTER TABLE repair_returns ADD COLUMN IF NOT EXISTS officer_name TEXT",
+        "ALTER TABLE repair_returns ADD COLUMN IF NOT EXISTS approved_by TEXT",
+        "ALTER TABLE repair_returns ADD COLUMN IF NOT EXISTS gatepass_carrier TEXT",
         "ALTER TABLE import_queue ADD COLUMN IF NOT EXISTS size TEXT DEFAULT ''",
         "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS serial_no TEXT DEFAULT ''",
         "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS min_stock REAL DEFAULT 0",
@@ -2863,14 +2865,21 @@ def delete_transaction(tid):
     elif t["trans_type"] in ISSUE_TYPES + (ADJ_OUT,):
         run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (t["qty"], t["sl_no"], t["factory_name"]))
     run("DELETE FROM transactions WHERE id=%s", (tid,))
-    audit("DELETE_TRANS", f"Deleted transaction ID {tid}, stock reverted")
+    audit("DELETE_TRANS", f"Deleted transaction ID {tid}: {t['factory_name']} {t['trans_type']} {float(t['qty'] or 0):g} of "
+                          f"{t['prod_id']} ({t['item_name']}) SL {t['sl_no']} by {t['officer_name']} on {t['date']} {t['time']}, stock reverted")
     return True
 
 
 @tx
 def update_tx_meta(tid, date_s, notes):
+    old = q("SELECT factory_name, trans_type, qty, prod_id, item_name, sl_no, date, notes FROM transactions WHERE id=%s", (tid,))
     run("UPDATE transactions SET date=%s, notes=%s WHERE id=%s", (date_s, notes, tid))
-    audit("EDIT_TRANS", f"Transaction {tid}: date/notes edited")
+    if old:
+        o = old[0]
+        audit("EDIT_TRANS", f"Transaction {tid}: {o['factory_name']} {o['trans_type']} {float(o['qty'] or 0):g} of {o['prod_id']} "
+                            f"({o['item_name']}) SL {o['sl_no']}: date '{o['date']}' -> '{date_s}', notes '{o['notes'] or ''}' -> '{notes or ''}'")
+    else:
+        audit("EDIT_TRANS", f"Transaction {tid}: date/notes edited")
     return True
 
 
@@ -5148,6 +5157,22 @@ def restore_validated_backup(archive_bytes):
     return {name: len(data["frame"]) for name,data in manifest.items()}
 
 
+@st.cache_data(ttl=180, show_spinner=False, max_entries=4)
+def _global_usage_90(ver, today_s):
+    """Issued quantity per (factory, item) over the last 90 days. Looping over every issue row used to run on every click."""
+    today = datetime.strptime(today_s, "%Y-%m-%d").date()
+    usage_start = today - timedelta(days=90)
+    rows = q_c("""SELECT factory_name, sl_no, date, qty FROM transactions
+                  WHERE trans_type IN ('Issued','Internal Issue') AND factory_name = ANY(%s)""", (FACTORIES,))
+    out = {}
+    for row in rows:
+        parsed = parse_date(row.get("date"))
+        if parsed and usage_start <= parsed.date() <= today:
+            k = (row["factory_name"], row["sl_no"])
+            out[k] = out.get(k, 0.0) + float(row["qty"] or 0)
+    return out
+
+
 def tab_global_inventory():
     """Consolidated, read-only inventory overview for both factories."""
     st.title("Global Inventory")
@@ -5166,16 +5191,8 @@ def tab_global_inventory():
         st.info("No inventory records are available for these factories yet.")
         return
 
-    recent_usage = q_c("""SELECT factory_name, sl_no, date, qty FROM transactions
-                       WHERE trans_type IN ('Issued','Internal Issue') AND factory_name = ANY(%s)""", (FACTORIES,))
     today = local_now().date()
-    usage_start = today - timedelta(days=90)
-    usage_90 = {}
-    for row in recent_usage:
-        parsed = parse_date(row.get("date"))
-        if parsed and usage_start <= parsed.date() <= today:
-            k = (row["factory_name"], row["sl_no"])
-            usage_90[k] = usage_90.get(k, 0.0) + float(row["qty"] or 0)
+    usage_90 = _global_usage_90(_data_version(), today.strftime("%Y-%m-%d"))   # worked out once, then reused until data changes
 
     code_counts, groups = {}, {}
     for row in inv.to_dict("records"):
@@ -6191,23 +6208,26 @@ def tab_requisition():
 @tx
 def add_repair(fac, d):
     run("""INSERT INTO repair_returns (factory_name, tracking_code, gate_pass_no, item_name, qty, source_type, return_type,
-           supplier_name, sent_date, return_date, status, remarks, officer_name)
-           VALUES (%s,'TMP',%s,%s,%s,%s,%s,%s,%s,%s,%s,'',%s)""",
+           supplier_name, sent_date, return_date, status, remarks, officer_name, approved_by, gatepass_carrier)
+           VALUES (%s,'TMP',%s,%s,%s,%s,%s,%s,%s,%s,%s,'',%s,%s,%s)""",
         (fac, d["gate"], d["item"], d["qty"], d["stype"], d["rtype"], d["supplier"], d["sent"], d["ret"], d["status"],
-         st.session_state.get("user", "")))
+         st.session_state.get("user", ""), d.get("approved", ""), d.get("carrier", "")))
     new_id = run("SELECT MAX(id) FROM repair_returns WHERE factory_name=%s AND tracking_code='TMP'", (fac,))[0][0]
     tracking = d["track"] or f"REP-{new_id:04d}"
     run("UPDATE repair_returns SET tracking_code=%s WHERE id=%s", (tracking, new_id))
-    audit("ADD_REPAIR", f"{tracking} ({d['item']}, qty {d['qty']:g}) for {fac}")
+    audit("ADD_REPAIR", f"{tracking} ({d['item']}, qty {d['qty']:g}) for {fac}; permission by {d.get('approved') or '-'}, "
+                        f"gate pass brought to store by {d.get('carrier') or '-'}")
     return tracking
 
 
 @tx
 def update_repair(rid, d):
     run("""UPDATE repair_returns SET gate_pass_no=%s, item_name=%s, qty=%s, source_type=%s, return_type=%s,
-           supplier_name=%s, sent_date=%s, return_date=%s, status=%s WHERE id=%s""",
-        (d["gate"], d["item"], d["qty"], d["stype"], d["rtype"], d["supplier"], d["sent"], d["ret"], d["status"], rid))
-    audit("EDIT_REPAIR", f"Edited repair record {rid}")
+           supplier_name=%s, sent_date=%s, return_date=%s, status=%s, approved_by=%s, gatepass_carrier=%s WHERE id=%s""",
+        (d["gate"], d["item"], d["qty"], d["stype"], d["rtype"], d["supplier"], d["sent"], d["ret"], d["status"],
+         d.get("approved", ""), d.get("carrier", ""), rid))
+    audit("EDIT_REPAIR", f"Edited repair record {rid}: {d['item']}; permission by {d.get('approved') or '-'}, "
+                         f"gate pass brought by {d.get('carrier') or '-'}")
     return True
 
 
@@ -6226,11 +6246,12 @@ def tab_repair():
             st.error(f"Return to Store load kora jayni: {e}")
         return
     rp = qdf_c(f"""SELECT id, tracking_code, factory_name, gate_pass_no, item_name, COALESCE(qty,0) AS qty, source_type,
-                 return_type, supplier_name, sent_date, return_date, status, officer_name
+                 return_type, supplier_name, COALESCE(approved_by,'') AS approved_by,
+                 COALESCE(gatepass_carrier,'') AS gatepass_carrier, sent_date, return_date, status, officer_name
                  FROM repair_returns WHERE 1=1{FSQL} ORDER BY id DESC""", FP)
-    term = st.text_input("🔍 Search (Item / Gate Pass / Supplier / Tracking)", key="rp_search")
+    term = st.text_input("🔍 Search (Item / Gate Pass / Supplier / Tracking / অনুমতিদাতা / Gate Pass-এনেছে)", key="rp_search")
     if term and not rp.empty:
-        m = rp[["item_name", "gate_pass_no", "supplier_name", "tracking_code"]].astype(str).apply(
+        m = rp[["item_name", "gate_pass_no", "supplier_name", "tracking_code", "approved_by", "gatepass_carrier"]].astype(str).apply(
             lambda c: c.str.contains(term, case=False, regex=False)).any(axis=1)
         rp = rp[m]
     if not rp.empty:
@@ -6253,13 +6274,18 @@ def tab_repair():
             sent = c2.date_input("Sent Date", value=date.today())
             status = c3.selectbox("Status", ["Pending Return", "Returned", "Closed"])
             ret = c2.date_input("Return Date (if returned)", value=date.today())
+            approved = c3.text_input("কার অনুমতিতে বাইরে যাচ্ছে* (নাম)")
+            carrier = c1.text_input("কে Gate Pass স্টোরে এনেছে* (নাম)")
             if st.form_submit_button("Add"):
                 if not gate or not item or not supplier or qty <= 0:
                     st.error("Gate Pass, Item, Supplier ar Qty (>0) lagbe.")
+                elif not approved.strip() or not carrier.strip():
+                    st.error("কার অনুমতিতে যাচ্ছে এবং কে Gate Pass স্টোরে এনেছে — দুটো নামই লিখুন।")
                 else:
                     d = dict(gate=gate.strip(), track=track.strip(), item=item.strip(), qty=qty, stype=stype, rtype=rtype,
                              supplier=supplier.strip(), sent=sent.strftime(DATE_FMT),
-                             ret=ret.strftime(DATE_FMT) if status != "Pending Return" else None, status=status)
+                             ret=ret.strftime(DATE_FMT) if status != "Pending Return" else None, status=status,
+                             approved=approved.strip(), carrier=carrier.strip())
                     tr = add_repair(FAC, d)
                     if tr:
                         done(f"Item added. Tracking Code: {tr}")
@@ -6280,12 +6306,15 @@ def tab_repair():
                 sent = c1.text_input("Sent Date (DD-Mon-YYYY)", r["sent_date"] or "", key=f"rse_{k}")
                 status = c2.selectbox("Status", ["Pending Return", "Returned", "Closed"], key=f"rst_{k}")
                 ret = c3.text_input("Return Date (blank = not returned)", r["return_date"] or "", key=f"rre_{k}")
+                approved = c1.text_input("কার অনুমতিতে বাইরে যাচ্ছে", r.get("approved_by") or "", key=f"rap_{k}")
+                carrier = c2.text_input("কে Gate Pass স্টোরে এনেছে", r.get("gatepass_carrier") or "", key=f"rca_{k}")
                 upd = st.form_submit_button("✏️ Update")
             if upd:
                 if not parse_date(sent):
                     st.error("Sent date DD-Mon-YYYY format-e hote hobe.")
                 elif update_repair(r["id"], dict(gate=gate, item=item, qty=qty, stype=stype, rtype=rtype, supplier=supplier,
-                                                 sent=sent, ret=ret or None, status=status)):
+                                                 sent=sent, ret=ret or None, status=status,
+                                                 approved=approved.strip(), carrier=carrier.strip())):
                     done("Record updated.")
             rpw = mgr_check(f"rpw_{k}")
             rconf = confirm_box(f"rconf_{k}")
@@ -10022,6 +10051,355 @@ def tab_data_health():
 
 
 # ============================================================
+#  LOG SHEET (new page, ADDITIVE ONLY): who did what to an item - transactions, edits, deletes, price / category changes.
+# ============================================================
+NAV_LOG_SHEET = "📒 Log Sheet"
+if NAV_LOG_SHEET not in TAB_NAMES:
+    TAB_NAMES.append(NAV_LOG_SHEET)
+
+LS_ACTIONS = {
+    "TRANSACTION": "🧾 Transaction এন্ট্রি", "DELETE_TRANS": "🗑 Transaction মুছেছে", "EDIT_TRANS": "✏️ Transaction এডিট",
+    "EDIT_RECEIVED": "✏️ Receipt এডিট", "ERP_GRN_DONE": "✅ ERP GRN Done", "RETURN_TO_STORE": "↩️ Store-এ ফেরত",
+    "ADD_ITEM": "➕ Item যোগ", "EDIT_INVENTORY": "✏️ Item এডিট", "DELETE_INVENTORY": "🗑 Item মুছেছে",
+    "ADD_STOCK_EXISTING": "➕ স্টক যোগ", "SET_PRICE": "💲 দাম বদল", "PURCHASE_RATE": "💰 Purchase Rate",
+    "SET_BUDGET_CAT": "🧩 Budget Category বদল", "SET_PRODUCT_CAT": "📂 Product Category বদল",
+    "OPENING_BALANCE": "📦 Opening Balance", "ADJUST_VARIANCE": "⚖️ ভ্যারিয়েন্স সমন্বয়", "BULK_STOCK_UPDATE": "📝 Bulk স্টক আপডেট",
+    "RESET_STOCK_ZERO": "⛔ সব স্টক শূন্য", "IMPORT_OPENING_STOCK": "📥 Opening Stock ইম্পোর্ট",
+    "MANUAL_TRANSFER": "🔁 Transfer", "AUTO_TRANSFER": "🔁 Auto Transfer", "DELETE_TRANSFER": "🗑 Transfer মুছেছে",
+    "EDIT_TRANSFER": "✏️ Transfer এডিট", "UPDATE_REPLENISHMENT_SETTINGS": "⚙️ Min/Lead/MOQ বদল",
+}
+LS_RISKY = {"DELETE_TRANS", "EDIT_TRANS", "EDIT_RECEIVED", "EDIT_INVENTORY", "DELETE_INVENTORY", "SET_PRICE", "SET_BUDGET_CAT",
+            "SET_PRODUCT_CAT", "OPENING_BALANCE", "ADJUST_VARIANCE", "BULK_STOCK_UPDATE", "RESET_STOCK_ZERO", "DELETE_TRANSFER",
+            "EDIT_TRANSFER", "RETURN_TO_STORE", "IMPORT_OPENING_STOCK"}
+_LS_TX_ACTIONS = ("EDIT_TRANS", "DELETE_TRANS", "EDIT_RECEIVED", "ERP_GRN_DONE", "RETURN_TO_STORE")
+
+
+def _ls_tz_offset():
+    """Audit rows were stamped with the server clock, the transactions with Dhaka time - bring both to Dhaka time."""
+    diff = local_now().replace(tzinfo=None) - datetime.now()
+    return pd.Timedelta(minutes=int(round(diff.total_seconds() / 1800.0)) * 30)
+
+
+def _ls_audit_frame(rows):
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame(columns=["id", "when", "username", "action_type", "details"])
+    df["when"] = pd.to_datetime(df["timestamp"], errors="coerce") + _ls_tz_offset()
+    return df
+
+
+def _ls_when_text(ts, fallback=""):
+    return [t.strftime("%d-%b-%Y %I:%M %p") if pd.notna(t) else f for t, f in zip(ts, fallback)]
+
+
+def _ls_item_log():
+    st.caption("একটা আইটেম বেছে নিন — তার সব Transaction আর কে কখন কী এডিট/মুছেছে/দাম বা Category বদলেছে, এক টাইমলাইনে।")
+    term = st.text_input("🔍 আইটেম খুঁজুন (নাম / ERP code / serial / size)", key="ls_search").strip()
+    if not term:
+        st.info("ওপরের বক্সে আইটেমের নাম বা ERP code লিখুন।")
+        return
+    fsql, fp = fw(FAC)
+    pat = f"%{term.lower()}%"
+    items = q_c(f"""SELECT factory_name, sl_no, COALESCE(prod_id,'') AS prod_id, COALESCE(item_name,'') AS item_name,
+                    COALESCE(size,'') AS size, COALESCE(serial_no,'') AS serial_no, COALESCE(current_stock,0) AS stock,
+                    COALESCE(unit_price,0) AS price, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit
+                    FROM inventory WHERE (LOWER(item_name) LIKE %s OR LOWER(COALESCE(prod_id,'')) LIKE %s
+                          OR LOWER(COALESCE(serial_no,'')) LIKE %s OR LOWER(COALESCE(size,'')) LIKE %s){fsql}
+                    ORDER BY item_name, size LIMIT 100""", [pat, pat, pat, pat] + fp)
+    if not items:
+        st.warning("Inventory-তে এই নামে আইটেম নেই (মুছে গিয়ে থাকতে পারে)। নিচে শুধু Audit log-এ খোঁজা হলো।")
+        arows = q_c("""SELECT id, timestamp, username, action_type, details FROM audit_logs
+                       WHERE details ILIKE %s ORDER BY id DESC LIMIT 500""", (f"%{term}%",))
+        adf = _ls_audit_frame(arows)
+        if adf.empty:
+            st.info("Audit log-এও কিছু পাওয়া যায়নি।")
+            return
+        out = pd.DataFrame({"When": _ls_when_text(adf["when"], adf["timestamp"]),
+                            "Action": adf["action_type"].map(lambda a: ("⚠️ " if a in LS_RISKY else "") + LS_ACTIONS.get(a, a)),
+                            "Who": adf["username"], "Details": adf["details"]})
+        st.dataframe(out, hide_index=True, use_container_width=True, height=420)
+        export_buttons(out, "log_sheet_audit_only")
+        return
+    labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id'] or '-'} · {short_fac(r['factory_name'])} · SL {r['sl_no']}": r for r in items}
+    row = labels[st.selectbox("আইটেম বেছে নিন", list(labels), key="ls_pick")]
+    fac, sl = row["factory_name"], int(row["sl_no"])
+    name, pid = str(row["item_name"]), str(row["prod_id"]).strip()
+    unit = row["unit"]
+
+    tx = qdf_c("""SELECT id, date, time, trans_type, qty, COALESCE(officer_name,'') AS officer, COALESCE(notes,'') AS notes,
+                  COALESCE(verification_status,'') AS verif, COALESCE(supplier_name,'') AS supplier,
+                  COALESCE(challan_no,'') AS challan, unit_price_at_tx AS rate
+                  FROM transactions WHERE factory_name=%s AND sl_no=%s ORDER BY id DESC""", (fac, sl))
+    tx_ids = set(int(i) for i in tx["id"]) if not tx.empty else set()
+    name_l, pid_l = name.lower(), pid.lower()
+    use_pid = bool(pid_l) and not is_blank_code(pid_l) and not pid_l.startswith("temp-")
+    params = [f"%{name}%", f"%SL {sl}%"] + ([f"%{pid}%"] if use_pid else [])
+    cond = "details ILIKE %s OR details ILIKE %s" + (" OR details ILIKE %s" if use_pid else "")
+    arows = q_c(f"""SELECT id, timestamp, username, action_type, details FROM audit_logs
+                    WHERE {cond} OR action_type IN %s ORDER BY id DESC LIMIT 4000""", params + [_LS_TX_ACTIONS])
+    adf = _ls_audit_frame(arows)
+    keep = []
+    sl_re = re.compile(rf"\bsl {sl}\b")
+    id_re = re.compile(r"(?:transaction(?: id)?|record|receipt|issue #)\s*(\d+)")
+    for d_ in adf["details"].astype(str) if not adf.empty else []:
+        t_ = d_.lower()
+        ok = name_l in t_ or (use_pid and pid_l in t_) or (bool(sl_re.search(t_)) and fac.lower() in t_)
+        if not ok:
+            ok = any(int(m) in tx_ids for m in id_re.findall(t_))
+        keep.append(ok)
+    if not adf.empty:
+        adf = adf[pd.Series(keep, index=adf.index)]
+
+    # ---- summary
+    tx_n = tx.copy()
+    if not tx_n.empty:
+        tx_n["qty"] = pd.to_numeric(tx_n["qty"], errors="coerce").fillna(0.0)
+    rec_q = float(tx_n[tx_n["trans_type"].isin(RECEIPT_TYPES)]["qty"].sum()) if not tx_n.empty else 0.0
+    iss_q = float(tx_n[tx_n["trans_type"].isin(ISSUE_TYPES + (ADJ_OUT,))]["qty"].sum()) if not tx_n.empty else 0.0
+    risky = adf[adf["action_type"].isin(LS_RISKY)] if not adf.empty else adf
+    st.markdown(f"### {html_lib.escape(name)} [{html_lib.escape(str(row['size'] or '-'))}]")
+    st.caption(f"{fac} · ERP code {pid or '-'} · SL {sl} · Serial {row['serial_no'] or '-'}")
+    m = st.columns(5)
+    m[0].metric("এখনকার স্টক", f"{float(row['stock']):g} {unit}")
+    m[1].metric("মোট Receipt", f"{rec_q:g}")
+    m[2].metric("মোট Issue/Out", f"{iss_q:g}")
+    m[3].metric("Transaction", f"{len(tx):,}")
+    m[4].metric("⚠️ এডিট/মুছা/বদল", f"{len(risky):,}")
+    if len(risky):
+        last = risky.sort_values("when", ascending=False).iloc[0]
+        st.warning(f"সর্বশেষ সংবেদনশীল পরিবর্তন: {LS_ACTIONS.get(last['action_type'], last['action_type'])} — {last['username']} — "
+                   f"{last['when'].strftime('%d-%b-%Y %I:%M %p') if pd.notna(last['when']) else last['timestamp']}")
+
+    # ---- one merged timeline
+    rows = []
+    if not tx_n.empty:
+        d = _parse_dates(tx_n["date"])
+        tm = pd.to_datetime(tx_n["time"].astype(str).str.strip(), format="%I:%M %p", errors="coerce")
+        miss = tm.isna()
+        if miss.any():
+            tm.loc[miss] = pd.to_datetime(tx_n["time"].astype(str).str.strip()[miss], format="%H:%M:%S", errors="coerce")
+        when = d + pd.to_timedelta(tm.dt.hour.fillna(0) * 3600 + tm.dt.minute.fillna(0) * 60, unit="s")
+        for i, r in enumerate(tx_n.to_dict("records")):
+            sign = -1.0 if r["trans_type"] in ISSUE_TYPES + (ADJ_OUT,) else (1.0 if r["trans_type"] in RECEIPT_TYPES else 0.0)
+            extra = []
+            if r["supplier"]:
+                extra.append(f"Supplier: {r['supplier']}")
+            if r["challan"]:
+                extra.append(f"Challan: {r['challan']}")
+            if r["rate"] is not None and pd.notna(r["rate"]):
+                extra.append(f"Rate: {float(r['rate']):g}")
+            if r["verif"]:
+                extra.append(f"Verification: {r['verif']}")
+            rows.append({"_k": when.iloc[i], "When": f"{r['date']} {r['time']}".strip(), "Source": "Transaction",
+                         "Action": TRANS_LABELS.get(r["trans_type"], r["trans_type"]),
+                         "Qty": (r["qty"] * sign if sign else r["qty"]), "Who": r["officer"],
+                         "Details": " · ".join([f"#{r['id']}"] + ([r["notes"]] if r["notes"] else []) + extra)})
+    if not adf.empty:
+        for r in adf.to_dict("records"):
+            a = r["action_type"]
+            rows.append({"_k": r["when"], "When": r["when"].strftime("%d-%b-%Y %I:%M %p") if pd.notna(r["when"]) else r["timestamp"],
+                         "Source": "Audit", "Action": ("⚠️ " if a in LS_RISKY else "") + LS_ACTIONS.get(a, a),
+                         "Qty": None, "Who": r["username"], "Details": r["details"]})
+    if not rows:
+        st.info("এই আইটেমের কোনো Transaction বা লগ নেই।")
+        return
+    flt = st.radio("দেখান", ["সব", "শুধু Transaction", "শুধু পরিবর্তন (এডিট/মুছা/দাম/Category)"], horizontal=True, key="ls_flt")
+    tl = pd.DataFrame(rows).sort_values("_k", ascending=False, na_position="last")
+    if flt == "শুধু Transaction":
+        tl = tl[tl["Source"] == "Transaction"]
+    elif flt.startswith("শুধু পরিবর্তন"):
+        tl = tl[tl["Action"].str.startswith("⚠️")]
+    tl = tl.drop(columns=["_k"])
+    st.dataframe(tl, hide_index=True, use_container_width=True, height=460,
+                 column_config={"Qty": st.column_config.NumberColumn(format="%+.2f")})
+    st.caption("Audit-এর সময় Dhaka সময়ে মেলানো। নামে মিলে গেলে একই নামের অন্য সাইজের আইটেমের লগও আসতে পারে; "
+               "আগে মুছে ফেলা Transaction-এর লগে আইটেমের নাম থাকত না — এখন থেকে থাকবে।")
+    export_buttons(tl, f"log_sheet_{sl}")
+
+
+def _ls_all_log():
+    st.caption("সব আইটেমের সব পরিবর্তনের লগ। কে কী মুছেছে বা এডিট করেছে খুঁজতে এটা ব্যবহার করুন।")
+    today = local_now().date()
+    c1, c2, c3 = st.columns([1.2, 1, 1])
+    rng = c1.date_input("তারিখ (থেকে – পর্যন্ত)", value=(today - timedelta(days=7), today), key="ls_rng")
+    rows = q_c("""SELECT id, timestamp, username, action_type, details FROM audit_logs ORDER BY id DESC LIMIT 8000""")
+    adf = _ls_audit_frame(rows)
+    if adf.empty:
+        st.info("কোনো লগ নেই।")
+        return
+    users = ["সব"] + sorted(set(adf["username"].astype(str)))
+    who = c2.selectbox("কে", users, key="ls_user")
+    only_risky = c3.checkbox("শুধু সংবেদনশীল (এডিট/মুছা/বদল)", value=True, key="ls_risky")
+    acts = sorted(set(adf["action_type"].astype(str)))
+    default = [a for a in acts if a in LS_RISKY] if only_risky else acts
+    pick = st.multiselect("কাজের ধরন", acts, default=default, format_func=lambda a: LS_ACTIONS.get(a, a), key=f"ls_acts_{int(only_risky)}")
+    txt_f = st.text_input("লেখা খুঁজুন (আইটেমের নাম, code, ইত্যাদি)", key="ls_txt").strip().lower()
+    v = adf
+    if isinstance(rng, (tuple, list)) and len(rng) == 2:
+        d0, d1 = pd.Timestamp(rng[0]), pd.Timestamp(rng[1]) + pd.Timedelta(days=1)
+        v = v[(v["when"] >= d0) & (v["when"] < d1)]
+    if who != "সব":
+        v = v[v["username"].astype(str) == who]
+    if pick:
+        v = v[v["action_type"].isin(pick)]
+    if txt_f:
+        v = v[v["details"].astype(str).str.lower().str.contains(txt_f, regex=False)]
+    st.caption(f"{len(v):,}টি এন্ট্রি" + (" (সর্বশেষ ৮,০০০টির মধ্যে)" if len(adf) >= 8000 else ""))
+    out = pd.DataFrame({"When": _ls_when_text(v["when"], v["timestamp"]),
+                        "Action": v["action_type"].map(lambda a: ("⚠️ " if a in LS_RISKY else "") + LS_ACTIONS.get(a, a)),
+                        "Who": v["username"], "Details": v["details"]})
+    st.dataframe(out, hide_index=True, use_container_width=True, height=460)
+    export_buttons(out, "log_sheet_all")
+
+
+def tab_log_sheet():
+    st.title("📒 Log Sheet")
+    st.caption("কে কখন কোন আইটেমে কী করেছে — Transaction, এডিট, মুছে ফেলা, দাম ও Category বদল — সব এক জায়গায়।")
+    pick = lazy_tab_select(["🔎 একটি আইটেমের পুরো লগ", "🗂 সব পরিবর্তনের লগ"], "lz_ls")
+    if pick == 0:
+        _ls_item_log()
+    else:
+        _ls_all_log()
+
+
+# ============================================================
+#  HIGH VALUE STOCK (new page, ADDITIVE ONLY): the expensive items that are still on the books, ranked by money,
+#  with how long ago they were last issued - so "used but never issued" stock is easy to spot and check physically.
+# ============================================================
+NAV_HIGH_VALUE = "💎 High Value Stock"
+if NAV_HIGH_VALUE not in TAB_NAMES:
+    TAB_NAMES.append(NAV_HIGH_VALUE)
+
+
+@st.cache_data(ttl=180, show_spinner=False, max_entries=8)
+def _hv_tx_stats(fac, ver):
+    """Per item: last Issue date, number of Issues, last Receipt date (worked out once, reused until data changes)."""
+    fsql, fp = fw(fac)
+    tx = qdf_c(f"""SELECT factory_name, sl_no, trans_type, date FROM transactions
+                   WHERE trans_type IN ('Issued','Internal Issue','Supplier. Rec','Internal Rec'){fsql}""", fp)
+    cols = ["factory_name", "sl_no", "last_issue", "issue_n", "last_receipt"]
+    if tx.empty:
+        return pd.DataFrame(columns=cols)
+    tx["d"] = _parse_dates(tx["date"])
+    iss = tx[tx["trans_type"].isin(ISSUE_TYPES)]
+    rec = tx[tx["trans_type"].isin(("Supplier. Rec", "Internal Rec"))]
+    a = iss.groupby(["factory_name", "sl_no"]).agg(last_issue=("d", "max"), issue_n=("d", "size")).reset_index()
+    b = rec.groupby(["factory_name", "sl_no"]).agg(last_receipt=("d", "max")).reset_index()
+    out = a.merge(b, on=["factory_name", "sl_no"], how="outer")
+    out["issue_n"] = out["issue_n"].fillna(0).astype(int)
+    return out[cols]
+
+
+@st.cache_data(ttl=180, show_spinner=False, max_entries=8)
+def _hv_frame(fac, ver, today_s):
+    fsql, fp = fw(fac)
+    inv = qdf_c(f"""SELECT factory_name, sl_no, COALESCE(prod_id,'') AS prod_id, COALESCE(item_name,'') AS item_name,
+                    COALESCE(size,'') AS size, COALESCE(current_stock,0) AS stock, COALESCE(unit_price,0) AS price,
+                    COALESCE(NULLIF(unit_name,''),'Pcs') AS unit FROM inventory WHERE 1=1{fsql}""", fp)
+    if inv.empty:
+        return inv
+    for c in ("stock", "price"):
+        inv[c] = pd.to_numeric(inv[c], errors="coerce").fillna(0.0)
+    inv["value"] = inv["stock"].clip(lower=0) * inv["price"]
+    st_ = _hv_tx_stats(fac, ver)
+    df = inv.merge(st_, on=["factory_name", "sl_no"], how="left")
+    df["issue_n"] = df["issue_n"].fillna(0).astype(int)
+    df["last_issue"] = pd.to_datetime(df["last_issue"], errors="coerce")
+    df["last_receipt"] = pd.to_datetime(df["last_receipt"], errors="coerce")
+    today = pd.Timestamp(today_s)
+    df["days_issue"] = (today - df["last_issue"]).dt.days
+    df["days_receipt"] = (today - df["last_receipt"]).dt.days
+    ranked = df[df["value"] > 0].sort_values("value", ascending=False)
+    tot = float(ranked["value"].sum()) or 1.0
+    cum = ranked["value"].cumsum() / tot
+    df["abc"] = ""
+    df.loc[ranked.index, "abc"] = ["A" if c_ - v_ / tot < 0.80 else ("B" if c_ - v_ / tot < 0.95 else "C")
+                                   for c_, v_ in zip(cum, ranked["value"])]
+    return df
+
+
+def _hv_flag(r):
+    if r["stock"] <= 0:
+        return ""
+    di, dr = r["days_issue"], r["days_receipt"]
+    if pd.isna(di):
+        if pd.notna(dr) and dr < 30:
+            return "🆕 নতুন এসেছে, এখনো Issue হয়নি"
+        return "⛔ কখনো Issue হয়নি — ফিজিক্যালি দেখুন"
+    if di >= 90:
+        return f"⚠️ {int(di)} দিন Issue নেই — ফিজিক্যালি দেখুন"
+    if di >= 30:
+        return f"👀 {int(di)} দিন Issue নেই"
+    return "✅ সম্প্রতি Issue হয়েছে"
+
+
+def tab_high_value():
+    st.title("💎 High Value Stock")
+    st.caption("সফটওয়্যারে যেসব দামি মাল স্টকে দেখানো আছে — টাকার অঙ্কে বড় থেকে ছোট। কত দিন ধরে Issue হয়নি সেটাও দেখাবে, "
+               "যাতে যেগুলো আসলে ব্যবহার হয়ে গেছে কিন্তু Issue হয়নি সেগুলো ধরা যায়।")
+    today_s = local_now().strftime("%Y-%m-%d")
+    try:
+        df = _hv_frame(FAC, _data_version(), today_s)
+    except Exception as e:
+        st.error(f"লোড করা যায়নি: {e}")
+        return
+    if df is None or df.empty:
+        st.info("Inventory খালি।")
+        return
+    c1, c2, c3 = st.columns([1.1, 1.1, 1.4])
+    min_val = c1.number_input("ন্যূনতম স্টক মূল্য (৳)", min_value=0.0, value=20000.0, step=5000.0, key="hv_min",
+                              help="স্টক × একক দাম এই অঙ্কের সমান বা বেশি হলে দেখাবে।")
+    min_days = c2.number_input("কত দিন Issue নেই (কমপক্ষে)", min_value=0, value=0, step=30, key="hv_days",
+                               help="০ রাখলে সব দামি আইটেম দেখাবে। ৯০ দিলে শুধু ৯০+ দিন Issue হয়নি এমন।")
+    term = c3.text_input("খুঁজুন (নাম / ERP code)", key="hv_term").strip().lower()
+
+    stocked = df[(df["stock"] > 0)]
+    total_val = float(stocked["value"].sum())
+    nop = int(((stocked["price"] <= 0)).sum())
+    v = df[(df["value"] >= float(min_val)) & (df["stock"] > 0)].copy()
+    v["flag"] = v.apply(_hv_flag, axis=1)
+    if min_days > 0:
+        v = v[(v["days_issue"].isna()) | (v["days_issue"] >= min_days)]
+    if term:
+        m = v[["item_name", "prod_id", "size"]].astype(str).apply(lambda c: c.str.lower().str.contains(term, regex=False)).any(axis=1)
+        v = v[m]
+    v = v.sort_values("value", ascending=False)
+    susp = v[v["flag"].str.startswith(("⛔", "⚠️"))]
+
+    k = st.columns(4)
+    k[0].metric("দামি আইটেম", f"{len(v):,}")
+    k[1].metric("এগুলোর মোট মূল্য", f"৳{float(v['value'].sum()):,.0f}",
+                f"মোট স্টকের {float(v['value'].sum()) / total_val * 100:.0f}%" if total_val else None, delta_color="off")
+    k[2].metric("⚠️ সন্দেহজনক (৯০+ দিন / কখনো Issue নেই)", f"{len(susp):,}")
+    k[3].metric("সন্দেহজনকের মূল্য", f"৳{float(susp['value'].sum()):,.0f}")
+    if nop:
+        st.caption(f"ℹ️ {nop:,}টি আইটেমের একক দাম ০, তাই এদের মূল্য ধরা হয়নি — Data Health → দাম ০ থেকে দাম বসান।")
+    if v.empty:
+        st.success("এই শর্তে কোনো আইটেম নেই। ন্যূনতম মূল্য বা দিনের সংখ্যা কমিয়ে দেখুন।")
+        return
+
+    out = pd.DataFrame({
+        "Factory": v["factory_name"].map(short_fac), "ERP Code": v["prod_id"], "Item": v["item_name"], "Size": v["size"],
+        "Stock": v["stock"], "UOM": v["unit"], "Unit price (৳)": v["price"], "Stock value (৳)": v["value"], "Class": v["abc"],
+        "Last Issue": v["last_issue"].dt.strftime(DATE_FMT).fillna("কখনো না"),
+        "Days since Issue": v["days_issue"], "Issues (মোট)": v["issue_n"],
+        "Last Receipt": v["last_receipt"].dt.strftime(DATE_FMT).fillna("-"), "Check": v["flag"]})
+    if not is_cons_view:
+        out = out.drop(columns=["Factory"])
+    st.dataframe(out, hide_index=True, use_container_width=True, height=min(90 + 35 * len(out), 560), column_config={
+        "Stock": st.column_config.NumberColumn(format="%.2f"),
+        "Unit price (৳)": st.column_config.NumberColumn(format="%.2f"),
+        "Stock value (৳)": st.column_config.NumberColumn(format="%.0f"),
+        "Days since Issue": st.column_config.NumberColumn(format="%d")})
+    st.caption("Class A = মোট স্টক মূল্যের প্রথম ৮০% যে আইটেমগুলো গঠন করে (সবচেয়ে গুরুত্বপূর্ণ), B = পরের ১৫%, C = বাকি। "
+               "'কখনো Issue হয়নি' বা '৯০+ দিন' মানে নিশ্চিতভাবে ভুল নয় — ফিজিক্যালি গুনে দেখুন।")
+    export_buttons(out, "high_value_stock")
+    b1, b2, _ = st.columns([1, 1, 2])
+    b1.button("📱 Physical Count খুলুন →", key="hv_go_pc", on_click=go_page, args=(NAV_PHYSICAL, None))
+    b2.button("📝 Issue করতে Transactions →", key="hv_go_tx", on_click=go_page, args=(NAV_TRANSACTIONS, None))
+
+
+# ============================================================
 #  MAIN
 # ============================================================
 st.session_state["_dbstat"] = {"n": 0, "t": 0.0, "slow": (0.0, "")}   # fresh counters for this page run
@@ -10108,7 +10486,7 @@ autoset_uom_once()
 # Render only the selected module; the sidebar buttons update NAV_KEY.
 RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, tab_global_inventory, tab_physical_count, tab_erp_audit, tab_issue_ledger,
              tab_transfer_history, tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet,
-             tab_stock_cover, tab_data_health]
+             tab_stock_cover, tab_data_health, tab_log_sheet, tab_high_value]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
 RENDERERS[TAB_NAMES.index(active_tab)]()
 render_session_cookie_js()
