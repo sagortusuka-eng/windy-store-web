@@ -9615,7 +9615,7 @@ _KC_LOGIN_CSS = """<style>
 [data-testid="stHeader"], [data-testid="stToolbar"], header { display:none !important; }
 .stApp { background: radial-gradient(1200px 600px at 10% 0%, #dbeafe 0%, transparent 60%),
                      radial-gradient(900px 500px at 100% 100%, #c7d2fe 0%, transparent 55%), #eef2ff !important; }
-.block-container { max-width: 1020px !important; padding-top: 7vh !important; padding-bottom: 3vh !important; }
+.block-container { max-width: 1020px !important; padding-top: 2.5vh !important; padding-bottom: 3vh !important; }
 [data-testid="stHorizontalBlock"]:has(.kc-form-marker) {
     background:#ffffff; border-radius:30px; box-shadow:0 30px 80px rgba(37,99,235,.22), 0 4px 14px rgba(15,23,42,.06);
     gap:0 !important; overflow:hidden; min-height:560px; align-items:stretch !important; }
@@ -9648,16 +9648,23 @@ _KC_LOGIN_CSS = """<style>
 .kc-form-title { font-size:1.55rem; font-weight:800; color:#0f172a; line-height:1.25; margin:0 0 .25rem 0; text-align:center; }
 .kc-form-sub { color:#64748b; text-align:center; margin:0 0 1rem 0; font-size:.95rem; }
 [data-testid="stColumn"]:has(.kc-form-marker) input, [data-testid="column"]:has(.kc-form-marker) input {
-    background:#eef1f6 !important; border:1.5px solid transparent !important; border-radius:12px !important; height:46px; color:#0f172a !important; }
+    background:transparent !important; border:none !important; border-radius:12px !important; height:46px; color:#0f172a !important; }
 [data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="input"], [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="input"] {
-    background:#eef1f6 !important; border:1.5px solid transparent !important; border-radius:12px !important; }
+    background:#f8fafc !important; border:1.5px solid #94a3b8 !important; border-radius:12px !important; transition:border-color .2s, box-shadow .2s; }
 [data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="input"]:focus-within, [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="input"]:focus-within {
     border-color:#3b82f6 !important; box-shadow:0 0 0 3px rgba(59,130,246,.18); }
 [data-testid="stFormSubmitButton"] button { background:linear-gradient(90deg,#1d4ed8,#3b82f6) !important; color:#fff !important; border:none !important;
     border-radius:14px !important; height:48px; font-weight:700 !important; letter-spacing:.2px; box-shadow:0 10px 22px rgba(37,99,235,.35); transition:all .25s ease; }
 [data-testid="stFormSubmitButton"] button:hover { transform:translateY(-2px); box-shadow:0 14px 28px rgba(37,99,235,.45); }
 [data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stForm"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stForm"] { border:none !important; padding:0 !important; }
+[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stForm"] [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stForm"] [data-testid="stVerticalBlock"] { min-height:0 !important; justify-content:flex-start !important; gap:.85rem !important; }
 .kc-foot { text-align:center; color:#64748b; font-size:.8rem; margin-top:18px; }
+.kc-brand { text-align:center; margin:26px auto 0 auto; max-width:760px; }
+.kc-brand .b1 { font-size:1.55rem; font-weight:800; color:#0f172a; letter-spacing:-.3px; line-height:1.25; }
+.kc-brand .b2 { font-size:1.02rem; font-weight:600; color:#1d4ed8; margin-top:.25rem; }
+.kc-brand .b3 { font-size:.98rem; color:#334155; margin-top:.15rem; }
+.kc-brand .b4 { font-size:.82rem; color:#64748b; letter-spacing:2px; margin-top:.6rem; font-weight:600; }
+.kc-brand .b5 { font-size:.8rem; color:#64748b; margin-top:1.1rem; padding-top:.8rem; border-top:1px solid #cbd5e1; }
 @media (max-width: 760px) {
   .block-container { padding-top:3vh !important; }
   [data-testid="stHorizontalBlock"]:has(.kc-mode-register) { flex-direction: column-reverse !important; }
@@ -9779,7 +9786,13 @@ def render_login_page():
                 elif register_user(ru.strip(), rn.strip(), p1):
                     st.session_state["auth_mode"] = "login"
                     done("Registration request sent. The Store Manager must approve it before you can sign in.")
-    st.markdown('<div class="kc-foot">KC &amp; Windy Smart Inventory · Created by MD. Sagor Ali</div>', unsafe_allow_html=True)
+    st.markdown('<div class="kc-brand">'
+                '<div class="b1">Welcome to Windy Group</div>'
+                '<div class="b2">KC Washing &amp; Windy Washing Plant</div>'
+                '<div class="b3">Smart Inventory Management System</div>'
+                '<div class="b4">Secure • Efficient • Organized</div>'
+                '<div class="b5">Created &amp; Developed by MD Sagor Ali</div>'
+                '</div>', unsafe_allow_html=True)
 
 
 # ============================================================
