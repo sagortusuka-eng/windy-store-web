@@ -1899,7 +1899,7 @@ def _lazy_download(col, label, builder, fname, mime, key):
     return False
 
 
-def export_buttons(df, name):
+def export_buttons(df, name, title=None):
     if df is None or df.empty:
         st.caption("Download korar moto data nei.")
         return
@@ -1909,14 +1909,14 @@ def export_buttons(df, name):
         _lazy_download(c2, "⬇️ Excel", lambda: _xlsx_bytes(df), f"{name}.xlsx", xlsx_mime, f"xls_{name}")
         try:
             import reportlab  # noqa: F401
-            _lazy_download(c3, "⬇️ PDF", lambda: to_pdf(df, name), f"{name}.pdf", "application/pdf", f"pdf_{name}")
+            _lazy_download(c3, "⬇️ PDF", lambda: to_pdf(df, title or name), f"{name}.pdf", "application/pdf", f"pdf_{name}")
         except ImportError:
             c3.caption("PDF: 'pip install reportlab'")
         return
     # Older Streamlit without deferred downloads: original behaviour (files built right away).
     c1.download_button("⬇️ CSV", _csv_bytes(df), f"{name}.csv", "text/csv", key=f"csv_{name}_b")
     c2.download_button("⬇️ Excel", _xlsx_bytes(df), f"{name}.xlsx", xlsx_mime, key=f"xls_{name}_b")
-    pdf = to_pdf(df, name)
+    pdf = to_pdf(df, title or name)
     if pdf:
         c3.download_button("⬇️ PDF", pdf, f"{name}.pdf", "application/pdf", key=f"pdf_{name}_b")
     else:
@@ -6682,8 +6682,9 @@ table {{ width:100%; border-collapse:collapse; }}
 th {{ background:#E8590C; color:#fff; padding:4px; border:1px solid #333; }}
 td {{ border:1px solid #333; padding:3px 4px; text-align:center; }}
 tr.short td {{ background:#fde8e8; }} tr.excess td {{ background:#fff3e0; }}</style></head><body>
+<h1 style="text-align:center;margin:0 0 2px;font-size:20px">{esc(fac)}</h1>
 <h2>Daily Issue Status For Month: {d.strftime('%B-%Y')}</h2>
-<p><b>Date:</b> {d.strftime(DATE_FMT)} &nbsp; <b>Factory Name:</b> {esc(fac)}</p>
+<p style="font-size:13px"><b>Date:</b> {d.strftime(DATE_FMT)} &nbsp; <b>Unit:</b> {esc(fac)}</p>
 <table><thead><tr><th>SL No.</th><th>Serial No</th><th>Item Name</th><th>Size</th><th>Unit</th><th>Current Stock</th>
 <th>Daily Issue</th><th>Daily Received</th><th>Short Qty</th><th>Excess Qty</th></tr></thead>
 <tbody>{body}</tbody></table>
@@ -6707,8 +6708,8 @@ def tab_daily_sheet():
         m = df[["Serial No", "Item Name", "Size"]].astype(str).apply(
             lambda c: c.str.lower().str.contains(tl, regex=False)).any(axis=1)
         shown = df[m | (df["SL No."].astype(str) == tl)]
-    st.markdown(f'<div class="section-title">Daily Issue Status For Month: {d.strftime("%B-%Y")}</div>',
-                unsafe_allow_html=True)
+    st.markdown(f'<div class="section-title">{html_lib.escape(fac)} — Daily Issue Status — Date: {d.strftime(DATE_FMT)} '
+                f'(Month: {d.strftime("%B-%Y")})</div>', unsafe_allow_html=True)
     n_short = int((df["Short Qty"] > 0).sum()) if not df.empty else 0
     n_exc = int((df["Excess Qty"] > 0).sum()) if not df.empty else 0
     st.caption(f"Date: {d.strftime(DATE_FMT)} | Factory: {fac} | SL No = Master Inventory SL (same as Transactions). "
@@ -6718,7 +6719,12 @@ def tab_daily_sheet():
         view["Daily Issue"] = ""
         view["Daily Received"] = ""
     st.dataframe(view, hide_index=True, use_container_width=True, height=420)
-    export_buttons(view, f"daily_work_sheet_{d:%Y%m%d}")
+    exp = view.copy()
+    if not exp.empty:
+        exp.insert(0, "Date", d.strftime(DATE_FMT))
+        exp.insert(0, "Unit", fac)
+    export_buttons(exp, f"daily_work_sheet_{short_fac(fac)}_{d:%Y%m%d}",
+                   title=f"Daily Work Sheet - {fac} - Date: {d.strftime(DATE_FMT)}")
     st.download_button("🖨️ Download print sheet (HTML → open & Print)", sheet_html(d, fac, df, auto),
                        f"Daily_Work_Sheet_{d:%Y%m%d}.html", "text/html")
     with st.expander("✏️ Edit UOM"):
