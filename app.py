@@ -4068,30 +4068,63 @@ def _oc_typo_hint(f, s_):
     return ""
 
 
-def opening_check_build(fac, file_rows, min_score):
+def opening_check_build(fac, file_rows, min_score, ignore_code=False):
+    """Order of matching: (1) ERP code - but ONLY if the item names also agree, (2) identical name(+size), (3) similar name.
+    A code that points to a clearly different item is reported as a code conflict instead of being trusted."""
     db_rows = recon_db_rows(fac)
     moves = {int(r["sl_no"]): int(r["n"]) for r in q_c(
         """SELECT sl_no, COUNT(*) AS n FROM transactions WHERE factory_name=%s AND trans_type<>%s GROUP BY sl_no""",
         (fac, OPENING_TYPE))}
-    # 1) exact: ERP code (if the file has one) or identical name(+size) - the existing rule
-    matched, _left = recon_match(file_rows, db_rows)
-    used_db, assigned = set(), {}          # file index -> (db row, label, score)
-    for i, (fr, m, method) in enumerate(matched):
-        if m is not None:
-            used_db.add(m["sl_no"])
-            assigned[i] = (m, "হুবহু (" + method + ")", 1.0)
-    # 2) similarity for the rest (token index keeps it fast even for thousands of rows)
-    dbn = [(r, _oc_norm(r["item_name"], r["size"])) for r in db_rows if r["sl_no"] not in used_db]
+    dbn_all = {r["sl_no"]: _oc_norm(r["item_name"], r["size"]) for r in db_rows}
+    by_code, by_name = {}, {}
+    for r in db_rows:
+        c = str(r["prod_id"] or "").strip().lower()
+        if not is_blank_code(c):
+            by_code.setdefault(c, []).append(r)
+        by_name.setdefault(norm_name(r["item_name"]), []).append(r)
+    used_db, assigned, conflict = set(), {}, {}      # conflict: file idx -> software row the CODE points to
+    fns = [_oc_norm(fr["name"], fr["size"]) for fr in file_rows]
+    fcode = [("" if ignore_code else str(fr["code"] or "").strip()) for fr in file_rows]
+    # (1) ERP code, verified against the name
+    for i, fr in enumerate(file_rows):
+        c = fcode[i].lower()
+        if is_blank_code(c) or c not in by_code:
+            continue
+        free = [r for r in by_code[c] if r["sl_no"] not in used_db]
+        if not free:
+            continue
+        r0 = free[0]
+        sc = _oc_score(fns[i], dbn_all[r0["sl_no"]]) if fns[i] else 1.0
+        if sc >= 0.75 and _oc_numbers(fns[i]) == _oc_numbers(dbn_all[r0["sl_no"]]):
+            assigned[i] = (r0, "ERP code + নাম মিল", 1.0)
+            used_db.add(r0["sl_no"])
+        else:
+            conflict[i] = r0
+    # (2) identical name (size narrows the choice)
+    for i, fr in enumerate(file_rows):
+        if i in assigned or not fr["name"]:
+            continue
+        cands = by_name.get(norm_name(fr["name"]), [])
+        ns = norm_size(fr["size"])
+        if cands and ns:
+            sized = [c for c in cands if norm_size(c["size"]) == ns]
+            cands = sized or cands
+        free = [c for c in cands if c["sl_no"] not in used_db]
+        if free:
+            assigned[i] = (free[0], "হুবহু নাম", 1.0)
+            used_db.add(free[0]["sl_no"])
+    # (3) similar name for the rest (token index keeps it fast for thousands of rows)
+    dbn = [(r, dbn_all[r["sl_no"]]) for r in db_rows if r["sl_no"] not in used_db]
     inv = {}
     for di, (_r, nm) in enumerate(dbn):
         for tk in set(nm.split()):
             if len(tk) >= 2:
                 inv.setdefault(tk, []).append(di)
     cand_pairs, best_any = [], {}
-    for i, (fr, m, _method) in enumerate(matched):
+    for i in range(len(file_rows)):
         if i in assigned:
             continue
-        fn = _oc_norm(fr["name"], fr["size"])
+        fn = fns[i]
         votes = {}
         for tk in set(fn.split()):
             lst = inv.get(tk, [])
@@ -4099,9 +4132,8 @@ def opening_check_build(fac, file_rows, min_score):
                 w = 1.0 / len(lst)
                 for di in lst:
                     votes[di] = votes.get(di, 0.0) + w
-        top = sorted(votes, key=votes.get, reverse=True)[:15]
         fnum = _oc_numbers(fn)
-        for di in top:
+        for di in sorted(votes, key=votes.get, reverse=True)[:15]:
             sc = _oc_score(fn, dbn[di][1])
             same_num = (fnum == _oc_numbers(dbn[di][1]))
             if i not in best_any or sc > best_any[i][1]:
@@ -4114,20 +4146,27 @@ def opening_check_build(fac, file_rows, min_score):
         assigned[i] = (dbn[di][0], f"কাছাকাছি নাম ({sc * 100:.0f}%)", sc)
         used_db.add(dbn[di][0]["sl_no"])
     out = []
-    for i, (fr, _m, _method) in enumerate(matched):
+    for i, fr in enumerate(file_rows):
         fq = float(fr["qty"])
+        code_note = ""
+        cf = conflict.get(i)
+        if cf is not None:
+            code_note = f"⚠️ Excel-এর কোড {fcode[i]} সফটওয়্যারে অন্য আইটেমের: {cf['item_name']} [{cf['size'] or '-'}]"
         if i in assigned:
             m, label, sc = assigned[i]
+            if not code_note and fcode[i] and not is_blank_code(fcode[i]) and str(m["prod_id"] or "").strip().lower() != fcode[i].lower():
+                code_note = f"⚠️ Excel কোড {fcode[i]} ≠ সফটওয়্যার কোড {m['prod_id']}"
             sp = float(m["phys"])
             diff = sp - fq
             if abs(diff) < 1e-6:
-                res = "Match" if label.startswith("হুবহু") else "Match (নাম কাছাকাছি — দেখে নিন)"
+                res = "Match" if label.startswith(("ERP code", "হুবহু")) else "Match (নাম কাছাকাছি — দেখে নিন)"
             else:
                 res = "Qty differs"
             out.append({"Result": res, "File Item": fr["name"], "File Size": fr["size"], "File Qty": fq,
                         "Software Item": m["item_name"], "Software Size": m["size"], "SL No": int(m["sl_no"]),
                         "ERP Code": m["prod_id"], "Software Physical": sp, "Software − File": diff,
-                        "Name match": label, "Hint": _oc_typo_hint(fq, sp) if res == "Qty differs" else "",
+                        "Name match": label, "Code note": code_note,
+                        "Hint": _oc_typo_hint(fq, sp) if res == "Qty differs" else "",
                         "Moves since opening": moves.get(int(m["sl_no"]), 0)})
         else:
             near = ""
@@ -4137,8 +4176,8 @@ def opening_check_build(fac, file_rows, min_score):
                 near = f"{r['item_name']} [{r['size'] or '-'}] · SL {r['sl_no']} · {sc * 100:.0f}%" + ("" if same_num else " · সংখ্যা আলাদা")
             out.append({"Result": "Not in software", "File Item": fr["name"], "File Size": fr["size"], "File Qty": fq,
                         "Software Item": "", "Software Size": "", "SL No": None, "ERP Code": "", "Software Physical": None,
-                        "Software − File": None, "Name match": "মেলেনি", "Hint": ("সবচেয়ে কাছের: " + near) if near else "",
-                        "Moves since opening": 0})
+                        "Software − File": None, "Name match": "মেলেনি", "Code note": code_note,
+                        "Hint": ("সবচেয়ে কাছের: " + near) if near else "", "Moves since opening": 0})
     for r in db_rows:
         if r["sl_no"] in used_db:
             continue
@@ -4148,9 +4187,8 @@ def opening_check_build(fac, file_rows, min_score):
         out.append({"Result": "Not in file", "File Item": "", "File Size": "", "File Qty": None,
                     "Software Item": r["item_name"], "Software Size": r["size"], "SL No": int(r["sl_no"]),
                     "ERP Code": r["prod_id"], "Software Physical": sp, "Software − File": sp, "Name match": "মেলেনি",
-                    "Hint": "", "Moves since opening": moves.get(int(r["sl_no"]), 0)})
+                    "Code note": "", "Hint": "", "Moves since opening": moves.get(int(r["sl_no"]), 0)})
     return pd.DataFrame(out)
-
 
 def opening_check_panel(default_fac):
     with st.expander("🔎 Opening Check — Excel-এ ERP code না থাকলে নাম মিলিয়ে (কাছাকাছি নামসহ)", expanded=False):
@@ -4160,6 +4198,8 @@ def opening_check_panel(default_fac):
         c1, c2 = st.columns(2)
         fac = c1.selectbox("Factory", FACTORIES, index=FACTORIES.index(default_fac) if default_fac in FACTORIES else 0, key="oc_fac")
         min_pct = c2.slider("নাম কতটা মিললে 'কাছাকাছি' ধরবেন (%)", 70, 98, 85, key="oc_pct")
+        ignore_code = st.checkbox("Excel-এর কোড কলাম ব্যবহার করবেন না — শুধু নাম দিয়ে মেলান", key="oc_ignore_code",
+                                  help="Excel-এর 'Code' কলামটা আসল ERP code না হলে বা ভুল হলে এটা টিক দিন।")
         up = st.file_uploader("প্রথম দিনের ওপেনিং Excel / CSV", type=["xlsx", "xls", "csv"], key="oc_file")
         if not up:
             return
@@ -4174,7 +4214,7 @@ def opening_check_panel(default_fac):
         st.caption(f"ব্যবহারযোগ্য সারি: {len(file_rows):,} | বাদ: {skipped}")
         if st.button("▶ Opening Check চালান", type="primary", key="oc_run", disabled=not file_rows):
             with st.spinner("নাম মেলানো হচ্ছে ..."):
-                st.session_state["oc_result"] = {"fac": fac, "file": up.name, "df": opening_check_build(fac, file_rows, min_pct / 100.0)}
+                st.session_state["oc_result"] = {"fac": fac, "file": up.name, "df": opening_check_build(fac, file_rows, min_pct / 100.0, ignore_code)}
         res = st.session_state.get("oc_result")
         if not res or res["fac"] != fac:
             st.info("ওপরে 'Opening Check চালান' চাপুন।")
@@ -4187,6 +4227,10 @@ def opening_check_panel(default_fac):
         mc[2].metric("Qty differs", int(counts.get("Qty differs", 0)))
         mc[3].metric("Not in software", int(counts.get("Not in software", 0)))
         mc[4].metric("Not in file", int(counts.get("Not in file", 0)))
+        cn = int((df["Code note"].astype(str) != "").sum())
+        if cn:
+            st.error(f"{cn}টি সারিতে Excel-এর ERP code আর সফটওয়্যারের code একই আইটেম বোঝাচ্ছে না (Code note কলাম)। "
+                     "Excel-এর 'Code' কলামটা আসলেই ERP code কি না দেখুন; না হলে ওপরের টিকবক্স দিয়ে শুধু নামে মেলান।")
         typo = int((df["Hint"].astype(str).str.startswith("⚠️")).sum())
         if typo:
             st.warning(f"{typo}টি আইটেমে সংখ্যায় টাইপের ভুলের মতো দেখাচ্ছে (⚠️ Hint কলাম)।")
