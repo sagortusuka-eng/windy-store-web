@@ -1142,6 +1142,8 @@ def init_db():
         "ALTER TABLE repair_returns ADD COLUMN IF NOT EXISTS gate_pass_no TEXT",
         "ALTER TABLE repair_returns ADD COLUMN IF NOT EXISTS return_type TEXT",
         "ALTER TABLE repair_returns ADD COLUMN IF NOT EXISTS officer_name TEXT",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS req_no TEXT",
+        "ALTER TABLE inter_factory_transfers ADD COLUMN IF NOT EXISTS size TEXT",
         "ALTER TABLE repair_returns ADD COLUMN IF NOT EXISTS approved_by TEXT",
         "ALTER TABLE repair_returns ADD COLUMN IF NOT EXISTS gatepass_carrier TEXT",
         "ALTER TABLE import_queue ADD COLUMN IF NOT EXISTS size TEXT DEFAULT ''",
@@ -1868,13 +1870,13 @@ def next_free_temp(fac):
 
 
 def insert_tx(fac, officer, sl, pid, name, qty, ttype, day, notes, date_s, time_s, verif, grn="Not Required",
-              supplier="", challan="", po_flag="", po_date=None, unit_price_at_tx=None):
+              supplier="", challan="", po_flag="", po_date=None, unit_price_at_tx=None, req_no=""):
     run("""INSERT INTO transactions (factory_name, officer_name, sl_no, prod_id, item_name, qty, trans_type, day,
            notes, date, time, verification_status, erp_grn_status, supplier_name, challan_no,
-           po_pending_flag, po_pending_date, unit_price_at_tx)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+           po_pending_flag, po_pending_date, unit_price_at_tx, req_no)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         (fac, officer, sl, pid, name, qty, ttype, day, notes, date_s, time_s, verif, grn, supplier, challan,
-         po_flag, po_date, unit_price_at_tx))
+         po_flag, po_date, unit_price_at_tx, (req_no or "").strip()))
 
 
 def _csv_bytes(df):
@@ -2032,14 +2034,16 @@ def serial_owner(fac, serial, exclude_sl=None):
     return rows[0] if rows else None
 
 
-def is_duplicate_tx(fac, sl, ttype, qty, date_s, user, notes):
+def is_duplicate_tx(fac, sl, ttype, qty, date_s, user, notes, req_no=""):
     """True when the newest transaction of this item is an identical one saved within the last 2 minutes
     (same type, qty, date, officer and remarks) - i.e. a repeated click / stale form."""
-    last = q("""SELECT qty, trans_type, officer_name, date, time, notes FROM transactions
+    last = q("""SELECT qty, trans_type, officer_name, date, time, notes, COALESCE(req_no,'') AS req_no FROM transactions
                 WHERE factory_name=%s AND sl_no=%s ORDER BY id DESC LIMIT 1""", (fac, sl))
     if not last:
         return False
     t = last[0]
+    if (req_no or "").strip() and str(t["req_no"] or "").strip() != (req_no or "").strip():
+        return False      # a different requisition (SR) slip is never a repeated click
     if not (t["trans_type"] == ttype and abs(float(t["qty"] or 0) - float(qty)) < 1e-9
             and t["officer_name"] == user and t["date"] == date_s
             and str(t["notes"] or "").strip().startswith(str(notes or "").strip())):
@@ -2769,8 +2773,9 @@ def tab_dashboard():
 # ============================================================
 @tx
 def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, supplier="", challan="", po_pending=False,
-                     erp_open=None, price_open=None, rate=None, rate_mode=None):
+                     erp_open=None, price_open=None, rate=None, rate_mode=None, req_no=""):
     user = st.session_state.get("user", "")
+    req_no = (req_no or "").strip() if ttype in ISSUE_TYPES else ""
     sl, pid, name = item["sl_no"], item["prod_id"], item["item_name"]
     stock = float(item["stock"] or 0)
     date_s, time_s, day = tx_dt.strftime(DATE_FMT), datetime.now().strftime("%I:%M %p"), tx_dt.day
@@ -2812,14 +2817,15 @@ def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, sup
             (shortage, other["sl_no"], other["factory_name"]))
         run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (shortage, sl, fac))
         run("""INSERT INTO inter_factory_transfers (transfer_ref, source_factory, dest_factory, prod_id, item_name, qty,
-               transfer_date, transfer_time, initiated_by, status, notes) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'Completed',%s)""",
+               transfer_date, transfer_time, initiated_by, status, notes, size) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'Completed',%s,%s)""",
             (ref_no, other["factory_name"], fac, pid, name, shortage, date_s, time_s, user,
-             f"Auto-transfer for shortage during issue (source item: {other['item_name']} [{other['prod_id']}])"))
+             f"Auto-transfer for shortage during issue (source item: {other['item_name']} [{other['prod_id']}]) | Size: {item['size'] or '-'}",
+             item["size"] or ""))
         run("UPDATE inventory SET current_stock=current_stock-%s WHERE sl_no=%s AND factory_name=%s", (qty, sl, fac))
         insert_tx(fac, user, sl, pid, name, qty, ttype, day,
-                  f"{notes} [Auto-transferred {shortage:g} pcs from {other['factory_name']}]".strip(),
-                  date_s, time_s, verif, po_flag=po_flag, po_date=po_date)
-        audit("AUTO_TRANSFER", f"{shortage:g} pcs from {other['factory_name']} to {fac} for {pid}")
+                  f"{notes} [Auto-transferred {shortage:g} pcs (size {item['size'] or '-'}) from {other['factory_name']}]".strip(),
+                  date_s, time_s, verif, po_flag=po_flag, po_date=po_date, req_no=req_no)
+        audit("AUTO_TRANSFER", f"{shortage:g} pcs from {other['factory_name']} to {fac} for {pid} (size {item['size'] or '-'})")
         return True
 
     if ttype in RECEIPT_TYPES:
@@ -2852,8 +2858,9 @@ def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, sup
             return False
         run("UPDATE inventory SET current_stock=current_stock-%s WHERE sl_no=%s AND factory_name=%s", (qty, sl, fac))
         insert_tx(fac, user, sl, pid, name, qty, ttype, day, notes, date_s, time_s, verif,
-                  po_flag=po_flag, po_date=po_date)
-    audit("TRANSACTION", f"{fac}: {ttype} {qty:g} of {pid} ({name})" + (" [ERP PO Pending ticked]" if po_pending else ""))
+                  po_flag=po_flag, po_date=po_date, req_no=req_no)
+    audit("TRANSACTION", f"{fac}: {ttype} {qty:g} of {pid} ({name})" + (f" [SR {req_no}]" if req_no else "")
+          + (" [ERP PO Pending ticked]" if po_pending else ""))
     return True
 
 
@@ -3082,6 +3089,11 @@ def tab_transactions():
                     else:
                         st.caption(f"বর্তমান Unit Price ৳{cur_price:,.2f}। Purchase Rate বসালে নির্বাচিত নিয়মে Unit Price আপডেট হবে।")
             tx_date = dc.date_input("Date", value=date.today(), max_value=date.today(), key="tx_date")
+            req_no = ""
+            if ttype in ISSUE_TYPES:
+                req_no = st.text_input("Requisition No. (SR No.)", value=st.session_state.get("last_req_no", ""),
+                                       key=f"tx_req_{g}", placeholder="e.g. 1745 — স্লিপের SR নম্বর",
+                                       help="একই রিকুইজিশন স্লিপের পরের আইটেমে নম্বরটা আবার লিখতে হবে না — আগেরটাই থাকবে।")
             verified, need_verif = False, False
             if item is not None and ttype in ISSUE_TYPES:
                 need_verif, v_days = verification_needed(fac, item["sl_no"], tx_date)
@@ -3112,7 +3124,7 @@ def tab_transactions():
                         if other and float(other["stock"] or 0) >= shortage:
                             need_xfer = True
                             st.warning(f"⚠️ Stock short {shortage:g}. {other['factory_name']} theke auto-transfer hobe "
-                                       f"({other['item_name']} [{other['prod_id']}], stock {float(other['stock']):g}, "
+                                       f"({other['item_name']} [{other['prod_id']}], size {other['size'] or '-'}, stock {float(other['stock']):g}, "
                                        f"match: {other['level']} {int(round(float(other.get('score', 1.0)) * 100))}%).")
                             if other["level"] == "fuzzy":
                                 st.info(f"ℹ️ নাম হুবহু এক নয় — এই item: **{item['item_name']}**, ওই unit-এর item: **{other['item_name']}** "
@@ -3142,12 +3154,14 @@ def tab_transactions():
                     else:
                         item = fresh[0]   # always work with the live stock, never a stale copy
                         if is_duplicate_tx(item["factory_name"], item["sl_no"], ttype, qty, tx_date.strftime(DATE_FMT),
-                                           st.session_state.get("user", ""), notes):
+                                           st.session_state.get("user", ""), notes, req_no if ttype in ISSUE_TYPES else ""):
                             st.error("🚫 Duplicate block: ekdom ek-i transaction ei matro save hoyeche. "
                                      "Quantity / remarks bodle ba kichukkhon por abar korun.")
                         elif save_transaction(fac, item, qty, ttype, tx_date, notes, verified, xfer_ok,
                                               supplier.strip(), challan.strip(), po_pending, erp_open=erp_open,
-                                              price_open=price_open, rate=rate_in, rate_mode=rate_mode):
+                                              price_open=price_open, rate=rate_in, rate_mode=rate_mode, req_no=req_no):
+                            if ttype in ISSUE_TYPES:
+                                st.session_state["last_req_no"] = req_no.strip()
                             st.session_state["tx_saved_gen"] = g
                             st.session_state["tx_gen"] = g + 1
                             done("✅ Transaction saved, stock updated. Form reset hoyeche - porer transaction-er jonno ready.")
@@ -3171,7 +3185,7 @@ def tab_transactions():
                          AND i.factory_name=transactions.factory_name LIMIT 1) AS serial_no,
                       prod_id, item_name, qty, trans_type,
                       COALESCE(supplier_name,'') AS supplier_name, COALESCE(challan_no,'') AS challan_no,
-                      unit_price_at_tx AS purchase_rate,
+                      unit_price_at_tx AS purchase_rate, COALESCE(req_no,'') AS req_no,
                       verification_status, notes, date, time FROM transactions WHERE 1=1{fsql}{extra}
                       ORDER BY id DESC LIMIT 300""", fp + ep)
         if not tdf.empty:
@@ -3179,10 +3193,11 @@ def tab_transactions():
             tdf["type"] = tdf["trans_type"].map(lambda c: TRANS_LABELS.get(c, c))
             tdf["status"] = tdf["verification_status"].fillna("N/A")
             show = tdf[["id", "factory_name", "officer_name", "sl_no", "serial_no", "prod_id", "item_name", "qty", "type",
-                        "supplier_name", "challan_no", "purchase_rate", "status", "notes", "date_time"]]
+                        "supplier_name", "challan_no", "purchase_rate", "req_no", "status", "notes", "date_time"]]
             st.dataframe(show.style.apply(zebra_styles, axis=1), hide_index=True,
                          use_container_width=True, height=340,
-                         column_config={"purchase_rate": st.column_config.NumberColumn("Purchase Rate (৳)", format="%.2f")})
+                         column_config={"purchase_rate": st.column_config.NumberColumn("Purchase Rate (৳)", format="%.2f"),
+                                        "req_no": st.column_config.TextColumn("SR No.")})
         else:
             st.dataframe(tdf, hide_index=True, use_container_width=True, height=340)
         export_buttons(tdf, "transactions")
@@ -5481,7 +5496,7 @@ def tab_issue_ledger():
     iss = qdf_c(f"""SELECT t.id, t.date, t.time, t.factory_name, t.item_name, COALESCE(i.size,'') AS size,
                   COALESCE(i.serial_no,'') AS serial_no, t.prod_id, t.sl_no, t.qty,
                   COALESCE(i.unit_price,0) AS unit_price, t.officer_name, t.trans_type, t.notes, t.verification_status,
-                  COALESCE(t.po_pending_flag,'') AS po_flag
+                  COALESCE(t.po_pending_flag,'') AS po_flag, COALESCE(t.req_no,'') AS req_no
                   FROM transactions t LEFT JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
                   WHERE t.trans_type IN ('Issued','Internal Issue'){fw(FAC, 't.')[0]} ORDER BY t.id DESC""", FP)
     if not iss.empty:
@@ -5516,7 +5531,7 @@ def tab_issue_ledger():
     view = iss
     t = term.strip().lower()
     if t:
-        scols = ["item_name", "serial_no", "prod_id", "size", "officer_name", "factory_name", "notes"]
+        scols = ["item_name", "serial_no", "prod_id", "size", "officer_name", "factory_name", "notes", "req_no"]
         m = view[scols].fillna("").astype(str).apply(lambda c: c.str.lower().str.contains(t, regex=False)).any(axis=1)
         view = view[m | (view["sl_no"].astype(str).str.strip() == t)]
     if mon != "All":
@@ -5529,19 +5544,22 @@ def tab_issue_ledger():
         else:
             view = view[(view["_dt"] >= pd.Timestamp(d_from)) & (view["_dt"] < pd.Timestamp(d_to) + pd.Timedelta(days=1))]
 
-    mc = st.columns(4)
+    mc = st.columns(5)
     mc[0].metric("Total Issued Qty", f"{view.qty.sum():g}")
     mc[1].metric("Issue Entries", len(view))
     mc[2].metric("Distinct Items", view[["factory_name", "sl_no"]].drop_duplicates().shape[0])
     mc[3].metric("Issued Value (৳)", f"{view.total_value.sum():,.0f}")
+    _srs = view[view["req_no"].astype(str).str.strip() != ""]["req_no"].astype(str).str.strip()
+    mc[4].metric("Requisitions (SR)", f"{_srs.nunique():,}",
+                 f"{len(_srs):,} আইটেম-লাইন ইস্যু" if len(_srs) else None, delta_color="off")
     if view.empty:
         st.info("Ei filter-e kono issue record nei.")
         return
 
-    _tab = lazy_tab_select(["📋 Issue Details", "📅 Date-wise Summary", "📦 Item-wise Summary", "✏️ ERP Balance Update", "🏷 Tag ERP PO Pending"], "lz_issue")
+    _tab = lazy_tab_select(["📋 Issue Details", "📅 Date-wise Summary", "📦 Item-wise Summary", "✏️ ERP Balance Update", "🏷 Tag ERP PO Pending", "🧾 Requisition-wise"], "lz_issue")
     if _tab == 0:
         detail = view.sort_values(["_dt", "id"], ascending=False)[
-            ["id", "date", "time", "factory_name", "serial_no", "prod_id", "sl_no", "item_name", "size", "qty", "unit_price",
+            ["id", "date", "time", "req_no", "factory_name", "serial_no", "prod_id", "sl_no", "item_name", "size", "qty", "unit_price",
              "total_value", "officer_name", "type", "verification_status", "erp_status", "notes"]]
         st.dataframe(detail, hide_index=True, use_container_width=True, height=380)
         export_buttons(detail, "issue_ledger")
@@ -5577,6 +5595,29 @@ def tab_issue_ledger():
     if _tab == 4:
         il_po_tag_panel(view.sort_values("id", ascending=False)[
             ["id", "date", "factory_name", "item_name", "size", "qty", "officer_name", "po_flag"]].head(300))
+    if _tab == 5:
+        _ls = view.copy()
+        _ls["req_no"] = _ls["req_no"].astype(str).str.strip()
+        with_sr = _ls[_ls["req_no"] != ""]
+        no_sr = _ls[_ls["req_no"] == ""]
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("মোট Requisition (SR)", f"{with_sr['req_no'].nunique():,}")
+        r2.metric("মোট ইস্যু হওয়া আইটেম-লাইন", f"{len(with_sr):,}")
+        r3.metric("আলাদা আইটেম", f"{with_sr[['factory_name', 'sl_no']].drop_duplicates().shape[0]:,}")
+        r4.metric("SR নম্বর ছাড়া ইস্যু", f"{len(no_sr):,}")
+        if with_sr.empty:
+            st.info("এই ফিল্টারে SR নম্বরসহ কোনো ইস্যু নেই। Transactions-এ Issue করার সময় 'Requisition No. (SR No.)' লিখুন।")
+        else:
+            srt = (with_sr.groupby(["req_no"], as_index=False)
+                   .agg(Date=("_dt", "max"), Lines=("id", "count"), Items=("sl_no", "nunique"), Qty=("qty", "sum"),
+                        Value=("total_value", "sum"), Officer=("officer_name", lambda x: ", ".join(sorted(set(map(str, x)))))))
+            srt = srt.sort_values(["Date", "req_no"], ascending=False)
+            srt["Date"] = srt["Date"].dt.strftime(DATE_FMT)
+            srt.columns = ["SR No.", "Date", "Item lines issued", "Distinct items", "Total qty", "Value (৳)", "Officer"]
+            st.dataframe(srt, hide_index=True, use_container_width=True, height=420,
+                         column_config={"Value (৳)": st.column_config.NumberColumn(format="%.0f")})
+            export_buttons(srt, "issue_requisition_wise")
+            st.caption("'Item lines issued' = ওই SR-এ কতগুলো আইটেম লাইন ইস্যু হয়েছে। ওপরের তারিখ/মাস ফিল্টার দিয়ে একদিনের সব SR মিলিয়ে দেখুন।")
     tx_manager_panel(view[["id", "item_name", "qty", "date"]], "il", "🔐 Manager: Delete / Edit an issue entry")
 
 
@@ -5808,8 +5849,14 @@ def edit_transfer(t, new_qty, date_s, time_s, notes):
 
 
 def tab_transfer_history():
-    cols_sql = """SELECT id, transfer_ref, source_factory, dest_factory, prod_id, item_name, qty, transfer_date,
-                  transfer_time, initiated_by, status, notes FROM inter_factory_transfers"""
+    cols_sql = """SELECT id, transfer_ref, source_factory, dest_factory, prod_id, item_name,
+                  COALESCE(NULLIF(size,''),
+                           (SELECT i.size FROM inventory i WHERE i.prod_id=inter_factory_transfers.prod_id
+                              AND i.factory_name=inter_factory_transfers.dest_factory
+                              AND LOWER(i.item_name)=LOWER(inter_factory_transfers.item_name) LIMIT 1),
+                           (SELECT i.size FROM inventory i WHERE i.prod_id=inter_factory_transfers.prod_id
+                              AND i.factory_name=inter_factory_transfers.dest_factory LIMIT 1), '') AS size,
+                  qty, transfer_date, transfer_time, initiated_by, status, notes FROM inter_factory_transfers"""
     if not FAC or "CONSOLIDATED" in FAC:
         tf = qdf(cols_sql + " ORDER BY id DESC")
     else:
@@ -6543,22 +6590,17 @@ def tab_budget():
                       WHERE t.trans_type IN ('Issued','Internal Issue'){fw(FAC, 't.')[0]}
                       GROUP BY t.factory_name, i.category""", FP)
     cost = {(r["factory_name"], r["category"]): float(r["cost"] or 0) for r in cost_rows}
-    # (Management Dashboard has its own tab now; it is no longer repeated inside Budget.)
+    # Executive Overview & Budget Control lives here (not on the daily-entry home screen)
+    try:
+        tab_dashboard()
+    except Exception as e:
+        st.warning(f"Overview load kora jacche na: {e}")
     if bud.empty:
         st.info("Budget nei.")
         return
     bud["actual_cost"] = [cost.get((f, c), 0.0) for f, c in zip(bud.factory_name, bud.category_name)]
     bud["remaining"] = bud.allocated_budget - bud.actual_cost
     bud["status"] = bud.remaining.apply(lambda v: "SAFE" if v >= 0 else "OVER BUDGET")
-    # Top-of-page budget summary: total budget, total spent, remaining and % used (same numbers as the cards below)
-    _tb, _tc = float(bud["allocated_budget"].fillna(0).sum()), float(bud["actual_cost"].sum())
-    _tp = (_tc / _tb * 100.0) if _tb > 0 else (100.0 if _tc > 0 else 0.0)
-    _k1, _k2, _k3, _k4 = st.columns(4, gap="medium")
-    _k1.metric("Total Budget", f"\u09f3 {_tb:,.0f}")
-    _k2.metric("Total Spent", f"\u09f3 {_tc:,.0f}")
-    _k3.metric("Remaining", f"\u09f3 {_tb - _tc:,.0f}")
-    _k4.metric("Budget Used", f"{_tp:.1f}%")
-    st.markdown(budget_bar_html(_tp, "Total consumption"), unsafe_allow_html=True)
 
     st.markdown('<div class="section-title">Category Budget Cards</div>', unsafe_allow_html=True)
     cols = st.columns(3, gap="medium")
@@ -6726,10 +6768,8 @@ def tab_daily_sheet():
     st.dataframe(view, hide_index=True, use_container_width=True, height=420)
     exp = view.copy()
     if not exp.empty:
-        if "Date" not in exp.columns:
-            exp.insert(0, "Date", d.strftime(DATE_FMT))
-        if "Factory" not in exp.columns:
-            exp.insert(0, "Factory", fac)   # "Unit" is already the UOM column, so the factory goes in as "Factory"
+        exp.insert(0, "Date", d.strftime(DATE_FMT))
+        exp.insert(0, "Unit", fac)
     export_buttons(exp, f"daily_work_sheet_{short_fac(fac)}_{d:%Y%m%d}",
                    title=f"Daily Work Sheet - {fac} - Date: {d.strftime(DATE_FMT)}")
     st.download_button("🖨️ Download print sheet (HTML → open & Print)", sheet_html(d, fac, df, auto),
@@ -7435,11 +7475,12 @@ def do_manual_transfer(sug, qty, date_s, note, leave_note):
         (qty, sug["src_sl"], sug["src_factory"]))
     run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s",
         (qty, sug["dst_sl"], sug["dst_factory"]))
-    notes = f"{(note or 'Transfer (system suggestion: no purchase needed)').strip()} (source item: {sug['src_item_name']} [{sug['src_prod_id']}])"
+    notes = (f"{(note or 'Transfer (system suggestion: no purchase needed)').strip()} (source item: {sug['src_item_name']} "
+             f"[{sug['src_prod_id']}]) | Size: {sug['size'] or '-'}")
     run("""INSERT INTO inter_factory_transfers (transfer_ref, source_factory, dest_factory, prod_id, item_name, qty,
-           transfer_date, transfer_time, initiated_by, status, notes) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'Completed',%s)""",
+           transfer_date, transfer_time, initiated_by, status, notes, size) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'Completed',%s,%s)""",
         (ref_no, sug["src_factory"], sug["dst_factory"], sug["prod_id"], sug["item_name"], qty, date_s,
-         now.strftime("%I:%M %p"), user, notes))
+         now.strftime("%I:%M %p"), user, notes, sug["size"] or ""))
     if leave_note:
         run("""INSERT INTO dash_notes (for_unit, note, created_by, created_at, status) VALUES ('Both',%s,%s,%s,'Open')""",
             (f"ERP-te transfer entry din: {sug['item_name']} [{sug['size'] or '-'}] {qty:g} {sug['unit']} "
@@ -9620,113 +9661,57 @@ _KC_LOGIN_CSS = """<style>
 [data-testid="stHeader"], [data-testid="stToolbar"], header { display:none !important; }
 .stApp { background: radial-gradient(1200px 600px at 10% 0%, #dbeafe 0%, transparent 60%),
                      radial-gradient(900px 500px at 100% 100%, #c7d2fe 0%, transparent 55%), #eef2ff !important; }
-.block-container { max-width: 1060px !important; padding-top: clamp(12px, 2.5vh, 32px) !important; padding-bottom: 14px !important; }
-/* the app injects many <style>-only markdown blocks before this page; each one leaves an empty gap above the card. Collapse them here
-   (their CSS keeps working; this rule exists only while the login page is shown). */
-[data-testid="stElementContainer"]:has(style), .element-container:has(style),
-[data-testid="stElementContainer"]:has(iframe[height="0"]), .element-container:has(iframe[height="0"]) { display:none !important; }
-/* ---- main split card ---- */
+.block-container { max-width: 1020px !important; padding-top: 7vh !important; padding-bottom: 3vh !important; }
 [data-testid="stHorizontalBlock"]:has(.kc-form-marker) {
-    background:#ffffff; border-radius:28px; border:1px solid rgba(148,163,184,.28);
-    box-shadow:0 24px 60px rgba(30,64,175,.14), 0 2px 8px rgba(15,23,42,.05);
-    gap:0 !important; overflow:hidden; min-height:520px; align-items:stretch !important; }
+    background:#ffffff; border-radius:30px; box-shadow:0 30px 80px rgba(37,99,235,.22), 0 4px 14px rgba(15,23,42,.06);
+    gap:0 !important; overflow:hidden; min-height:560px; align-items:stretch !important; }
 [data-testid="stHorizontalBlock"]:has(.kc-mode-register) { flex-direction: row-reverse !important; }
 [data-testid="stHorizontalBlock"]:has(.kc-mode-login)    { animation: kcSlideL .75s cubic-bezier(.22,1,.36,1); }
 [data-testid="stHorizontalBlock"]:has(.kc-mode-register) { animation: kcSlideR .75s cubic-bezier(.22,1,.36,1); }
 @keyframes kcSlideL { from { opacity:0; transform: translateX(-90px) scale(.985); } to { opacity:1; transform:none; } }
 @keyframes kcSlideR { from { opacity:0; transform: translateX(90px) scale(.985); }  to { opacity:1; transform:none; } }
-/* ---- left blue panel ---- */
 [data-testid="stColumn"]:has(.kc-panel-marker), [data-testid="column"]:has(.kc-panel-marker) {
-    background: linear-gradient(145deg, #1e40af 0%, #2563eb 50%, #60a5fa 100%); color:#fff; flex:1 1 44% !important;
-    border-radius: 28px 170px 170px 28px; position:relative; overflow:hidden; }
+    background: linear-gradient(145deg, #1d4ed8 0%, #3b82f6 55%, #60a5fa 100%); color:#fff; flex:1 1 46% !important;
+    border-radius: 30px 190px 190px 30px; position:relative; overflow:hidden; }
 [data-testid="stHorizontalBlock"]:has(.kc-mode-register) [data-testid="stColumn"]:has(.kc-panel-marker),
-[data-testid="stHorizontalBlock"]:has(.kc-mode-register) [data-testid="column"]:has(.kc-panel-marker) { border-radius: 170px 28px 28px 170px; }
+[data-testid="stHorizontalBlock"]:has(.kc-mode-register) [data-testid="column"]:has(.kc-panel-marker) { border-radius: 190px 30px 30px 190px; }
 [data-testid="stColumn"]:has(.kc-panel-marker)::before, [data-testid="column"]:has(.kc-panel-marker)::before {
     content:""; position:absolute; width:260px; height:260px; border-radius:50%; background:rgba(255,255,255,.08); top:-80px; left:-70px; }
 [data-testid="stColumn"]:has(.kc-panel-marker)::after, [data-testid="column"]:has(.kc-panel-marker)::after {
     content:""; position:absolute; width:200px; height:200px; border-radius:50%; background:rgba(255,255,255,.07); bottom:-60px; right:40px; }
 [data-testid="stColumn"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"] {
-    min-height:520px; justify-content:center; align-items:center; text-align:center; padding:0 34px; position:relative; z-index:1; gap:.5rem; }
-.kc-panel-inner h1 { color:#fff !important; font-size:2.2rem; font-weight:800; margin:.9rem 0 .35rem 0; letter-spacing:-.4px; line-height:1.15; }
-.kc-panel-inner p  { color:rgba(255,255,255,.92) !important; font-size:1rem; margin:0 0 .5rem 0; }
-.kc-panel-inner p.kc-sub { font-size:.86rem; color:rgba(255,255,255,.78) !important; max-width:250px; margin:0 auto 1.1rem auto; line-height:1.45; }
+    min-height:560px; justify-content:center; align-items:center; text-align:center; padding:0 34px; position:relative; z-index:1; }
+.kc-panel-inner h1 { color:#fff !important; font-size:2.35rem; font-weight:800; margin:.4rem 0 .5rem 0; letter-spacing:-.5px; }
+.kc-panel-inner p  { color:rgba(255,255,255,.92) !important; font-size:1.02rem; margin:0 0 .6rem 0; }
 .kc-logo { width:78px; height:78px; object-fit:contain; background:#fff; border-radius:20px; padding:9px; box-shadow:0 10px 26px rgba(15,23,42,.25); }
 [data-testid="stColumn"]:has(.kc-panel-marker) button, [data-testid="column"]:has(.kc-panel-marker) button {
-    background:transparent !important; color:#fff !important; border:2px solid #fff !important; border-radius:12px !important;
-    min-width:170px; height:44px; font-weight:700 !important; transition:all .25s ease; }
+    background:transparent !important; color:#fff !important; border:2px solid #fff !important; border-radius:14px !important;
+    min-width:170px; height:46px; font-weight:700 !important; transition:all .25s ease; }
 [data-testid="stColumn"]:has(.kc-panel-marker) button:hover, [data-testid="column"]:has(.kc-panel-marker) button:hover {
     background:#fff !important; color:#1d4ed8 !important; transform:translateY(-2px); box-shadow:0 10px 24px rgba(0,0,0,.18); }
-/* ---- right form side (shared by Login / Register / Forgot password) ---- */
-[data-testid="stColumn"]:has(.kc-form-marker), [data-testid="column"]:has(.kc-form-marker) { flex:1 1 56% !important; padding:38px 52px !important; }
-[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stVerticalBlock"] { justify-content:center; min-height:440px; }
-.kc-form-title { font-size:1.4rem; font-weight:800; color:#0f172a; line-height:1.3; margin:0 0 .3rem 0; text-align:center; }
-.kc-form-sub { color:#64748b; text-align:center; margin:0 0 .6rem 0; font-size:.92rem; }
-[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stForm"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stForm"] { border:none !important; padding:0 !important; }
-[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stForm"] [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stForm"] [data-testid="stVerticalBlock"] { min-height:0 !important; justify-content:flex-start !important; gap:.8rem !important; }
-/* labels */
-[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stWidgetLabel"] p, [data-testid="column"]:has(.kc-form-marker) [data-testid="stWidgetLabel"] p {
-    font-size:.82rem !important; font-weight:600 !important; color:#334155 !important; margin:0 0 2px 0 !important; }
-/* input boxes: one clean bordered box, no inner double border */
-[data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="input"], [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="input"] {
-    background:#ffffff !important; border:1.5px solid #cbd5e1 !important; border-radius:10px !important; min-height:46px;
-    box-shadow:none !important; transition:border-color .2s ease, box-shadow .2s ease; }
-[data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="input"]:hover, [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="input"]:hover { border-color:#94a3b8 !important; }
-[data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="input"]:focus-within, [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="input"]:focus-within {
-    border-color:#2563eb !important; box-shadow:0 0 0 3px rgba(37,99,235,.15) !important; }
-[data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="base-input"], [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="base-input"] {
-    background:transparent !important; border:none !important; box-shadow:none !important; }
+[data-testid="stColumn"]:has(.kc-form-marker), [data-testid="column"]:has(.kc-form-marker) { flex:1 1 54% !important; padding:44px 54px !important; }
+[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stVerticalBlock"] { justify-content:center; min-height:470px; }
+.kc-form-title { font-size:1.55rem; font-weight:800; color:#0f172a; line-height:1.25; margin:0 0 .25rem 0; text-align:center; }
+.kc-form-sub { color:#64748b; text-align:center; margin:0 0 1rem 0; font-size:.95rem; }
 [data-testid="stColumn"]:has(.kc-form-marker) input, [data-testid="column"]:has(.kc-form-marker) input {
-    background:transparent !important; border:none !important; box-shadow:none !important; height:44px; padding:0 14px !important;
-    color:#0f172a !important; font-size:.95rem !important; }
-[data-testid="stColumn"]:has(.kc-form-marker) input::placeholder, [data-testid="column"]:has(.kc-form-marker) input::placeholder { color:#94a3b8 !important; }
-[data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="input"] button, [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="input"] button { color:#64748b !important; }
-/* primary button */
-[data-testid="stFormSubmitButton"] button { background:linear-gradient(90deg,#1d4ed8,#2563eb) !important; color:#fff !important; border:none !important;
-    border-radius:10px !important; height:46px; font-weight:700 !important; letter-spacing:.3px; box-shadow:0 6px 16px rgba(37,99,235,.28); transition:all .2s ease; }
-[data-testid="stFormSubmitButton"] button:hover { transform:translateY(-1px); box-shadow:0 10px 22px rgba(37,99,235,.38); }
-/* secondary buttons (Forgot password? / Back to login) look like clean links */
-[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stButton"] button, [data-testid="column"]:has(.kc-form-marker) [data-testid="stButton"] button {
-    background:transparent !important; border:none !important; box-shadow:none !important; color:#1d4ed8 !important;
-    font-weight:600 !important; font-size:.88rem !important; padding:.2rem .4rem !important; min-height:0 !important; height:auto !important; }
-[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stButton"] button:hover, [data-testid="column"]:has(.kc-form-marker) [data-testid="stButton"] button:hover { text-decoration:underline; color:#1e40af !important; }
-.kc-secure { text-align:center; color:#64748b; font-size:.76rem; margin-top:.6rem; letter-spacing:.2px; }
-/* ---- information section under the card ---- */
-.kc-top { text-align:center; margin:0 auto; line-height:1.4; }
-.kc-top .t1 { font-size:.74rem; letter-spacing:2.6px; font-weight:700; color:#475569; }
-.kc-top .t2 { font-size:.78rem; color:#94a3b8; font-style:italic; margin-top:1px; }
-.kc-brand { max-width:1020px; margin:0 auto; text-align:center; }
-.kc-brand .eyebrow { font-size:.72rem; letter-spacing:2.6px; font-weight:700; color:#64748b; }
-.kc-brand .b2 { font-size:1.2rem; font-weight:800; color:#0f172a; margin-top:.1rem; letter-spacing:-.2px; }
-.kc-brand .b3 { font-size:.95rem; font-weight:600; color:#1d4ed8; margin-top:.1rem; }
-.kc-brand .b4 { font-size:.74rem; color:#64748b; letter-spacing:2px; margin-top:.25rem; font-weight:600; }
-.kc-sect { font-size:.72rem; letter-spacing:2.4px; font-weight:700; color:#475569; margin-top:14px; }
-.kc-sectsub { font-size:.8rem; color:#64748b; margin-top:2px; }
-.kc-groups { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-top:10px; text-align:left; }
-.kc-group { background:rgba(255,255,255,.75); border:1px solid #dbe3f0; border-radius:12px; padding:10px 14px 8px 14px; }
-.kc-group .gh { font-size:.66rem; letter-spacing:1.6px; font-weight:700; color:#1d4ed8; margin-bottom:5px; }
-.kc-group .gi { font-size:.82rem; color:#334155; line-height:1.85; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.kc-group .gi span { display:inline-block; width:1.5em; }
-.kc-foot { text-align:center; color:#94a3b8; font-size:.72rem; margin-top:12px; line-height:1.6; }
-/* ---- tablet / mobile ---- */
-@media (max-width: 900px) {
-  .kc-groups { grid-template-columns:1fr 1fr; }
-  .kc-panel-inner h1 { font-size:1.9rem; }
-  [data-testid="stColumn"]:has(.kc-form-marker), [data-testid="column"]:has(.kc-form-marker) { padding:32px 30px !important; }
-}
+    background:#eef1f6 !important; border:1.5px solid transparent !important; border-radius:12px !important; height:46px; color:#0f172a !important; }
+[data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="input"], [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="input"] {
+    background:#eef1f6 !important; border:1.5px solid transparent !important; border-radius:12px !important; }
+[data-testid="stColumn"]:has(.kc-form-marker) div[data-baseweb="input"]:focus-within, [data-testid="column"]:has(.kc-form-marker) div[data-baseweb="input"]:focus-within {
+    border-color:#3b82f6 !important; box-shadow:0 0 0 3px rgba(59,130,246,.18); }
+[data-testid="stFormSubmitButton"] button { background:linear-gradient(90deg,#1d4ed8,#3b82f6) !important; color:#fff !important; border:none !important;
+    border-radius:14px !important; height:48px; font-weight:700 !important; letter-spacing:.2px; box-shadow:0 10px 22px rgba(37,99,235,.35); transition:all .25s ease; }
+[data-testid="stFormSubmitButton"] button:hover { transform:translateY(-2px); box-shadow:0 14px 28px rgba(37,99,235,.45); }
+[data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stForm"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stForm"] { border:none !important; padding:0 !important; }
+.kc-foot { text-align:center; color:#64748b; font-size:.8rem; margin-top:18px; }
 @media (max-width: 760px) {
-  .block-container { padding-top:10px !important; }
-  .kc-top .t2 { display:none; }
-  [data-testid="stHorizontalBlock"]:has(.kc-form-marker) { min-height:0; }
+  .block-container { padding-top:3vh !important; }
   [data-testid="stHorizontalBlock"]:has(.kc-mode-register) { flex-direction: column-reverse !important; }
   [data-testid="stColumn"]:has(.kc-panel-marker), [data-testid="column"]:has(.kc-panel-marker),
-  [data-testid="stHorizontalBlock"]:has(.kc-mode-register) [data-testid="stColumn"]:has(.kc-panel-marker),
-  [data-testid="stHorizontalBlock"]:has(.kc-mode-register) [data-testid="column"]:has(.kc-panel-marker) { border-radius: 28px 28px 90px 90px; }
-  [data-testid="stColumn"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"] { min-height:250px; padding:20px 24px; }
-  [data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stVerticalBlock"] { min-height:0; }
-  [data-testid="stColumn"]:has(.kc-form-marker), [data-testid="column"]:has(.kc-form-marker) { padding:26px 20px !important; }
-  .kc-panel-inner h1 { font-size:1.6rem; margin-top:.6rem; }
-  .kc-form-title { font-size:1.2rem; }
-  .kc-groups { grid-template-columns:1fr; gap:10px; }
+  [data-testid="stHorizontalBlock"]:has(.kc-mode-register) [data-testid="stColumn"]:has(.kc-panel-marker) { border-radius: 30px 30px 110px 110px; }
+  [data-testid="stColumn"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"], [data-testid="column"]:has(.kc-panel-marker) [data-testid="stVerticalBlock"] { min-height:300px; }
+  [data-testid="stColumn"]:has(.kc-form-marker), [data-testid="column"]:has(.kc-form-marker) { padding:28px 22px !important; }
+  .kc-panel-inner h1 { font-size:1.8rem; }
 }
 </style>"""
 
@@ -9769,8 +9754,6 @@ def _kc_sign_in(username, password):
 def render_login_page():
     """First screen of the website: blue curved panel + form, sliding between Sign in and Register."""
     st.markdown(_KC_LOGIN_CSS, unsafe_allow_html=True)
-    st.markdown('<div class="kc-top"><div class="t1">WINDY GROUP • DIGITAL INVENTORY SYSTEM</div>'
-                '<div class="t2">Smarter Stock Management • Better Control • Efficient Operations</div></div>', unsafe_allow_html=True)
     mode = st.session_state.get("auth_mode", "login")
     if mode not in ("login", "register", "forgot"):
         mode = "login"
@@ -9780,10 +9763,10 @@ def render_login_page():
         st.markdown('<div class="kc-panel-marker"></div>', unsafe_allow_html=True)
         logo = f'<img class="kc-logo" src="data:image/png;base64,{WINDY_LOGO_B64}" alt="Windy Group">'
         if reg:
-            st.markdown(f'<div class="kc-panel-inner">{logo}<h1>Welcome Back!</h1><p class="kc-sub">Smart inventory control for efficient operations.</p><p>Already have an account?</p></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="kc-panel-inner">{logo}<h1>Welcome Back!</h1><p>Already have an account?</p></div>', unsafe_allow_html=True)
             st.button("Login", key="kc_to_login", on_click=_kc_set_mode, args=("login",))
         else:
-            st.markdown(f'<div class="kc-panel-inner">{logo}<h1>Hello, Welcome!</h1><p class="kc-sub">Smart inventory control for efficient operations.</p><p>Don\'t have an account?</p></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="kc-panel-inner">{logo}<h1>Hello, Welcome!</h1><p>Don\'t have an account?</p></div>', unsafe_allow_html=True)
             st.button("Register", key="kc_to_register", on_click=_kc_set_mode, args=("register",))
     with right:
         st.markdown(f'<div class="kc-form-marker kc-mode-{"register" if reg else "login"}"></div>', unsafe_allow_html=True)
@@ -9791,8 +9774,8 @@ def render_login_page():
             st.markdown('<div class="kc-form-title">Welcome to Windy Washing &amp; KC Washing Store Inventory</div>'
                         '<div class="kc-form-sub">Sign in with your approved account to continue</div>', unsafe_allow_html=True)
             with st.form("kc_login_form", clear_on_submit=False):
-                u = st.text_input("Username", placeholder="Enter your username", key="kc_login_user", label_visibility="visible")
-                p = st.text_input("Password", type="password", placeholder="Enter your password", key="kc_login_pass", label_visibility="visible")
+                u = st.text_input("Username", placeholder="Username", key="kc_login_user", label_visibility="collapsed")
+                p = st.text_input("Password", type="password", placeholder="Password", key="kc_login_pass", label_visibility="collapsed")
                 go = st.form_submit_button("Login", use_container_width=True)
             if go:
                 if not u.strip() or not p:
@@ -9812,7 +9795,7 @@ def render_login_page():
             st.markdown('<div class="kc-form-title">Forgot password?</div>'
                         '<div class="kc-form-sub">The Store Manager will set a temporary password for you</div>', unsafe_allow_html=True)
             with st.form("kc_forgot_form", clear_on_submit=True):
-                ru = st.text_input("Username", placeholder="Your username", key="kc_fp_user", label_visibility="visible")
+                ru = st.text_input("Username", placeholder="Your username", key="kc_fp_user", label_visibility="collapsed")
                 rs = st.form_submit_button("Request password reset", use_container_width=True)
             if rs:
                 if not ru.strip():
@@ -9825,10 +9808,10 @@ def render_login_page():
             st.markdown('<div class="kc-form-title">Create your account</div>'
                         '<div class="kc-form-sub">New accounts need Store Manager approval before sign-in</div>', unsafe_allow_html=True)
             with st.form("kc_reg_form", clear_on_submit=False):
-                ru = st.text_input("Username", placeholder="Username (3–30: letters, digits, _ . -)", key="kc_reg_user", label_visibility="visible")
-                rn = st.text_input("Full name", placeholder="Full name", key="kc_reg_name", label_visibility="visible")
-                p1 = st.text_input("Password", type="password", placeholder="Password (min 8 characters)", key="kc_reg_pw1", label_visibility="visible")
-                p2 = st.text_input("Confirm password", type="password", placeholder="Confirm password", key="kc_reg_pw2", label_visibility="visible")
+                ru = st.text_input("Username", placeholder="Username (3–30: letters, digits, _ . -)", key="kc_reg_user", label_visibility="collapsed")
+                rn = st.text_input("Full name", placeholder="Full name", key="kc_reg_name", label_visibility="collapsed")
+                p1 = st.text_input("Password", type="password", placeholder="Password (min 8 characters)", key="kc_reg_pw1", label_visibility="collapsed")
+                p2 = st.text_input("Confirm password", type="password", placeholder="Confirm password", key="kc_reg_pw2", label_visibility="collapsed")
                 rg = st.form_submit_button("Register", use_container_width=True)
             if rg:
                 if not USERNAME_RE.fullmatch(ru.strip()):
@@ -9842,40 +9825,7 @@ def render_login_page():
                 elif register_user(ru.strip(), rn.strip(), p1):
                     st.session_state["auth_mode"] = "login"
                     done("Registration request sent. The Store Manager must approve it before you can sign in.")
-    with right:
-        st.markdown('<div class="kc-secure">🔒 Authorized Personnel Only · Secure Inventory Management Portal</div>', unsafe_allow_html=True)
-    _groups = [
-        ("STORE OPERATIONS", [("📦", "Inventory", "Stock, item, quantity and product records"),
-                              ("🔄", "Transactions", "Issue, Receive and Stock Movement"),
-                              ("📥", "Receiving", "Supplier, challan and received product records"),
-                              ("📝", "Issue Ledger", "Item-wise issue history and tracking")]),
-        ("ERP &amp; CONTROL", [("⚖️", "ERP Audit", "ERP matching, variance and pending control"),
-                              ("🔍", "Physical Count", "Physical Count and stock verification"),
-                              ("📊", "Stock Report", "Stock Report, Global Inventory and analysis"),
-                              ("🛡️", "Data Health", "Data Health, Log Sheet and controlled access")]),
-        ("PLANNING &amp; MANAGEMENT", [("💰", "Budget", "Budget planning"),
-                                      ("📈", "Forecast", "Inventory forecasting"),
-                                      ("⏳", "Stock Cover", "How long current stock will last"),
-                                      ("📋", "Requisition", "Store requisition")]),
-        ("MOVEMENT &amp; SERVICE", [("🔁", "Transfer History", "Stock transfer records"),
-                                   ("🛠️", "Repair &amp; Returns", "Repair and return management"),
-                                   ("📅", "Daily Worksheet", "Daily Worksheet and operational records"),
-                                   ("🧾", "Log Sheet", "Activity and operational log")]),
-    ]
-    _group_html = "".join(
-        '<div class="kc-group"><div class="gh">' + g + '</div>' +
-        "".join(f'<div class="gi" title="{d}"><span>{ic}</span>{nm}</div>' for ic, nm, d in items) + '</div>'
-        for g, items in _groups)
-    st.markdown('<div class="kc-brand">'
-                '<div class="eyebrow">WELCOME TO WINDY GROUP</div>'
-                '<div class="b2">KC Washing &amp; Windy Washing Plant</div>'
-                '<div class="b3">Smart Inventory Management System</div>'
-                '<div class="b4">Secure • Efficient • Organized</div>'
-                '<div class="kc-sect">WHAT CAN YOU MANAGE?</div>'
-                '<div class="kc-sectsub">Stock, transactions, ERP control, receiving, verification, transfers, repairs and planning, all in one secure system.</div>'
-                f'<div class="kc-groups">{_group_html}</div>'
-                '<div class="kc-foot">© 2026 Windy Group • Smart Inventory Management System<br>Created &amp; Developed by MD Sagor Ali</div>'
-                '</div>', unsafe_allow_html=True)
+    st.markdown('<div class="kc-foot">KC &amp; Windy Smart Inventory · Created by MD. Sagor Ali</div>', unsafe_allow_html=True)
 
 
 # ============================================================
@@ -10504,1122 +10454,214 @@ def tab_high_value():
 
 
 # ============================================================
-#  REPORTS (new page, ADDITIVE ONLY, read-only): the same live data the other pages use, laid out as clean, easy-to-read
-#  reports (summary, stock, issues, purchases, budget). Nothing here writes to the database or changes another page.
-#  SPEED: data is loaded once per (factory, data-version) and cached; only the report that is open is built.
+#  REQUISITION ISSUE (new page, ADDITIVE ONLY): up to 15 items of ONE store requisition slip issued in one go,
+#  all with the same SR No. Nothing in the normal Transactions form was changed.
 # ============================================================
-NAV_REPORTS = "\U0001F4D1 Reports"
-if NAV_REPORTS not in TAB_NAMES:   # first item under "Management", directly above ERP Audit
-    TAB_NAMES.insert(TAB_NAMES.index(NAV_ERP_AUDIT), NAV_REPORTS)
-
-_RP_CSS = """<style>
-.rp-sub{color:#64748B;font-size:.86rem;margin:2px 0 6px 0}
-.rp-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin:6px 0 14px 0}
-.rp-kpi{background:#fff;border:1px solid #E2E8F0;border-left:4px solid #0F766E;border-radius:14px;padding:12px 15px;box-shadow:0 1px 3px rgba(15,23,42,.05)}
-.rp-kpi.blue{border-left-color:#2563EB}.rp-kpi.amber{border-left-color:#F59E0B}.rp-kpi.red{border-left-color:#DC2626}.rp-kpi.slate{border-left-color:#64748B}
-.rp-kl{font-size:.68rem;letter-spacing:1.2px;font-weight:700;color:#64748B;text-transform:uppercase}
-.rp-kv{font-size:1.55rem;font-weight:800;color:#172033;line-height:1.25;margin-top:2px}
-.rp-ks{font-size:.78rem;color:#64748B;margin-top:2px}
-.rp-ks .up{color:#B45309;font-weight:700}.rp-ks .dn{color:#0F766E;font-weight:700}
-.rp-card{background:#fff;border:1px solid #E2E8F0;border-radius:14px;padding:14px 16px;margin-bottom:14px;box-shadow:0 1px 3px rgba(15,23,42,.05)}
-.rp-ct{font-size:.95rem;font-weight:800;color:#172033;margin:0}
-.rp-cn{font-size:.76rem;color:#94A3B8;margin:1px 0 10px 0}
-.rp-br{display:grid;grid-template-columns:minmax(90px,36%) 1fr auto;gap:10px;align-items:center;margin:7px 0;font-size:.84rem}
-.rp-bl{color:#334155;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.rp-bt{background:#EEF2F7;border-radius:99px;height:10px;overflow:hidden}
-.rp-bf{height:100%;border-radius:99px;background:linear-gradient(90deg,#0F766E,#14B8A6)}
-.rp-bf.blue{background:linear-gradient(90deg,#2563EB,#60A5FA)}.rp-bf.amber{background:linear-gradient(90deg,#D97706,#FBBF24)}
-.rp-bv{color:#172033;font-weight:700;white-space:nowrap}
-.rp-bv small{color:#94A3B8;font-weight:600;margin-left:5px}
-.rp-tw{overflow-x:auto}
-.rp-t{width:100%;border-collapse:collapse;font-size:.83rem}
-.rp-t th{background:#F1F5F9;color:#475569;font-size:.7rem;letter-spacing:.8px;text-transform:uppercase;text-align:left;padding:8px 10px;border-bottom:1px solid #E2E8F0;white-space:nowrap}
-.rp-t td{padding:8px 10px;border-bottom:1px solid #F1F5F9;color:#1E293B}
-.rp-t tr:nth-child(even) td{background:#FAFBFD}
-.rp-t .n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
-.rp-chip{display:inline-block;padding:2px 9px;border-radius:99px;font-size:.72rem;font-weight:700;white-space:nowrap}
-.rp-chip.ok{background:#DCFCE7;color:#166534}.rp-chip.watch{background:#FEF3C7;color:#92400E}.rp-chip.over{background:#FEE2E2;color:#991B1B}
-.rp-pb{background:#EEF2F7;border-radius:99px;height:8px;min-width:90px;overflow:hidden}
-.rp-pf{height:100%;border-radius:99px}
-.rp-trend{display:flex;gap:10px;align-items:flex-end;overflow-x:auto;padding-bottom:2px}
-.rp-tcol{flex:1;min-width:64px;text-align:center}
-.rp-tbars{height:130px;display:flex;align-items:flex-end;justify-content:center;gap:5px;border-bottom:1px solid #E2E8F0}
-.rp-tb{width:40%;max-width:26px;border-radius:5px 5px 0 0;min-height:2px}
-.rp-tb.p{background:#2563EB}.rp-tb.i{background:#0F766E}
-.rp-tl{font-size:.76rem;font-weight:700;color:#334155;margin-top:5px}
-.rp-tv{font-size:.68rem;color:#64748B;line-height:1.35}
-.rp-leg{font-size:.76rem;color:#64748B;margin-top:8px}
-.rp-leg i{display:inline-block;width:10px;height:10px;border-radius:3px;margin:0 4px 0 10px;vertical-align:-1px}
-.rp-empty{color:#94A3B8;font-size:.86rem;padding:12px 2px}
-@media (max-width:640px){.rp-br{grid-template-columns:1fr auto}.rp-bt{grid-column:1/-1;order:3}.rp-kv{font-size:1.3rem}}
-</style>"""
+NAV_REQ_ISSUE = "🧾 Requisition Issue"
+if NAV_REQ_ISSUE not in TAB_NAMES:
+    TAB_NAMES.append(NAV_REQ_ISSUE)
+RI_MAX_LINES = 15
 
 
-def _rp_e(x):
-    return html_lib.escape(str("" if x is None else x)).replace("$", "&#36;")
+def _ri_verif_many(fac, sls, tx_dt):
+    """Same rule as verification_needed(), but for many items with ONE query: {sl_no: (needed, elapsed_days)}."""
+    target = tx_dt.date() if isinstance(tx_dt, datetime) else tx_dt
+    rows = q("""SELECT sl_no, date, verification_status FROM transactions
+                WHERE factory_name=%s AND sl_no = ANY(%s) AND trans_type IN ('Issued','Internal Issue') AND date IS NOT NULL""",
+             (fac, [int(x) for x in sls]))
+    by = {}
+    for r in rows:
+        d = parse_date(r.get("date"))
+        if d and d.date() < target:
+            by.setdefault(int(r["sl_no"]), []).append((d.date(), str(r.get("verification_status") or "")))
+    out = {}
+    for sl in sls:
+        ev = by.get(int(sl), [])
+        phys = [d for d, st_ in ev if st_.startswith("Physically")]
+        last_phys = max(phys) if phys else None
+        pend = [d for d, st_ in ev if not st_.startswith("Physically") and (last_phys is None or d > last_phys)]
+        if not pend:
+            out[int(sl)] = (False, 0)
+        else:
+            el = (target - min(pend)).days
+            out[int(sl)] = (el >= VERIFY_AFTER_DAYS, el)
+    return out
 
 
-def _rp_money(v):
-    return f"\u09f3{float(v):,.0f}"
+@tx
+def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified):
+    """lines = [(sl_no, qty)]. All-or-nothing: stock is re-read and locked, every line is checked first, then
+    ONE update + ONE insert (+ one audit insert) write the whole slip."""
+    user = st.session_state.get("user", "")
+    sls = [int(a) for a, _ in lines]
+    qtys = [float(b) for _, b in lines]
+    rows = run("""SELECT sl_no, COALESCE(prod_id,''), COALESCE(item_name,''), COALESCE(current_stock,0) FROM inventory
+                  WHERE factory_name=%s AND sl_no = ANY(%s) FOR UPDATE""", (fac, sls))
+    info = {int(r[0]): (str(r[1]), str(r[2]), float(r[3] or 0)) for r in (rows or [])}
+    if len(info) != len(set(sls)):
+        st.error("কিছু আইটেম আর পাওয়া যাচ্ছে না। পেজ রিফ্রেশ করে আবার চেষ্টা করুন।")
+        return False
+    short = [f"{info[sl][1]} (স্টক {info[sl][2]:g}, দিচ্ছেন {q_:g})" for sl, q_ in zip(sls, qtys) if q_ > info[sl][2] + 1e-9]
+    if short:
+        st.error("স্টক কম — কিছুই সংরক্ষণ হয়নি: " + "; ".join(short) +
+                 "। এই আইটেম আলাদাভাবে Transactions থেকে ইস্যু করুন (অন্য Unit থেকে অটো-ট্রান্সফার সেখানে আছে)।")
+        return False
+    vm = _ri_verif_many(fac, sls, tx_dt)
+    need = [info[sl][1] for sl in sls if vm.get(sl, (False, 0))[0]]
+    if need and not verified:
+        st.error("Physical verification লাগবে (৩ দিন পার হয়েছে): " + ", ".join(need) + " — টিক দিয়ে আবার সংরক্ষণ করুন।")
+        return False
+    vstat = ["Physically Verified" if (vm.get(sl, (False, 0))[0] and verified) else "Not Required" for sl in sls]
+    date_s, time_s = tx_dt.strftime(DATE_FMT), datetime.now().strftime("%I:%M %p")
+    run("""UPDATE inventory SET current_stock = current_stock - v.q
+           FROM (SELECT unnest(%s::int[]) AS sl, unnest(%s::float8[]) AS q) v
+           WHERE inventory.factory_name=%s AND inventory.sl_no=v.sl""", (sls, qtys, fac))
+    run("""INSERT INTO transactions (factory_name, officer_name, sl_no, prod_id, item_name, qty, trans_type, day, notes, date, time,
+                  verification_status, erp_grn_status, supplier_name, challan_no, po_pending_flag, po_pending_date,
+                  unit_price_at_tx, req_no)
+           SELECT %s, %s, v.sl, v.pid, v.nm, v.q, %s, %s, %s, %s, %s, v.vs, 'Not Required', '', '', '', NULL::text, NULL::float8, %s
+           FROM (SELECT unnest(%s::int[]) AS sl, unnest(%s::text[]) AS pid, unnest(%s::text[]) AS nm,
+                        unnest(%s::float8[]) AS q, unnest(%s::text[]) AS vs) v""",
+        (fac, user, ttype, tx_dt.day, notes, date_s, time_s, sr_no,
+         sls, [info[sl][0] for sl in sls], [info[sl][1] for sl in sls], qtys, vstat))
+    details = [f"{fac}: {ttype} {q_:g} of {info[sl][0]} ({info[sl][1]}) [SR {sr_no}]" for sl, q_ in zip(sls, qtys)]
+    run("""INSERT INTO audit_logs (timestamp, username, action_type, details)
+           SELECT %s, %s, 'TRANSACTION', d FROM unnest(%s::text[]) AS d""",
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user or "SYSTEM", details))
+    audit("REQUISITION_ISSUE", f"{fac}: SR {sr_no} - {len(sls)} item line(s) issued in one go")
+    return len(sls)
 
 
-def _rp_q(v):
-    s = f"{float(v):,.2f}"
-    return s.rstrip("0").rstrip(".") if "." in s else s
-
-
-def _rp_short(v):
-    v = float(v)
-    a = abs(v)
-    if a >= 1e7:
-        return f"{v / 1e7:.2f} Cr"
-    if a >= 1e5:
-        return f"{v / 1e5:.1f} L"
-    if a >= 1e3:
-        return f"{v / 1e3:.1f}K"
-    return f"{v:,.0f}"
-
-
-def _rp_ym_prev(ym):
-    y, m = int(ym[:4]), int(ym[5:7]) - 1
-    if m == 0:
-        y, m = y - 1, 12
-    return f"{y:04d}-{m:02d}"
-
-
-def _rp_ym_label(ym):
-    try:
-        return datetime.strptime(ym + "-01", "%Y-%m-%d").strftime("%b-%Y")
-    except Exception:
-        return ym
-
-
-def _rp_delta(cur, prev):
-    if prev is None or prev <= 0:
-        return ""
-    ch = (cur - prev) / prev * 100.0
-    cls, arrow = ("up", "\u25B2") if ch > 0 else ("dn", "\u25BC")
-    return f' <span class="{cls}">{arrow} {abs(ch):.0f}% vs prev. month</span>'
-
-
-def _rp_kpi(label, value, sub="", tone=""):
-    return (f'<div class="rp-kpi {tone}"><div class="rp-kl">{_rp_e(label)}</div><div class="rp-kv">{value}</div>'
-            f'<div class="rp-ks">{sub}</div></div>')
-
-
-def _rp_kpis(items):
-    return '<div class="rp-kpis">' + "".join(items) + "</div>"
-
-
-def _rp_card(title, body, note=""):
-    n = f'<div class="rp-cn">{_rp_e(note)}</div>' if note else '<div class="rp-cn"></div>'
-    return f'<div class="rp-card"><div class="rp-ct">{_rp_e(title)}</div>{n}{body}</div>'
-
-
-def _rp_empty(msg):
-    return f'<div class="rp-empty">{_rp_e(msg)}</div>'
-
-
-def _rp_bars(pairs, tone="", money=True):
-    pairs = [(str(l), float(v)) for l, v in pairs if float(v) > 0]
-    if not pairs:
-        return _rp_empty("No data for this period.")
-    mx = max(v for _, v in pairs)
-    tot = sum(v for _, v in pairs) or 1.0
-    rows = []
-    for l, v in pairs:
-        vt = _rp_money(v) if money else _rp_q(v)
-        rows.append(f'<div class="rp-br"><div class="rp-bl" title="{_rp_e(l)}">{_rp_e(l)}</div>'
-                    f'<div class="rp-bt"><div class="rp-bf {tone}" style="width:{max(v / mx * 100, 1.5):.1f}%"></div></div>'
-                    f'<div class="rp-bv">{vt}<small>{v / tot * 100:.0f}%</small></div></div>')
-    return "".join(rows)
-
-
-def _rp_tbl(heads, rows, num=()):
-    th = "".join(f'<th class="{"n" if i in num else ""}">{_rp_e(h)}</th>' for i, h in enumerate(heads))
-    body = "".join("<tr>" + "".join(f'<td class="{"n" if i in num else ""}">{c}</td>' for i, c in enumerate(r)) + "</tr>"
-                   for r in rows)
-    return f'<div class="rp-tw"><table class="rp-t"><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>'
-
-
-def _rp_show(html):
-    st.markdown(html, unsafe_allow_html=True)
-
-
-@st.cache_data(ttl=180, show_spinner=False, max_entries=6)
-def _rp_tx(fac, ver):
-    """Purchases and issues, one light row each, with the month worked out once (cached until data changes)."""
-    fsql, fp = fw(fac, "t.")
-    df = qdf_c(f"""SELECT t.factory_name, t.date, t.trans_type, t.qty, COALESCE(t.item_name,'') AS item_name,
-                   COALESCE(t.officer_name,'') AS officer, COALESCE(t.supplier_name,'') AS supplier,
-                   COALESCE(NULLIF(i.category,''),'Uncategorized') AS category, COALESCE(i.unit_price,0) AS price
-                   FROM transactions t
-                   LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
-                   WHERE t.trans_type IN ('Supplier. Rec','Issued','Internal Issue'){fsql}""", fp)
-    cols = ["factory", "ym", "kind", "qty", "item", "officer", "supplier", "category", "price", "amount"]
-    if df.empty:
-        return pd.DataFrame(columns=cols)
-    d = _parse_dates(df["date"])
-    qty = pd.to_numeric(df["qty"], errors="coerce").fillna(0.0)
-    price = pd.to_numeric(df["price"], errors="coerce").fillna(0.0)
-    return pd.DataFrame({
-        "factory": df["factory_name"], "ym": d.dt.strftime("%Y-%m").fillna(""),
-        "kind": df["trans_type"].eq("Supplier. Rec").map({True: "Purchase", False: "Issue"}),
-        "qty": qty, "item": df["item_name"], "officer": df["officer"], "supplier": df["supplier"],
-        "category": df["category"], "price": price, "amount": qty * price})[cols]
-
-
-@st.cache_data(ttl=180, show_spinner=False, max_entries=6)
-def _rp_inv(fac, ver):
-    fsql, fp = fw(fac)
-    df = qdf_c(f"""SELECT factory_name AS factory, COALESCE(item_name,'') AS item, COALESCE(size,'') AS size,
-                   COALESCE(NULLIF(category,''),'Uncategorized') AS category, COALESCE(current_stock,0) AS stock,
-                   COALESCE(unit_price,0) AS price, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit
-                   FROM inventory WHERE 1=1{fsql}""", fp)
-    if df.empty:
-        return pd.DataFrame(columns=["factory", "item", "size", "category", "stock", "price", "unit", "value"])
-    df["stock"] = pd.to_numeric(df["stock"], errors="coerce").fillna(0.0)
-    df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0.0)
-    df["value"] = df["stock"].clip(lower=0) * df["price"]
-    return df
-
-
-@st.cache_data(ttl=180, show_spinner=False, max_entries=6)
-def _rp_bud(fac, ver):
-    fsql, fp = fw(fac)
-    df = qdf_c(f"""SELECT factory_name AS factory, COALESCE(department_name,'') AS department,
-                   COALESCE(category_name,'') AS category, COALESCE(allocated_budget,0) AS allocated
-                   FROM category_budgets WHERE 1=1{fsql}""", fp)
-    if not df.empty:
-        df["allocated"] = pd.to_numeric(df["allocated"], errors="coerce").fillna(0.0)
-    return df
-
-
-def _rp_download(df, name, title):
-    if df is not None and not df.empty:
-        with st.expander("\u2B07 Download this report\u2019s data"):
-            export_buttons(df, name, title=title)
-
-
-def _rp_trend(tx, months):
-    g = tx[tx["ym"].isin(months)].groupby(["ym", "kind"])["amount"].sum().unstack(fill_value=0)
-    mx = max(float(g.max().max()) if not g.empty else 0.0, 1.0)
-    cols = []
-    for m in months:
-        p = float(g.loc[m, "Purchase"]) if (m in g.index and "Purchase" in g.columns) else 0.0
-        i = float(g.loc[m, "Issue"]) if (m in g.index and "Issue" in g.columns) else 0.0
-        cols.append(f'<div class="rp-tcol"><div class="rp-tbars">'
-                    f'<div class="rp-tb p" style="height:{p / mx * 100:.1f}%" title="Purchases {_rp_money(p)}"></div>'
-                    f'<div class="rp-tb i" style="height:{i / mx * 100:.1f}%" title="Issues {_rp_money(i)}"></div></div>'
-                    f'<div class="rp-tl">{_rp_e(_rp_ym_label(m))}</div>'
-                    f'<div class="rp-tv">{_rp_short(p)}<br>{_rp_short(i)}</div></div>')
-    leg = ('<div class="rp-leg"><i style="background:#2563EB"></i>Purchases (top number)'
-           '<i style="background:#0F766E"></i>Issues (bottom number)</div>')
-    return '<div class="rp-trend">' + "".join(cols) + "</div>" + leg
-
-
-def _rp_summary(tx, tp, prev, ym, plabel):
-    inv = _rp_inv(FAC, _data_version())
-    bud = _rp_bud(FAC, _data_version())
-    pur, iss = tp[tp["kind"] == "Purchase"], tp[tp["kind"] == "Issue"]
-    pv, iv = float(pur["amount"].sum()), float(iss["amount"].sum())
-    pp = float(prev[prev["kind"] == "Purchase"]["amount"].sum()) if prev is not None else None
-    pi = float(prev[prev["kind"] == "Issue"]["amount"].sum()) if prev is not None else None
-    allocated = float(bud["allocated"].sum()) if not bud.empty else 0.0
-    low = int((inv["stock"] <= 5).sum()) if not inv.empty else 0
-    in_stock = int((inv["stock"] > 0).sum()) if not inv.empty else 0
-    if allocated > 0:
-        pct = iv / allocated * 100.0
-        tone = "red" if pct > BUDGET_ALERT_PCT else ("amber" if pct >= 70 else "")
-        bk = _rp_kpi("Budget used", f"{pct:.1f}%", f"{_rp_money(allocated - iv)} left of {_rp_money(allocated)}", tone)
-    else:
-        bk = _rp_kpi("Budget used", "\u2014", "No budget configured", "slate")
-    _rp_show(_rp_kpis([
-        _rp_kpi("Inventory items", f"{len(inv):,}", f"{low:,} low / negative (\u2264 5)", "slate"),
-        _rp_kpi("Stock value", _rp_money(inv["value"].sum() if not inv.empty else 0), f"{in_stock:,} items in stock"),
-        _rp_kpi("Purchases", _rp_money(pv), f"{_rp_q(pur['qty'].sum())} qty \u00b7 {len(pur):,} receipts{_rp_delta(pv, pp)}", "blue"),
-        _rp_kpi("Issues", _rp_money(iv), f"{_rp_q(iss['qty'].sum())} qty \u00b7 {len(iss):,} entries{_rp_delta(iv, pi)}", "amber"),
-        bk]))
-    months = sorted([m for m in tx["ym"].unique() if m])[-6:]
-    a, b = st.columns([1.25, 1], gap="medium")
-    with a:
-        _rp_show(_rp_card("Purchases vs Issues \u2014 last 6 months", _rp_trend(tx, months) if months else
-                          _rp_empty("No dated transactions yet."), "Value in \u09f3 (L = lakh, Cr = crore)"))
-    with b:
-        cat = iss.groupby("category")["amount"].sum().sort_values(ascending=False).head(6)
-        _rp_show(_rp_card("Where issues went \u2014 by category", _rp_bars(cat.items(), "amber"), f"Period: {plabel}"))
-    top = iss.groupby("item").agg(qty=("qty", "sum"), value=("amount", "sum")).sort_values("value", ascending=False).head(8)
-    rows = [[_rp_e(i), _rp_q(r.qty), _rp_money(r.value)] for i, r in top.iterrows()]
-    _rp_show(_rp_card("Top issued items", _rp_tbl(["Item", "Qty", "Value"], rows, num=(1, 2)) if rows else
-                      _rp_empty("No issues in this period."), f"Period: {plabel}"))
-    _rp_download(top.reset_index().rename(columns={"item": "Item", "qty": "Qty", "value": "Value"}),
-                 "report_summary_top_items", "Top issued items")
-
-
-def _rp_stock():
-    inv = _rp_inv(FAC, _data_version())
-    if inv.empty:
-        _rp_show(_rp_card("Stock position", _rp_empty("No inventory items.")))
+def tab_req_issue():
+    st.title("🧾 Requisition Issue")
+    st.caption(f"একটা রিকুইজিশন স্লিপের সব আইটেম (সর্বোচ্চ {RI_MAX_LINES}টি) এক SR নম্বরে একসাথে ইস্যু করুন। "
+               "SR নম্বর বাধ্যতামূলক। স্টক কম থাকলে কিছুই সংরক্ষণ হয় না।")
+    if is_cons_view:
+        st.info("ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ ইস্যু করা যায় না)।")
         return
-    cons = "CONSOLIDATED" in str(FAC)
-    zero, neg = int((inv["stock"] == 0).sum()), int((inv["stock"] < 0).sum())
-    lowc = int(((inv["stock"] > 0) & (inv["stock"] <= 5)).sum())
-    noprice = int(((inv["stock"] > 0) & (inv["price"] <= 0)).sum())
-    _rp_show(_rp_kpis([
-        _rp_kpi("Total stock value", _rp_money(inv["value"].sum()), f"{int((inv['stock'] > 0).sum()):,} items in stock"),
-        _rp_kpi("Inventory items", f"{len(inv):,}", f"{inv['category'].nunique():,} categories", "slate"),
-        _rp_kpi("Low stock (1\u20135)", f"{lowc:,}", "Items to reorder soon", "amber"),
-        _rp_kpi("Zero / negative", f"{zero + neg:,}", f"{zero:,} zero \u00b7 {neg:,} negative", "red"),
-        _rp_kpi("Missing price", f"{noprice:,}", "In stock but price is 0", "slate")]))
-    inv = inv.assign(is_low=(inv["stock"] <= 5).astype(int))
-    g = inv.groupby("category").agg(items=("item", "size"), value=("value", "sum"), low=("is_low", "sum")).sort_values("value", ascending=False)
-    tot = float(g["value"].sum()) or 1.0
-    a, b = st.columns([1, 1.2], gap="medium")
-    with a:
-        _rp_show(_rp_card("Stock value by category", _rp_bars(g["value"].head(8).items()), "Top 8 categories"))
-    with b:
-        rows = [[_rp_e(c), f"{int(r['items']):,}", _rp_money(r["value"]), f"{r['value'] / tot * 100:.1f}%", f"{int(r['low']):,}"]
-                for c, r in g.head(12).iterrows()]
-        _rp_show(_rp_card("Category summary", _rp_tbl(["Category", "Items", "Value", "Share", "Low / zero"], rows, num=(1, 2, 3, 4))))
-    heads = ["Item", "Size", "Stock", "Unit", "Value"] + (["Factory"] if cons else [])
-    top = inv.sort_values("value", ascending=False).head(10)
-    rows = [[_rp_e(r["item"]), _rp_e(r["size"]), _rp_q(r["stock"]), _rp_e(r["unit"]), _rp_money(r["value"])]
-            + ([_rp_e(short_fac(r["factory"]))] if cons else []) for _, r in top.iterrows()]
-    _rp_show(_rp_card("Highest value stock", _rp_tbl(heads, rows, num=(2, 4)), "Top 10 items by stock value"))
-    lowdf = inv[inv["stock"] <= 5].sort_values("stock").head(12)
-    rows = [[_rp_e(r["item"]), _rp_e(r["size"]), f'<span class="rp-chip {"over" if r["stock"] <= 0 else "watch"}">{_rp_q(r["stock"])}</span>',
-             _rp_e(r["unit"])] + ([_rp_e(short_fac(r["factory"]))] if cons else []) for _, r in lowdf.iterrows()]
-    _rp_show(_rp_card("Low / negative stock", _rp_tbl(["Item", "Size", "Stock", "Unit"] + (["Factory"] if cons else []), rows, num=(2,))
-                      if rows else _rp_empty("No low-stock items."), "12 lowest items (stock \u2264 5)"))
-    _rp_download(inv[["factory", "item", "size", "category", "stock", "unit", "price", "value"]].rename(columns=str.title),
-                 "report_stock_position", "Stock position")
+    _ri_form()
 
 
-def _rp_flow(tp, kind, plabel, prev):
-    d = tp[tp["kind"] == kind]
-    word = "Purchases" if kind == "Purchase" else "Issues"
-    if d.empty:
-        _rp_show(_rp_card(word, _rp_empty(f"No {word.lower()} in this period."), f"Period: {plabel}"))
+@_frag   # typing / adding rows re-runs ONLY this block - the rest of the app is not touched
+def _ri_form():
+    fac = FAC
+    gen = st.session_state.get("ri_gen", 0)
+    lines = st.session_state.setdefault("ri_lines", [])
+    c1, c2, c3 = st.columns([1.1, 1, 1.2])
+    sr_no = c1.text_input("Requisition No. (SR No.) *", key=f"ri_sr_{gen}", placeholder="e.g. 1745").strip()
+    tx_date = c2.date_input("তারিখ", value=date.today(), max_value=date.today(), key="ri_date")
+    ttype = c3.selectbox("ধরন", list(ISSUE_TYPES), format_func=lambda c: TRANS_LABELS.get(c, c), key="ri_type")
+    notes = st.text_input("Remarks (ঐচ্ছিক — যেমন সেকশন / কে চেয়েছে)", key=f"ri_notes_{gen}")
+    confirm_existing = True
+    if sr_no:
+        used = q_c("SELECT COUNT(*) AS n FROM transactions WHERE factory_name=%s AND req_no=%s", (fac, sr_no))
+        n_used = int(used[0]["n"]) if used else 0
+        if n_used:
+            st.warning(f"⚠️ SR {sr_no} এই Unit-এ আগেই ব্যবহার হয়েছে ({n_used}টি লাইন)। একই স্লিপে আরও আইটেম যোগ করছেন তো?")
+            confirm_existing = st.checkbox(f"হ্যাঁ, SR {sr_no}-তে আরও আইটেম যোগ করছি", key=f"ri_conf_{gen}")
+
+    # ---- add one item
+    st.markdown("**➕ আইটেম যোগ করুন**")
+    a1, a2, a3 = st.columns([2.6, 1.6, 1])
+    term = a1.text_input("🔍 খুঁজুন (নাম / ERP code / size / serial)", key=f"ri_search_{gen}").strip()
+    cands = search_items(fac, term)[:30] if len(term) >= 2 else []
+    labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · স্টক {float(r['stock']):g}": r for r in cands}
+    pick = a2.selectbox("আইটেম", list(labels) if labels else ["— আগে খুঁজুন —"], key=f"ri_pick_{gen}")
+    qty_in = a3.number_input("পরিমাণ", min_value=0.0, step=1.0, format="%g", key=f"ri_qty_{gen}")
+
+    def _add():
+        pick_v = st.session_state.get(f"ri_pick_{gen}")
+        qty_v = float(st.session_state.get(f"ri_qty_{gen}") or 0)
+        date_v = st.session_state.get("ri_date", date.today())
+        if not labels or pick_v not in labels:
+            st.session_state["ri_msg"] = ("error", "আগে আইটেম খুঁজে বাছুন।")
+            return
+        r = labels[pick_v]
+        cur = st.session_state.get("ri_lines", [])
+        if len(cur) >= RI_MAX_LINES:
+            st.session_state["ri_msg"] = ("error", f"একটা স্লিপে সর্বোচ্চ {RI_MAX_LINES}টি আইটেম।")
+        elif any(int(x["sl"]) == int(r["sl_no"]) for x in cur):
+            st.session_state["ri_msg"] = ("error", "এই আইটেম তালিকায় আগেই আছে — পরিমাণ নিচে বদলান।")
+        elif qty_v <= 0:
+            st.session_state["ri_msg"] = ("error", "পরিমাণ ০-র বেশি দিন।")
+        else:
+            try:
+                need, days = verification_needed(fac, r["sl_no"], date_v)
+            except Exception:
+                need, days = False, 0
+            cur.append({"sl": int(r["sl_no"]), "pid": r["prod_id"], "name": r["item_name"], "size": r["size"],
+                        "stock": float(r["stock"]), "need": bool(need), "days": int(days)})
+            st.session_state[f"ri_q_{gen}_{int(r['sl_no'])}"] = qty_v
+            st.session_state["ri_lines"] = cur
+            st.session_state[f"ri_search_{gen}"] = ""
+            st.session_state[f"ri_qty_{gen}"] = 0.0
+            st.session_state["ri_msg"] = ("ok", f"যোগ হয়েছে: {r['item_name']}")
+    st.button("➕ তালিকায় যোগ করুন", key=f"ri_add_{gen}", on_click=_add)
+    msg = st.session_state.pop("ri_msg", None)
+    if msg:
+        (st.error if msg[0] == "error" else st.caption)(msg[1])
+
+    # ---- the list
+    st.markdown(f"**📋 এই স্লিপের আইটেম ({len(lines)}/{RI_MAX_LINES})**")
+    if not lines:
+        st.info("এখনো কোনো আইটেম যোগ হয়নি।")
         return
-    val = float(d["amount"].sum())
-    pv = float(prev[prev["kind"] == kind]["amount"].sum()) if prev is not None else None
-    other = "supplier" if kind == "Purchase" else "officer"
-    olabel = "Suppliers" if kind == "Purchase" else "Officers"
-    d = d.assign(**{other: d[other].replace("", "\u2014")})
-    _rp_show(_rp_kpis([
-        _rp_kpi(f"{word} value", _rp_money(val), _rp_delta(val, pv).strip(), "blue" if kind == "Purchase" else "amber"),
-        _rp_kpi("Total quantity", _rp_q(d["qty"].sum()), f"{len(d):,} entries", "slate"),
-        _rp_kpi("Distinct items", f"{d['item'].nunique():,}", f"{d['category'].nunique():,} categories", "slate"),
-        _rp_kpi(olabel, f"{d[other].nunique():,}", "In this period", "slate"),
-        _rp_kpi("Average per entry", _rp_money(val / len(d)), "Value", "")]))
-    tone = "blue" if kind == "Purchase" else "amber"
-    a, b = st.columns(2, gap="medium")
-    with a:
-        _rp_show(_rp_card(f"{word} by category", _rp_bars(d.groupby("category")["amount"].sum().sort_values(ascending=False).head(8).items(), tone),
-                          f"Period: {plabel}"))
-    with b:
-        _rp_show(_rp_card(f"{word} by {other}", _rp_bars(d.groupby(other)["amount"].sum().sort_values(ascending=False).head(8).items(), tone),
-                          f"Period: {plabel}"))
-    top = d.groupby("item").agg(qty=("qty", "sum"), value=("amount", "sum"), n=("qty", "size")).sort_values("value", ascending=False)
-    rows = [[_rp_e(i), _rp_q(r.qty), f"{int(r.n):,}", _rp_money(r.value)] for i, r in top.head(10).iterrows()]
-    _rp_show(_rp_card(f"Top 10 items \u2014 {word.lower()}", _rp_tbl(["Item", "Qty", "Entries", "Value"], rows, num=(1, 2, 3)),
-                      f"Period: {plabel}"))
-    _rp_download(top.reset_index().rename(columns={"item": "Item", "qty": "Qty", "value": "Value", "n": "Entries"}),
-                 f"report_{word.lower()}", f"{word} report - {plabel}")
-
-
-def _rp_budget(tp, plabel):
-    bud = _rp_bud(FAC, _data_version())
-    if bud.empty:
-        _rp_show(_rp_card("Budget vs actual", _rp_empty("No budget lines are configured for this view.")))
-        return
-    cons = "CONSOLIDATED" in str(FAC)
-    iss = tp[tp["kind"] == "Issue"]
-    spend = iss.groupby(["factory", "category"], as_index=False)["amount"].sum().rename(columns={"amount": "used"})
-    v = bud.merge(spend, on=["factory", "category"], how="left")
-    v["used"] = v["used"].fillna(0.0)
-    v["left"] = v["allocated"] - v["used"]
-    v["pct"] = (v["used"] / v["allocated"].where(v["allocated"] > 0) * 100.0).fillna(0.0)
-    v = v.sort_values("pct", ascending=False)
-    alloc, used = float(v["allocated"].sum()), float(v["used"].sum())
-    n_over = int((v["pct"] > BUDGET_ALERT_PCT).sum())
-    _rp_show(_rp_kpis([
-        _rp_kpi("Allocated budget", _rp_money(alloc), f"{len(v):,} budget lines", "slate"),
-        _rp_kpi("Used (issues)", _rp_money(used), f"Period: {plabel}", "amber"),
-        _rp_kpi("Remaining", _rp_money(alloc - used), f"{(used / alloc * 100.0 if alloc > 0 else 0):.1f}% used", "red" if alloc - used < 0 else ""),
-        _rp_kpi("Lines over alert", f"{n_over:,}", f"Alert limit {BUDGET_ALERT_PCT:g}%", "red" if n_over else "")]))
-    rows = []
-    for _, r in v.iterrows():
-        p = float(r["pct"])
-        col = "#16A34A" if p < 70 else ("#F59E0B" if p <= BUDGET_ALERT_PCT else "#DC2626")
-        chip = ("ok", "On track") if p < 70 else (("watch", "Watch") if p <= BUDGET_ALERT_PCT else ("over", "Over limit"))
-        cell = (f'<div class="rp-pb"><div class="rp-pf" style="width:{min(p, 100):.1f}%;background:{col}"></div></div>')
-        rows.append([_rp_e(r["department"]) + (f' <span style="color:#94A3B8">\u00b7 {_rp_e(short_fac(r["factory"]))}</span>' if cons else ""),
-                     _rp_e(r["category"]), _rp_money(r["allocated"]), _rp_money(r["used"]), _rp_money(r["left"]),
-                     f'{p:.1f}%', cell, f'<span class="rp-chip {chip[0]}">{chip[1]}</span>'])
-    _rp_show(_rp_card("Budget vs actual \u2014 by category",
-                      _rp_tbl(["Department", "Category", "Allocated", "Used", "Remaining", "Used %", "Progress", "Status"], rows, num=(2, 3, 4, 5)),
-                      f"Used = issues in {plabel}, matched to the budget category (same basis as the Dashboard)."))
-    _rp_download(v[["factory", "department", "category", "allocated", "used", "left", "pct"]].rename(
-        columns={"factory": "Factory", "department": "Department", "category": "Category", "allocated": "Allocated",
-                 "used": "Used", "left": "Remaining", "pct": "Used %"}), "report_budget", f"Budget report - {plabel}")
-
-
-# ------------------------------------------------------------
-#  A4 CORPORATE REPORT LAYER (Reports page only, read-only).
-#  One "model" per report (header + metadata + KPI / table / bar blocks) drives the A4 preview, the PDF and the Excel file,
-#  so the three always match. PDF / Excel are built ONLY when their download button is clicked; the preview is capped.
-# ------------------------------------------------------------
-_RPA_GROUP = "WINDY GROUP"
-_RPA_PLANT_ALL = "KC Washing & Windy Washing Plant"
-_RPA_SYSTEM = "Smart Inventory Management System"
-_RPA_TITLES = {"summary": "INVENTORY SUMMARY REPORT", "stock": "STOCK REPORT", "issue": "ISSUE REPORT",
-               "purchase": "PURCHASE REPORT", "budget": "BUDGET REPORT"}
-_RPA_PREVIEW_ROWS = 150      # rows per table drawn in the on-screen preview (PDF / Excel always hold every row)
-
-
-def _rpa_bdt(v):
-    return f"BDT {float(v):,.0f}"
-
-
-def _rpa_fmt(v, fmt):
-    try:
-        if v is None or (not isinstance(v, str) and pd.isna(v)):
-            return "-" if fmt == "date" else ""
-    except Exception:
-        pass
-    if fmt == "money":
-        return f"{float(v):,.0f}"
-    if fmt == "qty":
-        return _rp_q(v)
-    if fmt == "int":
-        return f"{int(v):,}"
-    if fmt == "pct":
-        return f"{float(v):.1f}%"
-    if fmt == "date":
+    h = st.columns([0.4, 3.2, 1.2, 1.0, 1.3, 1.5, 0.7])
+    for col, t in zip(h, ["#", "আইটেম", "ERP Code", "স্টক", "ইস্যু পরিমাণ", "অবস্থা", ""]):
+        col.caption(t)
+    remove = None
+    qtys, bad = [], False
+    for i, ln in enumerate(lines):
+        r = st.columns([0.4, 3.2, 1.2, 1.0, 1.3, 1.5, 0.7])
+        r[0].write(i + 1)
+        r[1].write(f"{ln['name']} [{ln['size'] or '-'}]")
+        r[2].write(ln["pid"])
+        r[3].write(f"{ln['stock']:g}")
+        q_ = r[4].number_input("q", min_value=0.0, step=1.0, format="%g", key=f"ri_q_{gen}_{ln['sl']}", label_visibility="collapsed")
+        qtys.append(float(q_))
+        if q_ <= 0:
+            r[5].write("⚠️ পরিমাণ দিন")
+            bad = True
+        elif q_ > ln["stock"] + 1e-9:
+            r[5].write("⛔ স্টক কম")
+            bad = True
+        elif ln["need"]:
+            r[5].write(f"🔎 যাচাই লাগবে ({ln['days']} দিন)")
+        else:
+            r[5].write("✅")
+        if r[6].button("✖", key=f"ri_rm_{gen}_{ln['sl']}", help="সারি মুছুন"):
+            remove = i
+    if remove is not None:
+        lines.pop(remove)
+        st.session_state["ri_lines"] = lines
         try:
-            return v.strftime(DATE_FMT)
-        except Exception:
-            return str(v)
-    s = str(v).strip()
-    return s if s else "-"
-
-
-@st.cache_data(ttl=180, show_spinner=False, max_entries=4)
-def _rp_invd(fac, ver):
-    """Stock list with the identifying fields (serial, ERP code) for the printed Stock report."""
-    fsql, fp = fw(fac)
-    df = qdf_c(f"""SELECT factory_name AS factory, COALESCE(item_name,'') AS item, COALESCE(size,'') AS size,
-                   COALESCE(serial_no,'') AS serial, COALESCE(prod_id,'') AS erp,
-                   COALESCE(NULLIF(category,''),'Uncategorized') AS category, COALESCE(current_stock,0) AS stock,
-                   COALESCE(unit_price,0) AS price, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit
-                   FROM inventory WHERE 1=1{fsql} ORDER BY factory_name, item_name, size""", fp)
-    if df.empty:
-        return df
-    df["stock"] = pd.to_numeric(df["stock"], errors="coerce").fillna(0.0)
-    df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0.0)
-    df["value"] = df["stock"].clip(lower=0) * df["price"]
-    return df
-
-
-@st.cache_data(ttl=180, show_spinner=False, max_entries=4)
-def _rp_txd(fac, ver):
-    """Purchase / issue lines with date, serial, ERP code, challan, status (same rows and value basis as _rp_tx)."""
-    fsql, fp = fw(fac, "t.")
-    df = qdf_c(f"""SELECT t.id, t.factory_name, t.date, t.trans_type, t.qty, COALESCE(t.item_name,'') AS item,
-                   COALESCE(i.serial_no,'') AS serial, COALESCE(NULLIF(t.prod_id,''), i.prod_id, '') AS erp,
-                   COALESCE(t.officer_name,'') AS officer, COALESCE(t.supplier_name,'') AS supplier,
-                   COALESCE(t.challan_no,'') AS challan, COALESCE(t.verification_status,'') AS status,
-                   COALESCE(NULLIF(i.category,''),'Uncategorized') AS category, COALESCE(i.unit_price,0) AS price
-                   FROM transactions t
-                   LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
-                   WHERE t.trans_type IN ('Supplier. Rec','Issued','Internal Issue'){fsql}""", fp)
-    cols = ["id", "factory", "date", "ym", "kind", "qty", "item", "serial", "erp", "officer", "supplier", "challan",
-            "status", "category", "amount"]
-    if df.empty:
-        return pd.DataFrame(columns=cols)
-    d = _parse_dates(df["date"])
-    qty = pd.to_numeric(df["qty"], errors="coerce").fillna(0.0)
-    price = pd.to_numeric(df["price"], errors="coerce").fillna(0.0)
-    out = pd.DataFrame({
-        "id": df["id"], "factory": df["factory_name"], "date": d, "ym": d.dt.strftime("%Y-%m").fillna(""),
-        "kind": df["trans_type"].eq("Supplier. Rec").map({True: "Purchase", False: "Issue"}), "qty": qty,
-        "item": df["item"], "serial": df["serial"], "erp": df["erp"], "officer": df["officer"], "supplier": df["supplier"],
-        "challan": df["challan"], "status": df["status"], "category": df["category"], "amount": qty * price})
-    return out.sort_values(["date", "id"], kind="stable")[cols]
-
-
-def _rpa_table(title, cols, df, note="", xcols=(), total=None, main=False):
-    """cols / xcols: (key, header, fmt, weight, align). xcols appear in the Excel file only."""
-    return {"t": "table", "title": title, "note": note, "cols": list(cols), "xcols": list(xcols), "df": df,
-            "total": total, "main": main}
-
-
-def _rpa_status_stock(s):
-    return "Negative" if s < 0 else ("Out of stock" if s == 0 else ("Low" if s <= 5 else "In stock"))
-
-
-def _rpa_model_stock(fac):
-    inv = _rp_invd(fac, _data_version())
-    blocks = []
-    if inv.empty:
-        return {"landscape": False, "blocks": [{"t": "text", "text": "No inventory items for this selection."}]}
-    st_ = inv["stock"]
-    blocks.append({"t": "kpis", "items": [
-        ("Inventory items", f"{len(inv):,}"), ("Stock value", _rpa_bdt(inv["value"].sum())),
-        ("In stock", f"{int((st_ > 0).sum()):,}"), ("Low stock (1-5)", f"{int(((st_ > 0) & (st_ <= 5)).sum()):,}"),
-        ("Zero / negative", f"{int((st_ <= 0).sum()):,}")]})
-    t = pd.DataFrame({
-        "sl": range(1, len(inv) + 1),
-        "item": inv["item"] + inv["size"].map(lambda s: f" [{s}]" if str(s).strip() else ""),
-        "serial": inv["serial"], "erp": inv["erp"], "factory": inv["factory"].map(short_fac),
-        "stock": inv["stock"], "status": st_.map(_rpa_status_stock),
-        "unit": inv["unit"], "price": inv["price"], "value": inv["value"], "category": inv["category"]})
-    cols = [("sl", "SL", "int", 0.5, "r"), ("item", "Item", "text", 3.2, "l"), ("serial", "Serial", "text", 1.5, "l"),
-            ("erp", "ERP Code", "text", 1.5, "l"), ("factory", "Factory", "text", 1.1, "l"),
-            ("stock", "Current Stock", "qty", 1.2, "r"), ("status", "Status", "text", 1.1, "l")]
-    xc = [("unit", "Unit", "text", 1, "l"), ("price", "Unit Price (BDT)", "money", 1, "r"),
-          ("value", "Stock Value (BDT)", "money", 1, "r"), ("category", "Category", "text", 1, "l")]
-    blocks.append(_rpa_table("Stock position", cols, t, xcols=xc, main=True))
-    return {"landscape": False, "blocks": blocks}
-
-
-def _rpa_flow_rows(fac, kind, ym):
-    d = _rp_txd(fac, _data_version())
-    d = d[d["kind"] == kind]
-    return d[d["ym"] == ym] if ym else d
-
-
-def _rpa_model_flow(fac, kind, ym, plabel):
-    d = _rpa_flow_rows(fac, kind, ym)
-    word = "Purchases" if kind == "Purchase" else "Issues"
-    if d.empty:
-        return {"landscape": True, "blocks": [{"t": "text", "text": f"No {word.lower()} in this period."}]}
-    val = float(d["amount"].sum())
-    blocks = [{"t": "kpis", "items": [
-        (f"{word} value", _rpa_bdt(val)), ("Total quantity", _rp_q(d["qty"].sum())), ("Entries", f"{len(d):,}"),
-        ("Distinct items", f"{d['item'].nunique():,}"), ("Average / entry", _rpa_bdt(val / len(d)))]}]
-    base = pd.DataFrame({"sl": range(1, len(d) + 1), "date": d["date"].values, "item": d["item"].values,
-                         "qty": d["qty"].values, "factory": d["factory"].map(short_fac).values,
-                         "erp": d["erp"].values, "serial": d["serial"].values, "officer": d["officer"].values,
-                         "supplier": d["supplier"].values, "challan": d["challan"].values,
-                         "status": d["status"].values, "value": d["amount"].values, "category": d["category"].values})
-    if kind == "Issue":
-        cols = [("sl", "SL", "int", 0.5, "r"), ("date", "Date", "date", 1.1, "l"), ("item", "Item", "text", 3.0, "l"),
-                ("serial", "Serial", "text", 1.3, "l"), ("erp", "ERP Code", "text", 1.3, "l"), ("qty", "Qty", "qty", 0.8, "r"),
-                ("officer", "Officer", "text", 1.5, "l"), ("factory", "Factory", "text", 1.0, "l"),
-                ("status", "Status", "text", 1.1, "l")]
-        xc = [("value", "Value (BDT)", "money", 1, "r"), ("category", "Category", "text", 1, "l")]
-        total = None
-    else:
-        cols = [("sl", "SL", "int", 0.5, "r"), ("date", "Date", "date", 1.1, "l"), ("item", "Item", "text", 3.2, "l"),
-                ("qty", "Qty", "qty", 0.8, "r"), ("supplier", "Supplier", "text", 2.0, "l"),
-                ("challan", "Challan", "text", 1.3, "l"), ("value", "Purchase Value (BDT)", "money", 1.4, "r"),
-                ("factory", "Factory", "text", 1.0, "l")]
-        xc = [("erp", "ERP Code", "text", 1, "l"), ("category", "Category", "text", 1, "l")]
-        total = {"item": "Total", "qty": float(d["qty"].sum()), "value": val}
-    blocks.append(_rpa_table(f"{word} register", cols, base, xcols=xc, total=total, main=True))
-    return {"landscape": True, "blocks": blocks}
-
-
-def _rpa_model_budget(fac, ym, plabel):
-    bud = _rp_bud(fac, _data_version())
-    if bud.empty:
-        return {"landscape": True, "blocks": [{"t": "text", "text": "No budget lines are configured for this view."}]}
-    cons = "CONSOLIDATED" in str(fac)
-    iss = _rpa_flow_rows(fac, "Issue", ym)
-    spend = iss.groupby(["factory", "category"], as_index=False)["amount"].sum().rename(columns={"amount": "used"})
-    v = bud.merge(spend, on=["factory", "category"], how="left")
-    v["used"] = v["used"].fillna(0.0)
-    v["left"] = v["allocated"] - v["used"]
-    v["pct"] = (v["used"] / v["allocated"].where(v["allocated"] > 0) * 100.0).fillna(0.0)
-    v = v.sort_values("pct", ascending=False)
-    alloc, used = float(v["allocated"].sum()), float(v["used"].sum())
-    n_over = int((v["pct"] > BUDGET_ALERT_PCT).sum())
-    blocks = [{"t": "kpis", "items": [
-        ("Allocated budget", _rpa_bdt(alloc)), ("Used (issues)", _rpa_bdt(used)), ("Remaining", _rpa_bdt(alloc - used)),
-        ("Utilization", f"{(used / alloc * 100.0 if alloc > 0 else 0):.1f}%"), ("Lines over alert", f"{n_over:,}")]}]
-    t = pd.DataFrame({
-        "dept": v["department"] + (v["factory"].map(lambda f: f" ({short_fac(f)})") if cons else ""),
-        "category": v["category"], "alloc": v["allocated"], "used": v["used"], "left": v["left"], "pct": v["pct"],
-        "status": v["pct"].map(lambda p: "On track" if p < 70 else ("Watch" if p <= BUDGET_ALERT_PCT else "Over limit"))})
-    cols = [("dept", "Department", "text", 2.0, "l"), ("category", "Category", "text", 2.4, "l"),
-            ("alloc", "Budget (BDT)", "money", 1.3, "r"), ("used", "Used (BDT)", "money", 1.3, "r"),
-            ("left", "Remaining (BDT)", "money", 1.4, "r"), ("pct", "Utilization", "pct", 1.0, "r"),
-            ("status", "Status", "text", 1.1, "l")]
-    total = {"dept": "Total", "alloc": alloc, "used": used, "left": alloc - used,
-             "pct": (used / alloc * 100.0 if alloc > 0 else 0.0)}
-    blocks.append(_rpa_table("Budget vs actual by category", cols, t, total=total, main=True,
-                             note=f"Used = issues in {plabel}, matched to the budget category."))
-    return {"landscape": True, "blocks": blocks}
-
-
-def _rpa_model_summary(fac, ym, plabel):
-    ver = _data_version()
-    tx = _rp_tx(fac, ver)
-    tp = tx[tx["ym"] == ym] if ym else tx
-    inv = _rp_inv(fac, ver)
-    bud = _rp_bud(fac, ver)
-    pur, iss = tp[tp["kind"] == "Purchase"], tp[tp["kind"] == "Issue"]
-    pv, iv = float(pur["amount"].sum()), float(iss["amount"].sum())
-    allocated = float(bud["allocated"].sum()) if not bud.empty else 0.0
-    bu = f"{iv / allocated * 100.0:.1f}%" if allocated > 0 else "n/a"
-    blocks = [{"t": "kpis", "items": [
-        ("Inventory items", f"{len(inv):,}"), ("Stock value", _rpa_bdt(inv["value"].sum() if not inv.empty else 0)),
-        ("Purchases", _rpa_bdt(pv)), ("Issues", _rpa_bdt(iv)), ("Budget used", bu)]}]
-    months = sorted([m for m in tx["ym"].unique() if m])[-6:]
-    if months:
-        g = tx[tx["ym"].isin(months)].groupby(["ym", "kind"])["amount"].sum().unstack(fill_value=0)
-        tr = pd.DataFrame({"m": [_rp_ym_label(m) for m in months],
-                           "p": [float(g.loc[m, "Purchase"]) if (m in g.index and "Purchase" in g.columns) else 0.0 for m in months],
-                           "i": [float(g.loc[m, "Issue"]) if (m in g.index and "Issue" in g.columns) else 0.0 for m in months]})
-        blocks.append(_rpa_table("Purchases vs Issues - last 6 months", [
-            ("m", "Month", "text", 1.5, "l"), ("p", "Purchases (BDT)", "money", 1.5, "r"), ("i", "Issues (BDT)", "money", 1.5, "r")], tr))
-    cat = iss.groupby("category")["amount"].sum().sort_values(ascending=False).head(6)
-    blocks.append({"t": "bars", "title": "Where issues went - by category", "note": f"Period: {plabel}",
-                   "pairs": [(str(k), float(x)) for k, x in cat.items() if x > 0]})
-    top = iss.groupby("item").agg(qty=("qty", "sum"), value=("amount", "sum")).sort_values("value", ascending=False).head(8)
-    top = top.reset_index()
-    top.insert(0, "sl", range(1, len(top) + 1))
-    blocks.append(_rpa_table("Top issued items", [("sl", "SL", "int", 0.5, "r"), ("item", "Item", "text", 3.5, "l"),
-                                                  ("qty", "Qty", "qty", 1, "r"), ("value", "Value (BDT)", "money", 1.3, "r")],
-                             top, note=f"Period: {plabel}"))
-    return {"landscape": False, "blocks": blocks}
-
-
-@st.cache_data(ttl=180, show_spinner=False, max_entries=10)
-def _rpa_model(fac, ver, kind, ym, plabel):
-    m = {"stock": lambda: _rpa_model_stock(fac), "issue": lambda: _rpa_model_flow(fac, "Issue", ym, plabel),
-         "purchase": lambda: _rpa_model_flow(fac, "Purchase", ym, plabel), "budget": lambda: _rpa_model_budget(fac, ym, plabel),
-         "summary": lambda: _rpa_model_summary(fac, ym, plabel)}[kind]()
-    m["kind"], m["title"] = kind, _RPA_TITLES[kind]
-    return m
-
-
-def _rpa_identity(fac, kind, plabel):
-    """Header / metadata / footer values; the generated time and user are read fresh (never cached)."""
-    now = local_now().strftime("%d-%b-%Y %I:%M %p")
-    user = str(st.session_state.get("user") or "Guest")
-    plant = _RPA_PLANT_ALL if "CONSOLIDATED" in str(fac) else str(fac)
-    unit = "All units (Consolidated)" if "CONSOLIDATED" in str(fac) else str(fac)
-    return {"group": _RPA_GROUP, "plant": plant, "title": _RPA_TITLES[kind], "period": plabel, "now": now, "user": user,
-            "meta": [("Factory / Unit", unit), ("Report Type", _RPA_TITLES[kind].title()), ("Reporting Period", plabel),
-                     ("Generated Date", now), ("Generated By", user)]}
-
-
-# ---------- A4 HTML preview (also the print document) ----------
-_RPA_CSS = """<style>
-*{box-sizing:border-box}body{margin:0;background:#E5E7EB;font-family:'Segoe UI',Arial,Helvetica,sans-serif;color:#111827}
-.bar{position:sticky;top:0;z-index:5;background:#1F2937;padding:8px 14px;display:flex;gap:10px;align-items:center}
-.bar button{background:#0F766E;color:#fff;border:0;border-radius:6px;padding:7px 16px;font-weight:700;cursor:pointer;font-size:13px}
-.bar span{color:#D1D5DB;font-size:12px}
-.wrap{padding:16px 0}
-.pg{background:#fff;margin:0 auto 16px auto;padding:14mm 14mm 10mm 14mm;box-shadow:0 2px 10px rgba(0,0,0,.25);display:flex;flex-direction:column;width:210mm;min-height:297mm}
-.pg.ls{width:297mm;min-height:210mm}
-.bd{flex:1}
-.lh{text-align:center;border-bottom:2px solid #0F172A;padding-bottom:6px;margin-bottom:8px}
-.lh .g{font-size:20px;font-weight:800;letter-spacing:3px}.lh .p{font-size:12px;color:#374151;margin-top:2px}
-.lh .t{font-size:15px;font-weight:800;margin-top:6px;letter-spacing:1px}
-.rh{font-size:10px;color:#6B7280;border-bottom:1px solid #9CA3AF;padding-bottom:3px;margin-bottom:8px;display:flex;justify-content:space-between}
-table.mt{width:100%;border-collapse:collapse;font-size:10.5px;margin-bottom:10px}
-table.mt td{border:1px solid #9CA3AF;padding:3px 7px}table.mt td.k{background:#F3F4F6;font-weight:700;width:17%}
-table.kp{width:100%;border-collapse:collapse;margin:4px 0 12px 0}
-table.kp td{border:1px solid #9CA3AF;padding:5px 8px;text-align:center;width:20%}
-table.kp .l{font-size:8.5px;text-transform:uppercase;letter-spacing:.6px;color:#4B5563}table.kp .v{font-size:12.5px;font-weight:800;margin-top:2px}
-.st{font-size:11.5px;font-weight:800;margin:10px 0 1px 0}.sn{font-size:9px;color:#6B7280;margin-bottom:4px}
-table.dt{width:100%;border-collapse:collapse;font-size:9.5px;margin-bottom:6px}
-table.dt th{background:#E5E7EB;border:1px solid #6B7280;padding:4px 5px;text-align:left;font-weight:700}
-table.dt td{border:1px solid #9CA3AF;padding:3px 5px;vertical-align:top;word-break:break-word}
-table.dt tr:nth-child(even) td{background:#F9FAFB}
-table.dt .r{text-align:right;white-space:nowrap}table.dt tr.tot td{font-weight:800;background:#F3F4F6;border-top:2px solid #374151}
-.neg{color:#B91C1C;font-weight:700}.wat{color:#B45309;font-weight:700}
-.bb{background:#E5E7EB;height:9px}.bb i{display:block;height:9px;background:#374151}
-.ft{border-top:1px solid #6B7280;margin-top:10px;padding-top:4px;font-size:8.5px;color:#4B5563;display:flex;justify-content:space-between;gap:10px}
-.ft b{color:#111827}.note{font-size:9px;color:#6B7280;margin-top:6px}
-@media print{@page{size:A4 __ORI__;margin:0}body{background:#fff}.bar{display:none}.wrap{padding:0}
-.pg{margin:0;box-shadow:none;page-break-after:always;break-after:page}.pg:last-child{page-break-after:auto}}
-</style>"""
-
-
-def _rpa_cell_cls(txt):
-    t = str(txt)
-    if t in ("Negative", "Out of stock", "Over limit"):
-        return " neg"
-    if t in ("Low", "Watch"):
-        return " wat"
-    return ""
-
-
-def _rpa_tbl_html(tb, rows_df, with_total, cols=None):
-    cols = cols or tb["cols"]
-    tw = sum(c[3] for c in cols) or 1.0
-    th = "".join(f'<th class="{"r" if c[4] == "r" else ""}" style="width:{c[3] / tw * 100:.1f}%">{_rp_e(c[1])}</th>' for c in cols)
-    body = []
-    for r in rows_df.itertuples(index=False):
-        d = r._asdict() if hasattr(r, "_asdict") else {}
-        tds = []
-        for c in cols:
-            txt = _rpa_fmt(d.get(c[0]), c[2])
-            tds.append(f'<td class="{"r" if c[4] == "r" else ""}{_rpa_cell_cls(txt) if c[0] == "status" else ""}">{_rp_e(txt)}</td>')
-        body.append("<tr>" + "".join(tds) + "</tr>")
-    if with_total and tb.get("total"):
-        tt = tb["total"]
-        body.append('<tr class="tot">' + "".join(
-            f'<td class="{"r" if c[4] == "r" else ""}">{_rp_e(_rpa_fmt(tt[c[0]], c[2])) if c[0] in tt else ""}</td>' for c in cols) + "</tr>")
-    return f'<table class="dt"><thead><tr>{th}</tr></thead><tbody>{"".join(body)}</tbody></table>'
-
-
-def _rpa_bars_html(pairs):
-    if not pairs:
-        return '<div class="note">No data for this period.</div>'
-    mx, tot = max(v for _, v in pairs) or 1.0, sum(v for _, v in pairs) or 1.0
-    rows = "".join(f'<tr><td>{_rp_e(l)}</td><td style="width:38%"><div class="bb"><i style="width:{max(v / mx * 100, 1.5):.1f}%"></i></div></td>'
-                   f'<td class="r">{v:,.0f}</td><td class="r">{v / tot * 100:.0f}%</td></tr>' for l, v in pairs)
-    return ('<table class="dt"><thead><tr><th>Category</th><th>Share</th><th class="r">Value (BDT)</th><th class="r">%</th></tr></thead>'
-            f'<tbody>{rows}</tbody></table>')
-
-
-def _rpa_preview_html(model, ident):
-    ls = model["landscape"]
-    cap, first_cost, cont_cost = (22, 11, 3) if ls else (36, 12, 3)
-    pages, cur, used, first = [], [], 0, True
-    capnote = ""
-
-    def newpage():
-        nonlocal cur, used, first
-        pages.append(cur)
-        cur, used, first = [], 0, False
-
-    used = first_cost
-    for b in model["blocks"]:
-        t = b["t"]
-        if t == "kpis":
-            if used + 3 > cap and cur:
-                newpage()
-            cur.append("<table class='kp'><tr>" + "".join(
-                f'<td><div class="l">{_rp_e(l)}</div><div class="v">{_rp_e(v)}</div></td>' for l, v in b["items"]) + "</tr></table>")
-            used += 3
-        elif t == "text":
-            cur.append(f'<div class="note" style="font-size:11px">{_rp_e(b["text"])}</div>')
-            used += 2
-        elif t == "bars":
-            need = 3 + len(b["pairs"])
-            if used + need > cap and cur:
-                newpage()
-            cur.append(f'<div class="st">{_rp_e(b["title"])}</div><div class="sn">{_rp_e(b["note"])}</div>' + _rpa_bars_html(b["pairs"]))
-            used += need
-        else:
-            df = b["df"]
-            total_rows = len(df)
-            shown = df.head(_RPA_PREVIEW_ROWS)
-            if total_rows > _RPA_PREVIEW_ROWS:
-                capnote = (f"Preview shows the first {_RPA_PREVIEW_ROWS:,} of {total_rows:,} rows. "
-                           "The PDF and Excel downloads contain every row.")
-            i, head_done, n = 0, False, len(shown)
-            while i < n or (n == 0 and not head_done):
-                room = cap - used - (3 if not head_done else 1)
-                if room < 3 and cur:
-                    newpage()
-                    room = cap - used - 1
-                take = max(1, min(room, n - i)) if n else 0
-                chunk = shown.iloc[i:i + take]
-                last = (i + take >= n) and total_rows <= _RPA_PREVIEW_ROWS
-                if not head_done:
-                    cur.append(f'<div class="st">{_rp_e(b["title"])}</div>' + (f'<div class="sn">{_rp_e(b["note"])}</div>' if b["note"] else ""))
-                    used += 2
-                else:
-                    cur.append('<div class="sn">(continued)</div>')
-                    used += 1
-                cur.append(_rpa_tbl_html(b, chunk, last))
-                used += take + 1
-                head_done = True
-                i += take
-                if i < n:
-                    newpage()
-                if n == 0:
-                    break
-    if capnote:
-        cur.append(f'<div class="note">{_rp_e(capnote)}</div>')
-    pages.append(cur)
-    total = len(pages)
-    out = []
-    for pno, frags in enumerate(pages, 1):
-        if pno == 1:
-            head = (f'<div class="lh"><div class="g">{_rp_e(ident["group"])}</div><div class="p">{_rp_e(ident["plant"])}</div>'
-                    f'<div class="t">{_rp_e(ident["title"])}</div></div><table class="mt">'
-                    + "".join(f'<tr><td class="k">{_rp_e(a)}</td><td>{_rp_e(b)}</td></tr>' for a, b in ident["meta"]) + "</table>")
-        else:
-            head = (f'<div class="rh"><span><b>{_rp_e(ident["group"])}</b> - {_rp_e(ident["title"])}</span>'
-                    f'<span>{_rp_e(ident["period"])}</span></div>')
-        foot = (f'<div class="ft"><div><b>Windy Group • {_RPA_PLANT_ALL}</b><br>{_RPA_SYSTEM}</div>'
-                f'<div style="text-align:center">Generated by: {_rp_e(ident["user"])}<br>Generated: {_rp_e(ident["now"])}</div>'
-                f'<div style="text-align:right"><b>Page {pno} of {total}</b></div></div>')
-        out.append(f'<div class="pg{" ls" if ls else ""}"><div class="bd">{head}{"".join(frags)}</div>{foot}</div>')
-    css = _RPA_CSS.replace("__ORI__", "landscape" if ls else "portrait")
-    bar = '<div class="bar"><button onclick="window.print()">\U0001F5A8️ Print Report</button><span>Preview the complete report first - scroll through every page. Print when ready (prints this report only, A4 ' + ("landscape" if ls else "portrait") + ').</span></div>'
-    return f"<!doctype html><html><head><meta charset='utf-8'>{css}</head><body>{bar}<div class='wrap'>{''.join(out)}</div></body></html>", total
-
-
-# ---------- PDF ----------
-def _rpa_pdf(model, ident):
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4, landscape
-    from reportlab.lib.styles import ParagraphStyle
-    from reportlab.lib.units import mm
-    from reportlab.pdfgen import canvas as rl_canvas
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-    from reportlab.graphics.shapes import Drawing, Rect
-
-    ls = model["landscape"]
-    page = landscape(A4) if ls else A4
-    M = 14 * mm
-    fw_ = page[0] - 2 * M
-    C = _pdf_clean
-    sty = lambda n, **k: ParagraphStyle(n, fontName=k.pop("fontName", "Helvetica"), **k)
-    s_c = sty("c", fontSize=7.8, leading=9.6)
-    s_r = sty("r", fontSize=7.8, leading=9.6, alignment=2)
-    s_h = sty("h", fontSize=7.8, leading=9.6, fontName="Helvetica-Bold")
-    s_hr = sty("hr", fontSize=7.8, leading=9.6, fontName="Helvetica-Bold", alignment=2)
-    s_b = sty("b", fontSize=7.8, leading=9.6, fontName="Helvetica-Bold")
-    s_br = sty("br", fontSize=7.8, leading=9.6, fontName="Helvetica-Bold", alignment=2)
-    s_t = sty("t", fontSize=10.5, leading=13, fontName="Helvetica-Bold", spaceBefore=8, spaceAfter=1)
-    s_n = sty("n", fontSize=7.5, leading=9, textColor=colors.HexColor("#6B7280"), spaceAfter=3)
-    grid, dark = colors.HexColor("#9CA3AF"), colors.HexColor("#6B7280")
-
-    class NC(rl_canvas.Canvas):
-        def __init__(self, *a, **k):
-            super().__init__(*a, **k)
-            self._saved = []
-
-        def showPage(self):
-            self._saved.append(dict(self.__dict__))
-            self._startPage()
-
-        def save(self):
-            n = len(self._saved)
-            for st_ in self._saved:
-                self.__dict__.update(st_)
-                self._footer(n)
-                super().showPage()
-            super().save()
-
-        def _footer(self, n):
-            w = self._pagesize[0]
-            self.setStrokeColor(dark)
-            self.setLineWidth(0.6)
-            self.line(M, 14 * mm, w - M, 14 * mm)
-            self.setFillColor(colors.HexColor("#111827"))
-            self.setFont("Helvetica-Bold", 7.5)
-            self.drawString(M, 10.2 * mm, C(f"Windy Group \u00b7 {_RPA_PLANT_ALL}").replace("&amp;", "&"))
-            self.setFont("Helvetica", 7.2)
-            self.setFillColor(colors.HexColor("#4B5563"))
-            self.drawString(M, 6.8 * mm, _RPA_SYSTEM)
-            self.drawCentredString(w / 2 + 20 * mm, 10.2 * mm, C("Generated by: " + ident["user"]).replace("&amp;", "&"))
-            self.drawCentredString(w / 2 + 20 * mm, 6.8 * mm, "Generated: " + ident["now"])
-            self.setFont("Helvetica-Bold", 8)
-            self.setFillColor(colors.HexColor("#111827"))
-            self.drawRightString(w - M, 10.2 * mm, f"Page {self._pageNumber} of {n}")
-
-    def later(c, d):
-        c.saveState()
-        c.setFont("Helvetica", 7.5)
-        c.setFillColor(colors.HexColor("#6B7280"))
-        c.drawString(M, page[1] - 9 * mm, C(f"{ident['group']} - {ident['title']}").replace("&amp;", "&"))
-        c.drawRightString(page[0] - M, page[1] - 9 * mm, C(ident["period"]).replace("&amp;", "&"))
-        c.setStrokeColor(grid)
-        c.line(M, page[1] - 10.5 * mm, page[0] - M, page[1] - 10.5 * mm)
-        c.restoreState()
-
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=page, leftMargin=M, rightMargin=M, topMargin=14 * mm, bottomMargin=19 * mm,
-                            title=f"{ident['title']} - {ident['period']}", author="Windy Group")
-    el = []
-    el.append(Paragraph(C(ident["group"]), sty("g", fontSize=19, leading=23, fontName="Helvetica-Bold", alignment=1)))
-    el.append(Paragraph(C(ident["plant"]), sty("p", fontSize=10.5, leading=13, alignment=1, textColor=colors.HexColor("#374151"))))
-    el.append(Paragraph(C(ident["title"]), sty("tt", fontSize=13.5, leading=17, fontName="Helvetica-Bold", alignment=1, spaceBefore=4)))
-    ln = Table([[""]], colWidths=[fw_], rowHeights=[3])
-    ln.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, -1), 1.6, colors.HexColor("#0F172A"))]))
-    el += [ln, Spacer(1, 5)]
-    mt = Table([[Paragraph(C(a), s_h), Paragraph(C(b), s_c)] for a, b in ident["meta"]], colWidths=[fw_ * 0.2, fw_ * 0.8])
-    mt.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.4, grid), ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F3F4F6")),
-                            ("TOPPADDING", (0, 0), (-1, -1), 2.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5)]))
-    el += [mt, Spacer(1, 8)]
-
-    for b in model["blocks"]:
-        t = b["t"]
-        if t == "text":
-            el.append(Paragraph(C(b["text"]), s_c))
-        elif t == "kpis":
-            n = len(b["items"])
-            cells = [[Paragraph(C(l).upper(), sty("kl", fontSize=6.5, leading=8, alignment=1, textColor=colors.HexColor("#4B5563"))) for l, _ in b["items"]],
-                     [Paragraph(C(v), sty("kv", fontSize=9.5, leading=12, alignment=1, fontName="Helvetica-Bold")) for _, v in b["items"]]]
-            kt = Table(cells, colWidths=[fw_ / n] * n)
-            kt.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, grid), ("TOPPADDING", (0, 0), (-1, -1), 3.5),
-                                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5)]))
-            el += [kt, Spacer(1, 6)]
-        elif t == "bars":
-            el.append(Paragraph(C(b["title"]), s_t))
-            el.append(Paragraph(C(b["note"]), s_n))
-            pairs = b["pairs"]
-            if not pairs:
-                el.append(Paragraph("No data for this period.", s_c))
-                continue
-            mx, tot = max(v for _, v in pairs) or 1.0, sum(v for _, v in pairs) or 1.0
-            bw = fw_ * 0.38
-            rows = [[Paragraph("Category", s_h), Paragraph("Share", s_h), Paragraph("Value (BDT)", s_hr), Paragraph("%", s_hr)]]
-            for l, v in pairs:
-                dr = Drawing(bw - 8, 7)
-                dr.add(Rect(0, 0, bw - 8, 7, fillColor=colors.HexColor("#E5E7EB"), strokeColor=None))
-                dr.add(Rect(0, 0, max((bw - 8) * v / mx, 2), 7, fillColor=colors.HexColor("#374151"), strokeColor=None))
-                rows.append([Paragraph(C(l), s_c), dr, Paragraph(f"{v:,.0f}", s_r), Paragraph(f"{v / tot * 100:.0f}%", s_r)])
-            bt = Table(rows, colWidths=[fw_ * 0.3, bw, fw_ * 0.2, fw_ * 0.12], repeatRows=1)
-            bt.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.4, grid), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E5E7EB")),
-                                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 0), (-1, -1), 2.5),
-                                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5)]))
-            el.append(bt)
-        else:
-            cols = b["cols"]
-            tw = sum(c[3] for c in cols) or 1.0
-            widths = [fw_ * c[3] / tw for c in cols]
-            rows = [[Paragraph(C(c[1]), s_hr if c[4] == "r" else s_h) for c in cols]]
-            df = b["df"]
-            stat_cells = []
-            for ri, r in enumerate(df.itertuples(index=False), 1):
-                d = r._asdict()
-                row = []
-                for ci, c in enumerate(cols):
-                    txt = _rpa_fmt(d.get(c[0]), c[2])
-                    if c[0] == "status" and _rpa_cell_cls(txt):
-                        stat_cells.append((ri, ci, "#B91C1C" if "neg" in _rpa_cell_cls(txt) else "#B45309"))
-                    row.append(Paragraph(C(txt), s_r if c[4] == "r" else s_c))
-                rows.append(row)
-            if b.get("total"):
-                tt = b["total"]
-                rows.append([Paragraph(C(_rpa_fmt(tt[c[0]], c[2])) if c[0] in tt else "", s_br if c[4] == "r" else s_b) for c in cols])
-            el.append(Paragraph(C(b["title"]), s_t))
-            if b["note"]:
-                el.append(Paragraph(C(b["note"]), s_n))
-            if len(rows) == 1:
-                el.append(Paragraph("No rows.", s_c))
-                continue
-            tb = Table(rows, colWidths=widths, repeatRows=1)
-            ts = [("GRID", (0, 0), (-1, -1), 0.4, grid), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E5E7EB")),
-                  ("LINEBELOW", (0, 0), (-1, 0), 0.9, dark), ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                  ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F9FAFB")]),
-                  ("TOPPADDING", (0, 0), (-1, -1), 2.6), ("BOTTOMPADDING", (0, 0), (-1, -1), 2.6),
-                  ("LEFTPADDING", (0, 0), (-1, -1), 3.5), ("RIGHTPADDING", (0, 0), (-1, -1), 3.5)]
-            if b.get("total"):
-                ts += [("LINEABOVE", (0, -1), (-1, -1), 1.2, colors.HexColor("#374151")), ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F3F4F6"))]
-            tb.setStyle(TableStyle(ts))
-            el.append(tb)
-            el.append(Spacer(1, 4))
-    doc.build(el, onFirstPage=lambda c, d: None, onLaterPages=later, canvasmaker=NC)
-    return buf.getvalue()
-
-
-# ---------- Excel ----------
-def _rpa_xlsx(model, ident):
-    from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-    from openpyxl.utils import get_column_letter
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = {"summary": "Inventory Summary", "stock": "Stock Report", "issue": "Issue Report",
-                "purchase": "Purchase Report", "budget": "Budget Report"}[model["kind"]]
-    thin = Side(style="thin", color="9CA3AF")
-    box = Border(left=thin, right=thin, top=thin, bottom=thin)
-    hfill = PatternFill("solid", fgColor="E5E7EB")
-    zfill = PatternFill("solid", fgColor="F9FAFB")
-    ncols = 4
-    for b in model["blocks"]:
-        if b["t"] == "table":
-            ncols = max(ncols, len(b["cols"]) + len(b["xcols"]))
-        elif b["t"] == "bars":
-            ncols = max(ncols, 3)
-        elif b["t"] == "kpis":
-            ncols = max(ncols, 2)
-    last = get_column_letter(ncols)
-    lines = [(ident["group"], 16, True), (ident["plant"], 11, False), (ident["title"], 14, True),
-             (f"Reporting Period: {ident['period']}", 11, False)]
-    for i, (txt, sz, bold) in enumerate(lines, 1):
-        ws.merge_cells(f"A{i}:{last}{i}")
-        c = ws[f"A{i}"]
-        c.value, c.font, c.alignment = txt, Font(bold=bold, size=sz), Alignment(horizontal="center")
-    ws.merge_cells(f"A5:{last}5")
-    ws["A5"].value = (f"Factory / Unit: {ident['meta'][0][1]}   |   Generated: {ident['now']}   |   Generated By: {ident['user']}")
-    ws["A5"].font = Font(size=9, color="4B5563")
-    ws["A5"].alignment = Alignment(horizontal="center")
-    r = 7
-    widths = [10] * ncols
-    freeze = None
-    filt = None
-    fmts = {"money": "#,##0", "qty": "#,##0.##", "int": "#,##0", "date": "DD-MMM-YYYY", "pct": '0.0"%"'}
-    for b in model["blocks"]:
-        t = b["t"]
-        if t == "text":
-            ws.cell(r, 1, b["text"])
-            r += 2
-        elif t == "kpis":
-            for l, v in b["items"]:
-                a, c = ws.cell(r, 1, l), ws.cell(r, 2, v)
-                a.font, a.fill = Font(bold=True), hfill
-                for x in (a, c):
-                    x.border = box
-                c.alignment = Alignment(horizontal="right")
-                widths[0], widths[1] = max(widths[0], len(l) + 3), max(widths[1], len(str(v)) + 3)
-                r += 1
-            r += 1
-        elif t == "bars":
-            ws.cell(r, 1, b["title"]).font = Font(bold=True, size=11)
-            r += 1
-            tot = sum(v for _, v in b["pairs"]) or 1.0
-            for j, h in enumerate(["Category", "Value (BDT)", "Share %"], 1):
-                c = ws.cell(r, j, h)
-                c.font, c.fill, c.border = Font(bold=True), hfill, box
-                c.alignment = Alignment(horizontal="left" if j == 1 else "right")
-            r += 1
-            for l, v in b["pairs"]:
-                ws.cell(r, 1, l).border = box
-                c2, c3 = ws.cell(r, 2, v), ws.cell(r, 3, v / tot * 100.0)
-                c2.number_format, c3.number_format = "#,##0", '0.0"%"'
-                c2.border = c3.border = box
-                widths[0] = max(widths[0], len(str(l)) + 3)
-                r += 1
-            r += 1
-        else:
-            allc = b["cols"] + b["xcols"]
-            ws.cell(r, 1, b["title"]).font = Font(bold=True, size=11)
-            r += 1
-            if b["note"]:
-                ws.cell(r, 1, b["note"]).font = Font(size=9, color="6B7280")
-                r += 1
-            hr = r
-            for j, c in enumerate(allc, 1):
-                x = ws.cell(r, j, c[1])
-                x.font, x.fill, x.border = Font(bold=True), hfill, box
-                x.alignment = Alignment(horizontal="right" if c[4] == "r" else "left", vertical="center", wrap_text=True)
-                widths[j - 1] = max(widths[j - 1], len(c[1]) + 3)
-            r += 1
-            for k, row in enumerate(b["df"].itertuples(index=False)):
-                d = row._asdict()
-                for j, c in enumerate(allc, 1):
-                    v = d.get(c[0])
-                    if c[2] == "date":
-                        v = None if pd.isna(v) else v.to_pydatetime()
-                    elif c[2] in ("money", "qty", "int", "pct"):
-                        v = None if pd.isna(v) else float(v)
-                    else:
-                        v = "" if v is None else str(v)
-                    x = ws.cell(r, j, v)
-                    x.border = box
-                    if c[2] in fmts:
-                        x.number_format = fmts[c[2]]
-                    x.alignment = Alignment(horizontal="right" if c[4] == "r" else "left", vertical="top")
-                    if k % 2:
-                        x.fill = zfill
-                    if c[0] == "status" and str(v) in ("Negative", "Out of stock", "Over limit"):
-                        x.font = Font(bold=True, color="B91C1C")
-                    elif c[0] == "status" and str(v) in ("Low", "Watch"):
-                        x.font = Font(bold=True, color="B45309")
-                    ln_ = len(str(v)) + 2 if v is not None else 4
-                    widths[j - 1] = max(widths[j - 1], min(ln_, 48))
-                r += 1
-            if b.get("total"):
-                for j, c in enumerate(allc, 1):
-                    tt = b["total"]
-                    x = ws.cell(r, j, tt.get(c[0]) if c[0] in tt else None)
-                    x.font, x.border = Font(bold=True), Border(left=thin, right=thin, bottom=thin, top=Side(style="medium", color="374151"))
-                    if c[2] in fmts:
-                        x.number_format = fmts[c[2]]
-                    x.alignment = Alignment(horizontal="right" if c[4] == "r" else "left")
-                r += 1
-            if b["main"]:
-                freeze = f"A{hr + 1}"
-                filt = f"A{hr}:{get_column_letter(len(allc))}{hr + len(b['df'])}"
-                ws.print_title_rows = f"{hr}:{hr}"
-            r += 1
-    for j, w in enumerate(widths, 1):
-        ws.column_dimensions[get_column_letter(j)].width = min(max(w, 8), 50)
-    if freeze:
-        ws.freeze_panes = freeze
-        ws.auto_filter.ref = filt
-    ws.page_setup.orientation = "landscape" if model["landscape"] else "portrait"
-    ws.page_setup.paperSize = ws.PAPERSIZE_A4
-    ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
-    ws.sheet_properties.pageSetUpPr.fitToPage = True
-    ws.oddFooter.left.text = "Windy Group - " + _RPA_PLANT_ALL
-    ws.oddFooter.right.text = "Page &P of &N"
-    bio = io.BytesIO()
-    wb.save(bio)
-    return bio.getvalue()
-
-
-def _rpa_render(kind, ym, plabel):
-    """A4 preview + PDF / Excel / Print for the open report. Heavy files are built only when their button is clicked."""
-    ver = _data_version()
-    model = _rpa_model(FAC, ver, kind, ym, plabel)
-    ident = _rpa_identity(FAC, kind, plabel)
-    slug = f"{kind}_report_{re.sub(r'[^A-Za-z0-9]+', '_', plabel).strip('_')}"
-    a, b, c = st.columns([1, 1, 3])
-    pdf_ok = _lazy_download(a, "\U0001F4C4 Download PDF", lambda: _rpa_pdf(model, ident), f"{slug}.pdf", "application/pdf", f"rpa_pdf_{kind}")
-    xl_ok = _lazy_download(b, "\U0001F4CA Download Excel", lambda: _rpa_xlsx(model, ident), f"{slug}.xlsx",
-                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", f"rpa_xls_{kind}")
-    if not (pdf_ok and xl_ok):
-        c.caption("Downloads need a newer Streamlit; use the classic view below.")
-    html, pages = _rpa_preview_html(model, ident)
-    components.html(html, height=(900 if model["landscape"] else 1240), scrolling=True)   # one full A4 page visible; scroll for the rest
-    c.caption(f"Preview the complete report first, then print when ready \u00b7 A4 {'landscape' if model['landscape'] else 'portrait'} \u00b7 "
-              f"{pages} page(s) in preview \u00b7 scroll inside the preview to review every page; \U0001F5A8\uFE0F Print Report is optional.")
-
-
-def tab_reports():
-    st.title("\U0001F4D1 Reports")
-    st.caption("Read-only, easy-to-read summaries of stock, issues, purchases and budget. Nothing on this page changes any data.")
-    ver = _data_version()
-    try:
-        tx = _rp_tx(FAC, ver)
-    except Exception as e:
-        st.error(f"Report data could not be loaded: {e}")
-        return
-    st.markdown(_RP_CSS, unsafe_allow_html=True)
-    cur = local_now().strftime("%Y-%m")
-    months = sorted([m for m in tx["ym"].unique() if m], reverse=True)
-    opts = [cur] + [m for m in months if m != cur]
-    labels = [_rp_ym_label(m) for m in opts] + ["All time"]
-    c1, c2 = st.columns([3, 1.2])
-    with c2:
-        choice = st.selectbox("Reporting period", labels, key="rp_period", label_visibility="collapsed")
-    idx = labels.index(choice) if choice in labels else 0
-    ym = opts[idx] if idx < len(opts) else None
-    plabel = labels[idx] if idx < len(labels) else "All time"
-    with c1:
-        _rp_show(f'<div class="rp-sub"><b>{_rp_e(FAC)}</b> \u00b7 Period: <b>{_rp_e(plabel)}</b> \u00b7 {len(tx):,} purchase / issue entries analysed</div>')
-    tp = tx[tx["ym"] == ym] if ym else tx
-    prev = None
-    if ym:
-        pm = tx[tx["ym"] == _rp_ym_prev(ym)]
-        prev = pm if not pm.empty else None
-    pick = lazy_tab_select(["\U0001F4CC Summary", "\U0001F4E6 Stock", "\U0001F4E4 Issues", "\U0001F4E5 Purchases", "\U0001F4B0 Budget"], "lz_rp")
-    classic = st.toggle("Classic dashboard view", value=False, key="rp_classic",
-                        help="Switch to the earlier card layout. The A4 report view is the default.")
-    try:
-        if not classic:
-            _rpa_render(["summary", "stock", "issue", "purchase", "budget"][pick], ym, plabel)
-        elif pick == 0:
-            _rp_summary(tx, tp, prev, ym, plabel)
-        elif pick == 1:
-            _rp_stock()
-        elif pick == 2:
-            _rp_flow(tp, "Issue", plabel, prev)
-        elif pick == 3:
-            _rp_flow(tp, "Purchase", plabel, prev)
-        else:
-            _rp_budget(tp, plabel)
-    except Exception as e:
-        st.error(f"This report could not be built: {e}")
-
-
+            st.rerun(scope="fragment")
+        except TypeError:
+            st.rerun()
+    st.caption(f"মোট আইটেম-লাইন: {len(lines)} · মোট পরিমাণ: {sum(qtys):g}")
+    need_names = [ln["name"] for ln in lines if ln["need"]]
+    verified = False
+    if need_names:
+        verified = st.checkbox("Physically verified — এই আইটেমগুলো ফিজিক্যালি গুনে দেখা হয়েছে: " + ", ".join(need_names),
+                               key=f"ri_ver_{gen}")
+    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
+    if not can_write:
+        st.caption("সংরক্ষণ করতে login লাগবে (Auditor role শুধু দেখতে পারে)।")
+    if st.button("💾 সব সংরক্ষণ করুন", type="primary", key=f"ri_save_{gen}", use_container_width=True, disabled=not can_write):
+        if not sr_no:
+            st.error("Requisition No. (SR No.) লিখুন — এটা বাধ্যতামূলক।")
+        elif bad:
+            st.error("তালিকায় সমস্যা আছে (পরিমাণ ০ বা স্টক কম) — ঠিক করে আবার চেষ্টা করুন।")
+        elif not confirm_existing:
+            st.error("এই SR আগে ব্যবহার হয়েছে — নিশ্চিত করার টিক দিন।")
+        elif guard():
+            n = save_requisition_issue(fac, [(ln["sl"], q_) for ln, q_ in zip(lines, qtys)], tx_date, sr_no, ttype,
+                                       notes.strip(), verified)
+            if n:
+                st.session_state["last_req_no"] = sr_no
+                st.session_state["ri_lines"] = []
+                st.session_state["ri_gen"] = gen + 1
+                done(f"✅ SR {sr_no}: {n}টি আইটেম ইস্যু হয়েছে, স্টক কমেছে।")
 
 
 # ============================================================
@@ -11707,9 +10749,9 @@ if unit_gate_required():   # signed-in officer who has not chosen a unit yet: no
 autoset_uom_once()
 
 # Render only the selected module; the sidebar buttons update NAV_KEY.
-RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, tab_global_inventory, tab_physical_count, tab_reports, tab_erp_audit, tab_issue_ledger,
+RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, tab_global_inventory, tab_physical_count, tab_erp_audit, tab_issue_ledger,
              tab_transfer_history, tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet,
-             tab_stock_cover, tab_data_health, tab_log_sheet, tab_high_value]
+             tab_stock_cover, tab_data_health, tab_log_sheet, tab_high_value, tab_req_issue]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
 RENDERERS[TAB_NAMES.index(active_tab)]()
 render_session_cookie_js()
