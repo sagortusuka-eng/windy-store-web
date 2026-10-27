@@ -6595,6 +6595,50 @@ def budget_manage_panel():
                 done("Budget line added.")
 
 
+def render_budget_category_items(bud):
+    """Pick a budget category -> see exactly which items were issued against it."""
+    st.markdown('<div class="section-title">📦 Category click korun — kon item issue hoyeche</div>', unsafe_allow_html=True)
+    lines = [(r["factory_name"], r["department_name"], r["category_name"], float(r["allocated_budget"] or 0))
+             for r in bud.to_dict("records")]
+    labels = [f"{c} · {short_fac(f)}" if len(set(l[0] for l in lines)) > 1 else f"{c}" for f, d, c, b in lines]
+    pick = st.radio("Budget category", labels, horizontal=True, key="bud_cat_pick", label_visibility="collapsed")
+    fac_, dept_, cat_, alloc = lines[labels.index(pick)]
+    rows = q_c("""SELECT t.date, t.time, t.sl_no, t.item_name, COALESCE(i.size,'') AS size, t.qty, i.unit_price,
+                         t.qty*i.unit_price AS amount, t.officer_name, t.trans_type
+                  FROM transactions t JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
+                  WHERE t.trans_type IN ('Issued','Internal Issue') AND t.factory_name=%s AND i.category=%s
+                  ORDER BY t.id DESC""", (fac_, cat_))
+    if not rows:
+        st.info(f"{cat_} budget-e ekhono kono item issue hoyni.")
+        return
+    df = pd.DataFrame(rows)
+    df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0.0)
+    df["unit_price"] = pd.to_numeric(df["unit_price"], errors="coerce").fillna(0.0)
+    df["amount"] = df["qty"] * df["unit_price"]
+    used = float(df["amount"].sum())
+    pct = (used / alloc * 100) if alloc > 0 else (100.0 if used > 0 else 0.0)
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Category Budget", f"৳ {alloc:,.0f}")
+    k2.metric("Issued Value", f"৳ {used:,.0f}")
+    k3.metric("Used %", f"{pct:.1f}%")
+    k4.metric("Issue entries", len(df))
+    st.markdown(budget_bar_html(pct, f"{cat_} Consumption"), unsafe_allow_html=True)
+    # item-wise totals
+    summ = (df.groupby(["item_name", "size"], as_index=False)
+              .agg(qty=("qty", "sum"), amount=("amount", "sum")).sort_values("amount", ascending=False))
+    summ["% of category"] = summ["amount"] / used * 100 if used > 0 else 0.0
+    st.markdown("**Item-wise issue (budget-e kon item koto taka)**")
+    st.dataframe(summ.rename(columns={"item_name": "Item", "size": "Size", "qty": "Qty", "amount": "Amount (৳)"}),
+                 hide_index=True, use_container_width=True, column_config={
+        "Qty": st.column_config.NumberColumn(format="%g"),
+        "Amount (৳)": st.column_config.NumberColumn(format="%.0f"),
+        "% of category": st.column_config.NumberColumn(format="%.1f%%")})
+    with st.expander("Issue entry-wise details (date / officer)"):
+        det = df.rename(columns={"date": "Date", "time": "Time", "sl_no": "SL", "item_name": "Item", "size": "Size", "qty": "Qty",
+                                 "unit_price": "Unit Price", "amount": "Amount (৳)", "officer_name": "Officer", "trans_type": "Type"})
+        st.dataframe(det, hide_index=True, use_container_width=True)
+
+
 def tab_budget():
     bud = qdf_c(f"SELECT factory_name, department_name, category_name, allocated_budget FROM category_budgets WHERE 1=1{FSQL}", FP)
     cost_rows = q_c(f"""SELECT t.factory_name, i.category, SUM(t.qty*i.unit_price) AS cost
@@ -6602,17 +6646,23 @@ def tab_budget():
                       WHERE t.trans_type IN ('Issued','Internal Issue'){fw(FAC, 't.')[0]}
                       GROUP BY t.factory_name, i.category""", FP)
     cost = {(r["factory_name"], r["category"]): float(r["cost"] or 0) for r in cost_rows}
-    # Executive Overview & Budget Control lives here (not on the daily-entry home screen)
-    try:
-        tab_dashboard()
-    except Exception as e:
-        st.warning(f"Overview load kora jacche na: {e}")
     if bud.empty:
         st.info("Budget nei.")
         return
     bud["actual_cost"] = [cost.get((f, c), 0.0) for f, c in zip(bud.factory_name, bud.category_name)]
     bud["remaining"] = bud.allocated_budget - bud.actual_cost
     bud["status"] = bud.remaining.apply(lambda v: "SAFE" if v >= 0 else "OVER BUDGET")
+
+    tot_b = float(bud.allocated_budget.fillna(0).sum())
+    tot_u = float(bud.actual_cost.sum())
+    tot_pct = (tot_u / tot_b * 100) if tot_b > 0 else (100.0 if tot_u > 0 else 0.0)
+    st.markdown('<div class="section-title">💰 Budget Summary</div>', unsafe_allow_html=True)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Budget", f"৳ {tot_b:,.0f}")
+    m2.metric("Total Issued Value", f"৳ {tot_u:,.0f}")
+    m3.metric("Budget Used", f"{tot_pct:.1f}%")
+    m4.metric("Remaining", f"৳ {tot_b - tot_u:,.0f}")
+    st.markdown(budget_bar_html(tot_pct, "Total Budget Consumption"), unsafe_allow_html=True)
 
     st.markdown('<div class="section-title">Category Budget Cards</div>', unsafe_allow_html=True)
     cols = st.columns(3, gap="medium")
@@ -6631,6 +6681,10 @@ def tab_budget():
         with cols[i % 3]:
             st.markdown(card, unsafe_allow_html=True)
 
+    try:
+        render_budget_category_items(bud)
+    except Exception as e:
+        st.caption(f"Category-wise issue list load hoyni: {e}")
     try:
         render_budget_issue_check()
     except Exception as e:
@@ -9673,7 +9727,14 @@ _KC_LOGIN_CSS = """<style>
 [data-testid="stHeader"], [data-testid="stToolbar"], header { display:none !important; }
 .stApp { background: radial-gradient(1200px 600px at 10% 0%, #dbeafe 0%, transparent 60%),
                      radial-gradient(900px 500px at 100% 100%, #c7d2fe 0%, transparent 55%), #eef2ff !important; }
-.block-container { max-width: 1020px !important; padding-top: 7vh !important; padding-bottom: 3vh !important; }
+.block-container { max-width: 1020px !important; padding-top: 2.5rem !important; padding-bottom: 3vh !important; }
+[data-testid="stElementContainer"]:has(> [data-testid="stMarkdown"] style:only-child),
+[data-testid="stElementContainer"]:has(> [data-testid="stMarkdownContainer"] style:only-child),
+div.element-container:has(> div[data-testid="stMarkdown"] style:only-child) { display:none !important; }
+.kc-hero { text-align:center; margin:0 0 1.4rem 0; }
+.kc-hero .t { font-size:2.7rem; font-weight:900; letter-spacing:-1px; line-height:1.1;
+    background:linear-gradient(90deg,#1d4ed8,#3b82f6 55%,#6366f1); -webkit-background-clip:text; background-clip:text; color:transparent; }
+.kc-hero .s { color:#475569; font-size:1rem; margin-top:.35rem; letter-spacing:.3px; }
 [data-testid="stHorizontalBlock"]:has(.kc-form-marker) {
     background:#ffffff; border-radius:30px; box-shadow:0 30px 80px rgba(37,99,235,.22), 0 4px 14px rgba(15,23,42,.06);
     gap:0 !important; overflow:hidden; min-height:560px; align-items:stretch !important; }
@@ -9770,6 +9831,8 @@ def render_login_page():
     if mode not in ("login", "register", "forgot"):
         mode = "login"
     reg = mode == "register"
+    st.markdown('<div class="kc-hero"><div class="t">Smart Inventory</div>'
+                '<div class="s">Windy Washing &amp; KC Washing · Store Inventory &amp; Budget Control</div></div>', unsafe_allow_html=True)
     left, right = st.columns([46, 54], gap="small")
     with left:
         st.markdown('<div class="kc-panel-marker"></div>', unsafe_allow_html=True)
@@ -9783,7 +9846,7 @@ def render_login_page():
     with right:
         st.markdown(f'<div class="kc-form-marker kc-mode-{"register" if reg else "login"}"></div>', unsafe_allow_html=True)
         if mode == "login":
-            st.markdown('<div class="kc-form-title">Welcome to Windy Washing &amp; KC Washing Store Inventory</div>'
+            st.markdown('<div class="kc-form-title">Welcome to Smart Inventory</div>'
                         '<div class="kc-form-sub">Sign in with your approved account to continue</div>', unsafe_allow_html=True)
             with st.form("kc_login_form", clear_on_submit=False):
                 u = st.text_input("Username", placeholder="Username", key="kc_login_user", label_visibility="collapsed")
