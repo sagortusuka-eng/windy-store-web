@@ -9776,16 +9776,6 @@ div.element-container:has(> div[data-testid="stMarkdown"] style:only-child) { di
     border-radius:14px !important; height:48px; font-weight:700 !important; letter-spacing:.2px; box-shadow:0 10px 22px rgba(37,99,235,.35); transition:all .25s ease; }
 [data-testid="stFormSubmitButton"] button:hover { transform:translateY(-2px); box-shadow:0 14px 28px rgba(37,99,235,.45); }
 [data-testid="stColumn"]:has(.kc-form-marker) [data-testid="stForm"], [data-testid="column"]:has(.kc-form-marker) [data-testid="stForm"] { border:none !important; padding:0 !important; }
-.kc-feat-wrap { margin-top:26px; }
-.kc-feat-head { text-align:center; color:#1e3a8a; font-weight:800; font-size:1.15rem; margin-bottom:.2rem; }
-.kc-feat-sub { text-align:center; color:#64748b; font-size:.9rem; margin-bottom:1rem; }
-.kc-feat-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
-.kc-feat { background:#fff; border-radius:18px; padding:16px 14px; text-align:center; box-shadow:0 8px 24px rgba(37,99,235,.10); border:1px solid #e0e7ff; transition:transform .2s ease; }
-.kc-feat:hover { transform:translateY(-4px); }
-.kc-feat .ic { font-size:1.9rem; line-height:1; margin-bottom:.45rem; }
-.kc-feat .tt { font-weight:800; color:#0f172a; font-size:.95rem; margin-bottom:.2rem; }
-.kc-feat .ds { color:#64748b; font-size:.78rem; line-height:1.35; }
-@media (max-width: 760px) { .kc-feat-grid { grid-template-columns:repeat(2,1fr); } }
 .kc-foot { text-align:center; color:#64748b; font-size:.8rem; margin-top:18px; }
 @media (max-width: 760px) {
   .block-container { padding-top:3vh !important; }
@@ -9910,9 +9900,6 @@ def render_login_page():
                 elif register_user(ru.strip(), rn.strip(), p1):
                     st.session_state["auth_mode"] = "login"
                     done("Registration request sent. The Store Manager must approve it before you can sign in.")
-    st.markdown('<div class="kc-feat-wrap"><div class="kc-feat-head">Ei software ki kore?</div>'
-                '<div class="kc-feat-sub">Factory store-er shob kaj — stock theke budget porjonto — ek jayga-y</div>'
-                '<div class="kc-feat-grid"><div class="kc-feat"><div class="ic">📦</div><div class="tt">Inventory & Stock</div><div class="ds">Item, size, stock ar unit price — factory onujayi live stock hishab</div></div><div class="kc-feat"><div class="ic">🔄</div><div class="tt">Issue & Receive</div><div class="ds">Roj-er issue, supplier receive, transfer ar gate pass record</div></div><div class="kc-feat"><div class="ic">💰</div><div class="tt">Budget Control</div><div class="ds">Category-wise budget, koto issue holo ar koto % use hoyeche</div></div><div class="kc-feat"><div class="ic">🧾</div><div class="tt">ERP Audit & Physical Count</div><div class="ds">ERP stock-er shathe milano, short/excess dhora</div></div><div class="kc-feat"><div class="ic">📑</div><div class="tt">Requisition & Repair</div><div class="ds">Requisition tracking, repair-return ar PO delay follow-up</div></div><div class="kc-feat"><div class="ic">📈</div><div class="tt">Forecast & Reports</div><div class="ds">Stock cover, high value stock, ledger ar export report</div></div><div class="kc-feat"><div class="ic">🏭</div><div class="tt">Multi-Factory</div><div class="ds">KC ar Windy — alada factory, ekই jayga theke</div></div><div class="kc-feat"><div class="ic">🔐</div><div class="tt">Secure Access</div><div class="ds">Role-based login, Manager approval ar audit log</div></div></div></div>', unsafe_allow_html=True)
     st.markdown('<div class="kc-foot">KC &amp; Windy Smart Inventory · Created by MD. Sagor Ali</div>', unsafe_allow_html=True)
 
 
