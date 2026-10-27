@@ -1245,6 +1245,18 @@ def init_db():
     return True
 
 
+def ensure_req_no_column():
+    """Idempotently add transactions.req_no (SR number) even if the cached init_db skipped the DDL."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS req_no TEXT")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def ensure_global_inventory_schema():
     """Idempotently add columns used by Global Inventory, even if a cached DB initializer skips DDL."""
     conn = get_conn()
@@ -10539,6 +10551,13 @@ def tab_req_issue():
     if is_cons_view:
         st.info("ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ ইস্যু করা যায় না)।")
         return
+    try:
+        if not st.session_state.get("_req_no_column_ready"):
+            run_once_per_process("req_no_column", ensure_req_no_column)
+            st.session_state["_req_no_column_ready"] = True
+    except Exception as e:
+        st.error(f"req_no column setup failed: {e}")
+        return
     _ri_form()
 
 
@@ -10677,6 +10696,9 @@ try:
     if not st.session_state.get("_global_inventory_schema_ready"):
         run_once_per_process("global_inventory_schema", ensure_global_inventory_schema)
         st.session_state["_global_inventory_schema_ready"] = True
+    if not st.session_state.get("_req_no_column_ready"):
+        run_once_per_process("req_no_column", ensure_req_no_column)
+        st.session_state["_req_no_column_ready"] = True
 except Exception as e:
     st.error(f"Database setup/migration failed: {e}")
     st.stop()
