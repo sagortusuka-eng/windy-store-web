@@ -10501,22 +10501,39 @@ def _ri_verif_many(fac, sls, tx_dt):
 
 
 @tx
-def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified):
-    """lines = [(sl_no, qty)]. All-or-nothing: stock is re-read and locked, every line is checked first, then
-    ONE update + ONE insert (+ one audit insert) write the whole slip."""
+def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_pending=False):
+    """lines = [(sl_no, qty, xfer_ok)]. All-or-nothing: stock is re-read and locked, every line is checked first, then
+    ONE update + ONE insert (+ one audit insert) write the whole slip. A line whose qty is above stock is covered by an
+    auto-transfer from the other unit (same rule as the Transactions tab) when the user confirmed it."""
     user = st.session_state.get("user", "")
-    sls = [int(a) for a, _ in lines]
-    qtys = [float(b) for _, b in lines]
-    rows = run("""SELECT sl_no, COALESCE(prod_id,''), COALESCE(item_name,''), COALESCE(current_stock,0) FROM inventory
-                  WHERE factory_name=%s AND sl_no = ANY(%s) FOR UPDATE""", (fac, sls))
-    info = {int(r[0]): (str(r[1]), str(r[2]), float(r[3] or 0)) for r in (rows or [])}
+    sls = [int(a[0]) for a in lines]
+    qtys = [float(a[1]) for a in lines]
+    xfer = {int(a[0]): bool(a[2]) if len(a) > 2 else False for a in lines}
+    rows = run("""SELECT sl_no, COALESCE(prod_id,''), COALESCE(item_name,''), COALESCE(current_stock,0), COALESCE(size,'')
+                  FROM inventory WHERE factory_name=%s AND sl_no = ANY(%s) FOR UPDATE""", (fac, sls))
+    info = {int(r[0]): (str(r[1]), str(r[2]), float(r[3] or 0), str(r[4])) for r in (rows or [])}
     if len(info) != len(set(sls)):
         st.error("কিছু আইটেম আর পাওয়া যাচ্ছে না। পেজ রিফ্রেশ করে আবার চেষ্টা করুন।")
         return False
-    short = [f"{info[sl][1]} (স্টক {info[sl][2]:g}, দিচ্ছেন {q_:g})" for sl, q_ in zip(sls, qtys) if q_ > info[sl][2] + 1e-9]
-    if short:
-        st.error("স্টক কম — কিছুই সংরক্ষণ হয়নি: " + "; ".join(short) +
-                 "। এই আইটেম আলাদাভাবে Transactions থেকে ইস্যু করুন (অন্য Unit থেকে অটো-ট্রান্সফার সেখানে আছে)।")
+    # ---- shortage lines: need a confirmed auto-transfer from the other unit (checked for ALL lines before anything is written)
+    plan, used_other, bad_short = {}, {}, []
+    for sl, q_ in zip(sls, qtys):
+        pid_, nm_, stk_, size_ = info[sl]
+        if q_ <= stk_ + 1e-9:
+            continue
+        shortage = q_ - stk_
+        other = find_same_in_other(pid_, nm_, other_factory(fac), size_, need=shortage)
+        if other and xfer.get(sl):
+            okey = (int(other["sl_no"]), other["factory_name"])
+            lk = run("SELECT COALESCE(current_stock,0) FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE", okey)
+            o_stock = float(lk[0][0] or 0) if lk else 0.0
+            if o_stock - used_other.get(okey, 0.0) >= shortage - 1e-9:
+                used_other[okey] = used_other.get(okey, 0.0) + shortage
+                plan[sl] = (shortage, other)
+                continue
+        bad_short.append(f"{pid_} (স্টক {stk_:g}, দিচ্ছেন {q_:g})")
+    if bad_short:
+        st.error("স্টক কম / ট্রান্সফার সম্ভব নয় বা নিশ্চিত করা হয়নি — কিছুই সংরক্ষণ হয়নি: " + "; ".join(bad_short))
         return False
     vm = _ri_verif_many(fac, sls, tx_dt)
     need = [info[sl][1] for sl in sls if vm.get(sl, (False, 0))[0]]
@@ -10525,18 +10542,38 @@ def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified):
         return False
     vstat = ["Physically Verified" if (vm.get(sl, (False, 0))[0] and verified) else "Not Required" for sl in sls]
     date_s, time_s = tx_dt.strftime(DATE_FMT), datetime.now().strftime("%I:%M %p")
+    line_notes = []
+    for n_i, sl in enumerate(sls):
+        nt = notes
+        if sl in plan:
+            shortage, other = plan[sl]
+            size_ = info[sl][3]
+            ref_no = f"TRF-{datetime.now():%Y%m%d%H%M%S%f}-{n_i}"
+            run("UPDATE inventory SET current_stock=current_stock-%s WHERE sl_no=%s AND factory_name=%s",
+                (shortage, other["sl_no"], other["factory_name"]))
+            run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (shortage, sl, fac))
+            run("""INSERT INTO inter_factory_transfers (transfer_ref, source_factory, dest_factory, prod_id, item_name, qty,
+                   transfer_date, transfer_time, initiated_by, status, notes, size) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'Completed',%s,%s)""",
+                (ref_no, other["factory_name"], fac, info[sl][0], info[sl][1], shortage, date_s, time_s, user,
+                 f"Auto-transfer for shortage during requisition issue SR {sr_no} (source item: {other['item_name']} [{other['prod_id']}]) | Size: {size_ or '-'}",
+                 size_))
+            nt = f"{notes} [Auto-transferred {shortage:g} pcs (size {size_ or '-'}) from {other['factory_name']}]".strip()
+            audit("AUTO_TRANSFER", f"{shortage:g} pcs from {other['factory_name']} to {fac} for {info[sl][0]} (size {size_ or '-'}) [SR {sr_no}]")
+        line_notes.append(nt)
+    po_flag, po_date = ("Pending", date_s) if po_pending else ("", None)
     run("""UPDATE inventory SET current_stock = current_stock - v.q
            FROM (SELECT unnest(%s::int[]) AS sl, unnest(%s::float8[]) AS q) v
            WHERE inventory.factory_name=%s AND inventory.sl_no=v.sl""", (sls, qtys, fac))
     run("""INSERT INTO transactions (factory_name, officer_name, sl_no, prod_id, item_name, qty, trans_type, day, notes, date, time,
                   verification_status, erp_grn_status, supplier_name, challan_no, po_pending_flag, po_pending_date,
                   unit_price_at_tx, req_no)
-           SELECT %s, %s, v.sl, v.pid, v.nm, v.q, %s, %s, %s, %s, %s, v.vs, 'Not Required', '', '', '', NULL::text, NULL::float8, %s
+           SELECT %s, %s, v.sl, v.pid, v.nm, v.q, %s, %s, v.nt, %s, %s, v.vs, 'Not Required', '', '', %s, %s::text, NULL::float8, %s
            FROM (SELECT unnest(%s::int[]) AS sl, unnest(%s::text[]) AS pid, unnest(%s::text[]) AS nm,
-                        unnest(%s::float8[]) AS q, unnest(%s::text[]) AS vs) v""",
-        (fac, user, ttype, tx_dt.day, notes, date_s, time_s, sr_no,
-         sls, [info[sl][0] for sl in sls], [info[sl][1] for sl in sls], qtys, vstat))
-    details = [f"{fac}: {ttype} {q_:g} of {info[sl][0]} ({info[sl][1]}) [SR {sr_no}]" for sl, q_ in zip(sls, qtys)]
+                        unnest(%s::float8[]) AS q, unnest(%s::text[]) AS vs, unnest(%s::text[]) AS nt) v""",
+        (fac, user, ttype, tx_dt.day, date_s, time_s, po_flag, po_date, sr_no,
+         sls, [info[sl][0] for sl in sls], [info[sl][1] for sl in sls], qtys, vstat, line_notes))
+    details = [f"{fac}: {ttype} {q_:g} of {info[sl][0]} ({info[sl][1]}) [SR {sr_no}]" + (" [ERP PO Pending ticked]" if po_pending else "")
+               for sl, q_ in zip(sls, qtys)]
     run("""INSERT INTO audit_logs (timestamp, username, action_type, details)
            SELECT %s, %s, 'TRANSACTION', d FROM unnest(%s::text[]) AS d""",
         (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user or "SYSTEM", details))
@@ -10547,7 +10584,7 @@ def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified):
 def tab_req_issue():
     st.title("🧾 Requisition Issue")
     st.caption(f"একটা রিকুইজিশন স্লিপের সব আইটেম (সর্বোচ্চ {RI_MAX_LINES}টি) এক SR নম্বরে একসাথে ইস্যু করুন। "
-               "SR নম্বর বাধ্যতামূলক। স্টক কম থাকলে কিছুই সংরক্ষণ হয় না।")
+               "SR নম্বর বাধ্যতামূলক। স্টক কম হলে অন্য Unit থেকে অটো-ট্রান্সফার (নিশ্চিত করলে) হবে; না হলে কিছুই সংরক্ষণ হয় না।")
     if is_cons_view:
         st.info("ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ ইস্যু করা যায় না)।")
         return
@@ -10609,7 +10646,7 @@ def _ri_form():
             except Exception:
                 need, days = False, 0
             cur.append({"sl": int(r["sl_no"]), "pid": r["prod_id"], "name": r["item_name"], "size": r["size"],
-                        "stock": float(r["stock"]), "need": bool(need), "days": int(days)})
+                        "stock": float(r["stock"]), "need": bool(need), "days": int(days), "vdate": date_v})
             st.session_state[f"ri_q_{gen}_{int(r['sl_no'])}"] = qty_v
             st.session_state["ri_lines"] = cur
             st.session_state[f"ri_search_{gen}"] = ""
@@ -10628,8 +10665,18 @@ def _ri_form():
     h = st.columns([0.4, 3.2, 1.2, 1.0, 1.3, 1.5, 0.7])
     for col, t in zip(h, ["#", "আইটেম", "ERP Code", "স্টক", "ইস্যু পরিমাণ", "অবস্থা", ""]):
         col.caption(t)
+    if any(ln.get("vdate") != tx_date for ln in lines):   # date changed after the item was added -> re-check the 3-day rule (1 query)
+        try:
+            vm_ = _ri_verif_many(fac, [ln["sl"] for ln in lines], tx_date)
+            for ln in lines:
+                ln["need"], ln["days"] = vm_.get(int(ln["sl"]), (False, 0))
+                ln["vdate"] = tx_date
+        except Exception:
+            pass
     remove = None
     qtys, bad = [], False
+    xfer_flags = {}
+    xcache = st.session_state.setdefault("ri_other_cache", {})
     for i, ln in enumerate(lines):
         r = st.columns([0.4, 3.2, 1.2, 1.0, 1.3, 1.5, 0.7])
         r[0].write(i + 1)
@@ -10642,8 +10689,29 @@ def _ri_form():
             r[5].write("⚠️ পরিমাণ দিন")
             bad = True
         elif q_ > ln["stock"] + 1e-9:
-            r[5].write("⛔ স্টক কম")
-            bad = True
+            shortage = q_ - ln["stock"]
+            ck = (gen, ln["sl"], round(shortage, 6))
+            if ck not in xcache:
+                try:
+                    xcache[ck] = find_same_in_other(ln["pid"], ln["name"], other_factory(fac), ln["size"], need=shortage)
+                except Exception:
+                    xcache[ck] = None
+            other = xcache[ck]
+            if other and float(other["stock"] or 0) >= shortage:
+                ok_x = r[5].checkbox("🔁 ট্রান্সফার নিশ্চিত", key=f"ri_x_{gen}_{ln['sl']}")
+                xfer_flags[ln["sl"]] = ok_x
+                if not ok_x:
+                    bad = True
+                note_x = (f"⚠️ {ln['name']}: স্টক কম {shortage:g}। {other['factory_name']} থেকে অটো-ট্রান্সফার হবে "
+                          f"({other['item_name']} [{other['prod_id']}], size {other['size'] or '-'}, স্টক {float(other['stock']):g}, "
+                          f"মিল: {other['level']} {int(round(float(other.get('score', 1.0)) * 100))}%)।")
+                if other["level"] == "fuzzy":
+                    note_x += " নাম হুবহু এক নয় — দুটো একই আইটেম কিনা দেখে নিশ্চিত করুন।"
+                st.caption(note_x)
+            else:
+                r[5].write("⛔ স্টক কম")
+                st.caption(f"⛔ {ln['name']}: শর্টেজ {shortage:g} — অন্য Unit-এ যথেষ্ট স্টক / একই আইটেম নেই।")
+                bad = True
         elif ln["need"]:
             r[5].write(f"🔎 যাচাই লাগবে ({ln['days']} দিন)")
         else:
@@ -10663,6 +10731,8 @@ def _ri_form():
     if need_names:
         verified = st.checkbox("Physically verified — এই আইটেমগুলো ফিজিক্যালি গুনে দেখা হয়েছে: " + ", ".join(need_names),
                                key=f"ri_ver_{gen}")
+    po_pending = st.checkbox("ERP PO pending", key=f"ri_po_{gen}",
+                             help="এই স্লিপের সব লাইন ERP Audit → ERP PO Pending-এ ট্র্যাক হবে।")
     can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
     if not can_write:
         st.caption("সংরক্ষণ করতে login লাগবে (Auditor role শুধু দেখতে পারে)।")
@@ -10670,12 +10740,12 @@ def _ri_form():
         if not sr_no:
             st.error("Requisition No. (SR No.) লিখুন — এটা বাধ্যতামূলক।")
         elif bad:
-            st.error("তালিকায় সমস্যা আছে (পরিমাণ ০ বা স্টক কম) — ঠিক করে আবার চেষ্টা করুন।")
+            st.error("তালিকায় সমস্যা আছে (পরিমাণ ০ / স্টক কম / ট্রান্সফার নিশ্চিত করা হয়নি) — ঠিক করে আবার চেষ্টা করুন।")
         elif not confirm_existing:
             st.error("এই SR আগে ব্যবহার হয়েছে — নিশ্চিত করার টিক দিন।")
         elif guard():
-            n = save_requisition_issue(fac, [(ln["sl"], q_) for ln, q_ in zip(lines, qtys)], tx_date, sr_no, ttype,
-                                       notes.strip(), verified)
+            n = save_requisition_issue(fac, [(ln["sl"], q_, xfer_flags.get(ln["sl"], False)) for ln, q_ in zip(lines, qtys)],
+                                       tx_date, sr_no, ttype, notes.strip(), verified, po_pending)
             if n:
                 st.session_state["last_req_no"] = sr_no
                 st.session_state["ri_lines"] = []
