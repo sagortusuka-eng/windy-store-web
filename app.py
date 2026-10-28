@@ -4331,6 +4331,22 @@ def tab_stock_report():
         st_items["Status"] = st_items.variance.apply(
             lambda v: "Match" if abs(v) < 1e-9 else ("Excess" if v > 0 else "Shortage"))
 
+        _d1, _d2, _plbl = report_period("sr", default="এই মাস", label="📅 Received / Issued সময়কাল (মাস / তারিখ)")
+        _psql, _pp = period_sql("t.date", _d1, _d2)
+        _mv = qdf_c(f"""SELECT t.factory_name, t.sl_no,
+                    COALESCE(SUM(CASE WHEN t.trans_type IN ('Supplier. Rec','Internal Rec') THEN t.qty ELSE 0 END),0) AS p_recv,
+                    COALESCE(SUM(CASE WHEN t.trans_type IN ('Issued','Internal Issue') THEN t.qty ELSE 0 END),0) AS p_issue
+                    FROM transactions t
+                    WHERE t.trans_type IN ('Issued','Internal Issue','Supplier. Rec','Internal Rec'){fw(fac, 't.')[0]}{_psql}
+                    GROUP BY t.factory_name, t.sl_no""", fp + _pp)
+        st_items = st_items.merge(_mv, on=["factory_name", "sl_no"], how="left")
+        st_items["p_recv"] = pd.to_numeric(st_items["p_recv"], errors="coerce").fillna(0.0)
+        st_items["p_issue"] = pd.to_numeric(st_items["p_issue"], errors="coerce").fillna(0.0)
+        st_items["Period Received"] = st_items["p_recv"]
+        st_items["Period Issued"] = st_items["p_issue"]
+        st_items["Period Issue Value"] = st_items["p_issue"] * st_items["unit_price"]
+        st.caption(f"Received / Issued কলাম: {_plbl} (Stock ও Value সবসময় এখনকার)।")
+
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total Items", f"{len(st_items):,}")
         m2.metric("Total Stock Value", f"৳{st_items['Stock Value'].sum():,.0f}")
@@ -4348,11 +4364,13 @@ def tab_stock_report():
 
         disp_cols = ["factory_name", "sl_no", "prod_id", "item_name", "size", "unit_name",
                      "ERP Stock QTY", "Physical Stock QTY", "Stock Balance", "Stock Value",
-                     "ERP Balance Value", "Physical Balance Value", "Status", "unit_price"]
+                     "ERP Balance Value", "Physical Balance Value", "Status", "unit_price",
+                     "Period Received", "Period Issued", "Period Issue Value"]
         disp_sr = view_sr[disp_cols].copy()
         disp_sr.columns = ["Factory", "SL No", "ERP Code", "Item Name", "Size", "UOM",
                            "ERP Stock QTY", "Physical Stock QTY", "Stock Balance", "Stock Value",
-                           "ERP Balance Value", "Physical Balance Value", "Status", "Unit Price"]
+                           "ERP Balance Value", "Physical Balance Value", "Status", "Unit Price",
+                           "Period Received", "Period Issued", "Period Issue Value"]
         st.dataframe(disp_sr, hide_index=True, use_container_width=True, height=420, column_config={
             "ERP Stock QTY": st.column_config.NumberColumn(format="%.2f"),
             "Physical Stock QTY": st.column_config.NumberColumn(format="%.2f"),
@@ -4361,6 +4379,9 @@ def tab_stock_report():
             "ERP Balance Value": st.column_config.NumberColumn(format="৳ %,.2f"),
             "Physical Balance Value": st.column_config.NumberColumn(format="৳ %,.2f"),
             "Unit Price": st.column_config.NumberColumn(format="৳ %,.2f"),
+            "Period Received": st.column_config.NumberColumn(format="%.2f"),
+            "Period Issued": st.column_config.NumberColumn(format="%.2f"),
+            "Period Issue Value": st.column_config.NumberColumn(format="৳ %,.2f"),
         })
         export_buttons(view_sr, "stock_report_export")
 
@@ -5869,10 +5890,12 @@ def tab_transfer_history():
                            (SELECT i.size FROM inventory i WHERE i.prod_id=inter_factory_transfers.prod_id
                               AND i.factory_name=inter_factory_transfers.dest_factory LIMIT 1), '') AS size,
                   qty, transfer_date, transfer_time, initiated_by, status, notes FROM inter_factory_transfers"""
+    _d1, _d2, _lbl = report_period("tf")
+    _psql, _pp = period_sql("transfer_date", _d1, _d2)
     if not FAC or "CONSOLIDATED" in FAC:
-        tf = qdf(cols_sql + " ORDER BY id DESC")
+        tf = qdf(cols_sql + " WHERE 1=1" + _psql + " ORDER BY id DESC", tuple(_pp) or None)
     else:
-        tf = qdf(cols_sql + " WHERE source_factory=%s OR dest_factory=%s ORDER BY id DESC", (FAC, FAC))
+        tf = qdf(cols_sql + " WHERE (source_factory=%s OR dest_factory=%s)" + _psql + " ORDER BY id DESC", (FAC, FAC) + tuple(_pp))
     term = st.text_input("🔍 Search (ref / item / code / factory / date)", key="tf_search")
     view = tf
     if term and not tf.empty:
@@ -6171,6 +6194,9 @@ def tab_requisition():
             req_import_view()
 
     rows = load_requisitions()
+    _d1, _d2, _lbl = report_period("req", label="📅 Req Date সময়কাল (মাস / তারিখ)")
+    if _d1 is not None:
+        rows = [r for r in rows if (parse_date(r["req_date"]) and _d1 <= parse_date(r["req_date"]).date() <= _d2)]
     term = st.text_input("🔍 Search by Requisition No", key="req_search")
     if term.strip():
         rows = [r for r in rows if term.strip().lower() in str(r["req_no"]).lower()]
@@ -6308,6 +6334,8 @@ def tab_repair():
                  return_type, supplier_name, COALESCE(approved_by,'') AS approved_by,
                  COALESCE(gatepass_carrier,'') AS gatepass_carrier, sent_date, return_date, status, officer_name
                  FROM repair_returns WHERE 1=1{FSQL} ORDER BY id DESC""", FP)
+    _d1, _d2, _lbl = report_period("rp", label="📅 Sent Date সময়কাল (মাস / তারিখ)")
+    rp = period_filter_df(rp, "sent_date", _d1, _d2)
     term = st.text_input("🔍 Search (Item / Gate Pass / Supplier / Tracking / অনুমতিদাতা / Gate Pass-এনেছে)", key="rp_search")
     if term and not rp.empty:
         m = rp[["item_name", "gate_pass_no", "supplier_name", "tracking_code", "approved_by", "gatepass_carrier"]].astype(str).apply(
@@ -6390,12 +6418,14 @@ def tab_repair():
 #  TAB 8 - LEDGER
 # ============================================================
 def tab_ledger():
+    _d1, _d2, _lbl = report_period("led")
+    _psql, _pp = period_sql("t.date", _d1, _d2)
     led = qdf_c(f"""SELECT t.id, t.factory_name, t.officer_name, t.sl_no, COALESCE(i.serial_no,'') AS serial_no, t.prod_id,
                   t.item_name, t.qty, t.trans_type, t.notes, COALESCE(t.supplier_name,'') AS supplier_name,
                   COALESCE(t.challan_no,'') AS challan_no,
                   t.date, t.time, COALESCE(i.unit_price,0) AS unit_price
                   FROM transactions t LEFT JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
-                  WHERE 1=1{fw(FAC, 't.')[0]} ORDER BY t.id DESC""", FP)
+                  WHERE 1=1{fw(FAC, 't.')[0]}{_psql} ORDER BY t.id DESC""", FP + _pp)
     term = st.text_input("🔍 Search ledger (Item / Serial / ERP / SL / Officer)", key="led_search")
     if not led.empty and term.strip():
         tl = term.strip().lower()
@@ -6595,21 +6625,81 @@ def budget_manage_panel():
                 done("Budget line added.")
 
 
-def render_budget_category_items(bud):
-    """Pick a budget category -> see exactly which items were issued against it."""
+# ------------------------------------------------------------------
+#  Shared report period picker: This month / Last month / pick a month / From-To dates / All time
+# ------------------------------------------------------------------
+_PERIOD_OPTS = ["এই মাস", "গত মাস", "মাস বাছুন", "তারিখ থেকে – পর্যন্ত", "সব সময়"]
+
+
+def report_period(key, default="সব সময়", label="📅 সময়কাল (মাস / তারিখ)"):
+    """Returns (date_from, date_to, label). (None, None, 'সব সময়') means no date limit."""
+    today = local_now().date()
+    c = st.columns([1.5, 1, 1])
+    mode = c[0].selectbox(label, _PERIOD_OPTS, index=_PERIOD_OPTS.index(default), key=f"{key}_pmode")
+    if mode == "সব সময়":
+        return None, None, "সব সময়"
+    if mode in ("এই মাস", "গত মাস"):
+        y, m = today.year, today.month
+        if mode == "গত মাস":
+            y, m = (y - 1, 12) if m == 1 else (y, m - 1)
+    elif mode == "মাস বাছুন":
+        mnames = list(calendar.month_name)[1:]
+        years = list(range(today.year - 4, today.year + 1))[::-1]
+        mm = c[1].selectbox("মাস", mnames, index=today.month - 1, key=f"{key}_pm")
+        y = int(c[2].selectbox("বছর", years, key=f"{key}_py"))
+        m = mnames.index(mm) + 1
+    else:
+        d1 = c[1].date_input("From", value=today.replace(day=1), key=f"{key}_pf")
+        d2 = c[2].date_input("To", value=today, key=f"{key}_pt")
+        if d1 > d2:
+            st.error("'From' তারিখ 'To' তারিখের আগে হতে হবে — দুটো বদলে নেওয়া হলো।")
+            d1, d2 = d2, d1
+        return d1, d2, f"{d1:%d-%b-%Y} → {d2:%d-%b-%Y}"
+    d1 = date(y, m, 1)
+    d2 = date(y, m, calendar.monthrange(y, m)[1])
+    return d1, d2, d1.strftime("%b-%Y")
+
+
+def _sql_date(col):
+    """SQL expression turning a TEXT date column (any format the app saves) into a real date; unknown text -> NULL."""
+    return (f"(CASE WHEN {col} ~ '^[0-9]{{2}}-[A-Za-z]{{3}}-[0-9]{{4}}$' THEN to_date({col}, 'DD-Mon-YYYY') "
+            f"WHEN {col} ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$' THEN to_date({col}, 'YYYY-MM-DD') "
+            f"WHEN {col} ~ '^[0-9]{{2}}-[0-9]{{2}}-[0-9]{{4}}$' THEN to_date({col}, 'DD-MM-YYYY') "
+            f"WHEN {col} ~ '^[0-9]{{2}}/[0-9]{{2}}/[0-9]{{4}}$' THEN to_date({col}, 'DD/MM/YYYY') END)")
+
+
+def period_sql(col, d1, d2):
+    """(' AND <date col> BETWEEN from AND to', params) - or ('', []) for all time."""
+    if d1 is None:
+        return "", []
+    return f" AND {_sql_date(col)} BETWEEN %s AND %s", [d1, d2]
+
+
+def period_filter_df(df, col, d1, d2):
+    """Same limit for a DataFrame that has a text date column."""
+    if d1 is None or df is None or df.empty:
+        return df
+    dt = _parse_dates(df[col])
+    return df[(dt >= pd.Timestamp(d1)) & (dt < pd.Timestamp(d2) + pd.Timedelta(days=1))]
+
+
+
+def render_budget_category_items(bud, month=None):
+    """Pick a budget category -> see exactly which items were issued against it. month=(date_from, date_to) limits the period."""
     st.markdown('<div class="section-title">📦 Category click korun — kon item issue hoyeche</div>', unsafe_allow_html=True)
     lines = [(r["factory_name"], r["department_name"], r["category_name"], float(r["allocated_budget"] or 0))
              for r in bud.to_dict("records")]
     labels = [f"{c} · {short_fac(f)}" if len(set(l[0] for l in lines)) > 1 else f"{c}" for f, d, c, b in lines]
     pick = st.radio("Budget category", labels, horizontal=True, key="bud_cat_pick", label_visibility="collapsed")
     fac_, dept_, cat_, alloc = lines[labels.index(pick)]
-    rows = q_c("""SELECT t.date, t.time, t.sl_no, t.item_name, COALESCE(i.size,'') AS size, t.qty, i.unit_price,
+    msql, mp = period_sql("t.date", *month) if month else ("", [])
+    rows = q_c(f"""SELECT t.date, t.time, t.sl_no, t.item_name, COALESCE(i.size,'') AS size, t.qty, i.unit_price,
                          t.qty*i.unit_price AS amount, t.officer_name, t.trans_type
                   FROM transactions t JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
-                  WHERE t.trans_type IN ('Issued','Internal Issue') AND t.factory_name=%s AND i.category=%s
-                  ORDER BY t.id DESC""", (fac_, cat_))
+                  WHERE t.trans_type IN ('Issued','Internal Issue') AND t.factory_name=%s AND i.category=%s{msql}
+                  ORDER BY t.id DESC""", (fac_, cat_) + tuple(mp))
     if not rows:
-        st.info(f"{cat_} budget-e ekhono kono item issue hoyni.")
+        st.info(f"{cat_} budget-e " + ("এই সময়ে" if month and month[0] else "ekhono") + " kono item issue hoyni.")
         return
     df = pd.DataFrame(rows)
     df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0.0)
@@ -6639,12 +6729,79 @@ def render_budget_category_items(bud):
         st.dataframe(det, hide_index=True, use_container_width=True)
 
 
+def render_budget_line_fixer():
+    """Budget lines are chosen per ITEM (inventory.category). If an item was put on the wrong line, find it here and move it."""
+    st.markdown('<div class="section-title">🛠 Budget লাইন সংশোধন — ভুল লাইনে ধরা আইটেম ঠিক করুন</div>', unsafe_allow_html=True)
+    st.caption("আগে ভুল Budget লাইন বেছে ফেললে এখানে আইটেম খুঁজে সঠিক লাইনে সরিয়ে দিন। শুধু আইটেমের Budget Category বদলায় "
+               "(স্টক, দাম বা Department নয়)। বাজেটের হিসাব আইটেমের বর্তমান লাইন ধরে হয়, তাই বদলানোর পর সেই আইটেমের Issue নতুন লাইনে ধরা পড়বে।")
+    facs = FACTORIES if "CONSOLIDATED" in str(FAC) else [FAC]
+    fsel = facs[0] if len(facs) == 1 else st.selectbox("Factory", facs, key="bfx_fac")
+    lines = q_c("""SELECT department_name, category_name, COALESCE(allocated_budget,0) AS b FROM category_budgets
+                   WHERE factory_name=%s ORDER BY department_name, category_name""", (fsel,))
+    if not lines:
+        st.info("এই Factory-র কোনো Budget লাইন নেই।")
+        return
+    cat_names = [str(r["category_name"]) for r in lines]
+    c1, c2 = st.columns([2, 1.3])
+    term = c1.text_input("🔍 আইটেম খুঁজুন (নাম / ERP code / size / serial)", key="bfx_term").strip().lower()
+    cur_f = c2.selectbox("এখন যে Budget লাইনে আছে", ["সব"] + cat_names + ["(কোনো লাইনে নেই)"], key="bfx_cur")
+    sql = """SELECT sl_no, item_name, COALESCE(size,'') AS size, prod_id, COALESCE(category,'') AS category,
+                    COALESCE(unit_price,0) AS price FROM inventory WHERE factory_name=%s"""
+    params = [fsel]
+    if term:
+        like = f"%{term}%"
+        sql += """ AND (LOWER(item_name) LIKE %s OR LOWER(COALESCE(size,'')) LIKE %s OR LOWER(prod_id) LIKE %s
+                        OR LOWER(COALESCE(serial_no,'')) LIKE %s OR CAST(sl_no AS TEXT)=%s)"""
+        params += [like, like, like, like, term]
+    if cur_f == "(কোনো লাইনে নেই)":
+        sql += " AND COALESCE(category,'') NOT IN (SELECT category_name FROM category_budgets WHERE factory_name=%s)"
+        params.append(fsel)
+    elif cur_f != "সব":
+        sql += " AND COALESCE(category,'')=%s"
+        params.append(cur_f)
+    items = q_c(sql + " ORDER BY item_name, sl_no LIMIT 200", tuple(params))
+    if not items:
+        st.info("কোনো আইটেম মেলেনি। নাম/ERP code দিয়ে খুঁজুন।")
+    else:
+        lab = {f"SL {r['sl_no']} · {r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · এখন: {r['category'] or 'ফাঁকা'}": int(r["sl_no"])
+               for r in items}
+        picks = st.multiselect(f"কোন আইটেমগুলো সরাবেন? ({len(items)}টি দেখাচ্ছে, সর্বোচ্চ ২০০)", list(lab), key=f"bfx_items_{fsel}")
+        llab = {f"{r['category_name']}  ·  {r['department_name']}  ·  বাজেট ৳{float(r['b']):,.0f}": str(r["category_name"]) for r in lines}
+        target = llab[st.selectbox("সঠিক Budget লাইন", list(llab), key=f"bfx_line_{fsel}")]
+        pw = mgr_check("bfx_pw")
+        if st.button("💾 সঠিক Budget লাইনে সরান", key="bfx_save", type="primary"):
+            if not guard(write=False):
+                pass
+            elif not pw:
+                st.error("Manager password দিন।")
+            elif not picks:
+                st.error("অন্তত একটি আইটেম বাছুন।")
+            elif set_items_budget_category(fsel, [lab[x] for x in picks], target):
+                done(f"{len(picks)}টি আইটেম এখন ‘{target}’ Budget লাইনে ধরা পড়বে।")
+    with st.expander("🕘 সাম্প্রতিক Budget লাইন পরিবর্তন (কাল কী বদলেছিল দেখুন)"):
+        hist = q_c("""SELECT timestamp, username, details FROM audit_logs WHERE action_type='SET_BUDGET_CAT'
+                      ORDER BY id DESC LIMIT 100""")
+        if hist:
+            st.dataframe(pd.DataFrame(hist).rename(columns={"timestamp": "সময়", "username": "কে", "details": "কী বদলেছে"}),
+                         hide_index=True, use_container_width=True, height=min(80 + 35 * len(hist), 360))
+            st.caption("ভুল হয়ে থাকলে ওপরে আইটেম খুঁজে আবার সঠিক লাইনে সরিয়ে দিন।")
+        else:
+            st.caption("কোনো পরিবর্তন লগ নেই।")
+
+
 def tab_budget():
+    if lazy_tab_select(["💰 Budget", "🛠 Budget লাইন সংশোধন"], "lz_bud") == 1:
+        render_budget_line_fixer()
+        return
+    d1, d2, msel = report_period("bud", default="এই মাস", label="📅 Budget সময়কাল (মাস / তারিখ)")
+    st.caption("বাজেট প্রতি মাসের জন্য — ১ তারিখ থেকে নতুন মাসে ব্যবহার ০ থেকে শুরু হয়। আগের মাস বা নির্দিষ্ট তারিখ থেকে–পর্যন্তও দেখা যায়।")
+    month = (d1, d2)
     bud = qdf_c(f"SELECT factory_name, department_name, category_name, allocated_budget FROM category_budgets WHERE 1=1{FSQL}", FP)
+    msql, mp = period_sql("t.date", d1, d2)
     cost_rows = q_c(f"""SELECT t.factory_name, i.category, SUM(t.qty*i.unit_price) AS cost
                       FROM transactions t JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
-                      WHERE t.trans_type IN ('Issued','Internal Issue'){fw(FAC, 't.')[0]}
-                      GROUP BY t.factory_name, i.category""", FP)
+                      WHERE t.trans_type IN ('Issued','Internal Issue'){fw(FAC, 't.')[0]}{msql}
+                      GROUP BY t.factory_name, i.category""", tuple(FP + mp))
     cost = {(r["factory_name"], r["category"]): float(r["cost"] or 0) for r in cost_rows}
     if bud.empty:
         st.info("Budget nei.")
@@ -6656,7 +6813,7 @@ def tab_budget():
     tot_b = float(bud.allocated_budget.fillna(0).sum())
     tot_u = float(bud.actual_cost.sum())
     tot_pct = (tot_u / tot_b * 100) if tot_b > 0 else (100.0 if tot_u > 0 else 0.0)
-    st.markdown('<div class="section-title">💰 Budget Summary</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-title">💰 Budget Summary — {html_lib.escape(msel)}</div>', unsafe_allow_html=True)
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Total Budget", f"৳ {tot_b:,.0f}")
     m2.metric("Total Issued Value", f"৳ {tot_u:,.0f}")
@@ -6682,7 +6839,7 @@ def tab_budget():
             st.markdown(card, unsafe_allow_html=True)
 
     try:
-        render_budget_category_items(bud)
+        render_budget_category_items(bud, month)
     except Exception as e:
         st.caption(f"Category-wise issue list load hoyni: {e}")
     try:
@@ -6741,7 +6898,8 @@ def autoset_uom_once():
 
 
 def daily_rows(d, fac, show_all):
-    ds = d.strftime(DATE_FMT)
+    # the day may have been saved in any of the date formats the app accepts
+    ds_all = [d.strftime(f) for f in ("%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y")]
     rows = q_c("""SELECT i.sl_no, COALESCE(i.serial_no,'') AS serial, i.item_name, COALESCE(i.size,'') AS size,
                 COALESCE(NULLIF(i.unit_name,''),'Pcs') AS unit,
                 COALESCE(i.current_stock,0) AS cur, COALESCE(i.erp_stock,0) AS erp,
@@ -6750,17 +6908,17 @@ def daily_rows(d, fac, show_all):
                 LEFT JOIN (SELECT sl_no,
                                   SUM(CASE WHEN trans_type IN ('Issued','Internal Issue') THEN qty ELSE 0 END) AS issue,
                                   SUM(CASE WHEN trans_type IN ('Supplier. Rec','Internal Rec') THEN qty ELSE 0 END) AS recv
-                           FROM transactions WHERE factory_name=%s AND date=%s GROUP BY sl_no) d ON d.sl_no=i.sl_no
-                WHERE i.factory_name=%s ORDER BY i.sl_no""", (fac, ds, fac))
+                           FROM transactions WHERE factory_name=%s AND date IN %s GROUP BY sl_no) d ON d.sl_no=i.sl_no
+                WHERE i.factory_name=%s ORDER BY i.sl_no""", (fac, tuple(ds_all), fac))
     out = []
     for r in rows:
-        cur, erp = float(r["cur"]), float(r["erp"])
+        cur, erp = float(r["cur"] or 0), float(r["erp"] or 0)
         diff = round(cur - erp, 4)
         short, exc = (abs(diff) if diff < 0 else 0.0), (diff if diff > 0 else 0.0)
-        if not show_all and abs(cur) < 1e-9 and short == 0 and exc == 0 and float(r["issue"]) <= 0 and float(r["recv"]) <= 0:
+        if not show_all and abs(cur) < 1e-9 and short == 0 and exc == 0 and float(r["issue"] or 0) <= 0 and float(r["recv"] or 0) <= 0:
             continue
         out.append({"SL No.": r["sl_no"], "Serial No": r["serial"], "Item Name": r["item_name"], "Size": r["size"], "Unit": r["unit"],
-                    "Current Stock": cur, "Daily Issue": float(r["issue"]), "Daily Received": float(r["recv"]),
+                    "Current Stock": cur, "Daily Issue": float(r["issue"] or 0), "Daily Received": float(r["recv"] or 0),
                     "Short Qty": short, "Excess Qty": exc})
     return pd.DataFrame(out)
 
@@ -6804,10 +6962,10 @@ tr.short td {{ background:#fde8e8; }} tr.excess td {{ background:#fff3e0; }}</st
 </body></html>"""
 
 
-def tab_daily_sheet():
+def _tab_daily_sheet_inner():
     with st.container(border=True):
         c1, c2, c3, c4 = st.columns([1, 2, 1, 1])
-        d = c1.date_input("Date", value=date.today(), key="ds_date")
+        d = c1.date_input("Date", value=local_now().date(), key="ds_date")
         ds_opts = [FAC] if unit_lock_active() and FAC in FACTORIES else FACTORIES   # an officer's sheet stays on the locked unit
         fac = c2.selectbox("Factory", ds_opts, index=ds_opts.index(FAC) if FAC in ds_opts else 0, key="ds_fac")
         show_all = c3.checkbox("Include zero-stock", key="ds_all")
@@ -6852,6 +7010,17 @@ def tab_daily_sheet():
                 if st.button("Save UOM", key="uom_btn"):
                     if set_uom(fac, r["sl_no"], r["item_name"], unit, same):
                         done("UOM updated.")
+
+
+def tab_daily_sheet():
+    """Wrapper: a problem inside the Daily Work Sheet is shown here with its real reason instead of crashing the page."""
+    try:
+        _tab_daily_sheet_inner()
+    except Exception as e:   # Streamlit's own rerun/stop signals are not Exceptions, so they pass straight through
+        import traceback
+        st.error(f"Daily Work Sheet-এ সমস্যা: {type(e).__name__}: {e}")
+        with st.expander("Technical details"):
+            st.code(traceback.format_exc())
 
 
 # ============================================================
@@ -11054,20 +11223,22 @@ def _gp_tracking(view):
     if df.empty:
         st.info("এখনো কোনো Gate Pass গ্রহণ করা হয়নি। প্রথমে '📥 Gate Pass গ্রহণ' থেকে এন্ট্রি দিন।")
         return
+    _d1, _d2, _lbl = report_period("gpt", label="📅 গ্রহণের সময়কাল (মাস / তারিখ)")
     c1, c2 = st.columns([2, 1])
     term = c1.text_input("🔍 Search (Gate Pass / Source / Item / ERP code)", key="gp_trk_search").strip().lower()
     stat_f = c2.selectbox("অবস্থা", ["সব", "স্টোরে আছে (balance > 0)", "সব ইস্যু হয়ে গেছে"], key="gp_trk_stat")
-    if term:
-        m = df[["gate_pass_no", "source_place", "item_name", "prod_id"]].astype(str).apply(
-            lambda c: c.str.lower().str.contains(term, regex=False)).any(axis=1)
-        df = df[m]
     lots = df.to_dict("records")
-    issued, alloc = _gp_compute(lots)
+    issued, alloc = _gp_compute(lots)   # FIFO is always worked out on every lot; the filters below only choose what is shown
     df = df.copy()
     df["issued"] = df["id"].map(lambda i: round(issued.get(int(i), 0.0), 4))
     df["balance"] = (df["qty"] - df["issued"]).clip(lower=0)
     df["status"] = df.apply(lambda r: "✅ সব ইস্যু হয়েছে" if r["balance"] <= 1e-9
                             else ("🟡 আংশিক ইস্যু" if r["issued"] > 0 else "🔵 স্টোরে আছে"), axis=1)
+    if term:
+        m = df[["gate_pass_no", "source_place", "item_name", "prod_id"]].astype(str).apply(
+            lambda c: c.str.lower().str.contains(term, regex=False)).any(axis=1)
+        df = df[m]
+    df = period_filter_df(df, "rec_date", _d1, _d2)
     if stat_f.startswith("স্টোরে"):
         df = df[df["balance"] > 1e-9]
     elif stat_f.startswith("সব ইস্যু"):
