@@ -11583,6 +11583,7 @@ def ensure_hold_bill_table():
                 resolved_note TEXT, entered_by TEXT, created_at TEXT)""")
             cur.execute("ALTER TABLE hold_bills ADD COLUMN IF NOT EXISTS erp_grn TEXT DEFAULT 'Pending'")
             cur.execute("ALTER TABLE hold_bills ADD COLUMN IF NOT EXISTS erp_grn_date TEXT")
+            cur.execute("ALTER TABLE hold_bills ADD COLUMN IF NOT EXISTS responsible TEXT")
             cur.execute("""CREATE TABLE IF NOT EXISTS hold_bill_issues (
                 id SERIAL PRIMARY KEY, bill_id INTEGER, factory_name TEXT, issue_date TEXT, req_no TEXT, department TEXT,
                 qty REAL DEFAULT 0, remarks TEXT, erp_issue TEXT DEFAULT 'Pending', erp_issue_date TEXT,
@@ -11615,10 +11616,10 @@ def save_hold_bills(fac, rows):
             dup += 1
             continue
         res = run("""INSERT INTO hold_bills (factory_name, received_date, challan_no, invoice_no, supplier_name, item_name, qty, rate,
-               total_value, problem_type, dept_to, remarks, status, entered_by, created_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'Open',%s,%s) RETURNING id""",
+               total_value, problem_type, dept_to, remarks, responsible, status, entered_by, created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'Open',%s,%s) RETURNING id""",
                   (fac, r["date"], r["challan"], r["invoice"], r["supplier"], r["item"], r["qty"], r["rate"], r["total"],
-                   r["problem"], r["dept"], r["remarks"], user, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                   r["problem"], r["dept"], r["remarks"], r.get("responsible", ""), user, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         if r.get("issue"):
             _hb_insert_issue(res[0][0], fac, user, r["issue"])
         saved += 1
@@ -11629,9 +11630,9 @@ def save_hold_bills(fac, rows):
 @tx
 def update_hold_bill(bid, d):
     run("""UPDATE hold_bills SET received_date=%s, challan_no=%s, invoice_no=%s, supplier_name=%s, item_name=%s, qty=%s, rate=%s,
-           total_value=%s, problem_type=%s, dept_to=%s, remarks=%s WHERE id=%s""",
+           total_value=%s, problem_type=%s, dept_to=%s, remarks=%s, responsible=%s WHERE id=%s""",
         (d["date"], d["challan"], d["invoice"], d["supplier"], d["item"], d["qty"], d["rate"], d["total"], d["problem"],
-         d["dept"], d["remarks"], int(bid)))
+         d["dept"], d["remarks"], d.get("responsible", ""), int(bid)))
     audit("HOLD_BILL_EDIT", f"Hold bill #{bid} edited (challan {d['challan']}, {d['supplier']})")
     return True
 
@@ -11679,6 +11680,54 @@ def delete_hold_issue(iid):
 
 
 @tx
+def assign_hold_responsible(ids, name):
+    """Set (or clear) the person who is responsible for solving the given hold bills."""
+    ids = [int(i) for i in ids]
+    run("UPDATE hold_bills SET responsible=%s WHERE id = ANY(%s)", (name, ids))
+    audit("HOLD_BILL_ASSIGN", f"{len(ids)} hold bill(s) -> responsible: {name or '(none)'}")
+    return True
+
+
+@tx
+def update_hold_issue(iid, d):
+    """Correct one issue record (date / requisition / department / qty / remarks)."""
+    row = q("SELECT bill_id FROM hold_bill_issues WHERE id=%s", (int(iid),))
+    if not row:
+        st.error("Issue রেকর্ড পাওয়া যায়নি।")
+        return False
+    bid = row[0]["bill_id"]
+    b = q("SELECT COALESCE(qty,0) AS qty FROM hold_bills WHERE id=%s FOR UPDATE", (bid,))
+    others = float(q("SELECT COALESCE(SUM(qty),0) AS s FROM hold_bill_issues WHERE bill_id=%s AND id<>%s", (bid, int(iid)))[0]["s"] or 0)
+    if b and float(b[0]["qty"]) > 0 and others + float(d["qty"]) > float(b[0]["qty"]) + 1e-9:
+        st.error(f"Issue পরিমাণ বেশি হয়ে যাচ্ছে — বিলে মোট {float(b[0]['qty']):g}, অন্য Issue {others:g}, সর্বোচ্চ {float(b[0]['qty']) - others:g}।")
+        return False
+    run("UPDATE hold_bill_issues SET issue_date=%s, req_no=%s, department=%s, qty=%s, remarks=%s WHERE id=%s",
+        (d["date"], d["req"], d["dept"], d["qty"], d["remarks"], int(iid)))
+    audit("HOLD_BILL_ISSUE_EDIT", f"Hold bill #{bid}: issue entry #{iid} edited (qty {float(d['qty']):g}, SR {d['req']}, dept {d['dept']})")
+    return True
+
+
+@tx
+def clear_hold_issues(bid):
+    """Remove every issue record of a bill -> the item counts as 'In store' again."""
+    run("DELETE FROM hold_bill_issues WHERE bill_id=%s", (int(bid),))
+    audit("HOLD_BILL_ISSUE_CLEAR", f"Hold bill #{bid}: all issue records removed (back to In store)")
+    return True
+
+
+@tx
+def reset_hold_erp(kind, ids):
+    """Undo a wrong 'ERP Done' mark."""
+    ids = [int(i) for i in ids]
+    if kind == "grn":
+        run("UPDATE hold_bills SET erp_grn='Pending', erp_grn_date=NULL WHERE id = ANY(%s)", (ids,))
+    else:
+        run("UPDATE hold_bill_issues SET erp_issue='Pending', erp_issue_date=NULL WHERE id = ANY(%s)", (ids,))
+    audit("HOLD_BILL_ERP_UNDO", f"ERP {kind.upper()} set back to Pending for {len(ids)} record(s)")
+    return True
+
+
+@tx
 def set_hold_erp(kind, ids, date_s):
     """kind 'grn' -> hold_bills.erp_grn ; kind 'issue' -> hold_bill_issues.erp_issue."""
     if kind == "grn":
@@ -11693,7 +11742,7 @@ def _hb_blank(n=5):
     t = local_now().date()
     return pd.DataFrame({"Received Date": [t] * n, "Challan No": [""] * n, "Invoice No": [""] * n, "Supplier": [""] * n,
                          "Item Name": [""] * n, "Qty": [0.0] * n, "Rate": [0.0] * n, "Total Value": [0.0] * n,
-                         "Problem": [HB_PROBLEMS[0]] * n, "Department": [HB_DEPTS[0]] * n, "Remarks": [""] * n,
+                         "Problem": [HB_PROBLEMS[0]] * n, "Department": [HB_DEPTS[0]] * n, "Responsible": [""] * n, "Remarks": [""] * n,
                          "Issued Qty": [0.0] * n, "Issue Date": pd.Series([pd.NaT] * n, dtype="datetime64[ns]"), "Issue Req No": [""] * n, "Issue Dept": [None] * n})
 
 
@@ -11732,6 +11781,7 @@ def _hb_entry_form():
             "Total Value": st.column_config.NumberColumn("Total Value (৳)", min_value=0.0, format="%.2f"),
             "Problem": st.column_config.SelectboxColumn("Problem", options=HB_PROBLEMS),
             "Department": st.column_config.SelectboxColumn("কাকে জানাতে হবে", options=HB_DEPTS),
+            "Responsible": st.column_config.TextColumn("দায়িত্বে কে (নাম / পদবি)", help="যার অধীনে/দায়িত্বে এই বিলটি সমাধানের অপেক্ষায় আছে"),
             "Remarks": st.column_config.TextColumn("Remarks", width="large"),
             "Issued Qty": st.column_config.NumberColumn("Issued Qty (আগেই Issue)", min_value=0.0, format="%g"),
             "Issue Date": st.column_config.DateColumn("Issue Date", format="DD-MMM-YYYY"),
@@ -11767,7 +11817,7 @@ def _hb_entry_form():
                          "supplier": sup, "item": item, "qty": qty, "rate": rate, "total": tot if tot > 0 else round(qty * rate, 2),
                          "problem": _hb_s(r.get("Problem")) if _hb_s(r.get("Problem")) in HB_PROBLEMS else "Other",
                          "dept": _hb_s(r.get("Department")) if _hb_s(r.get("Department")) in HB_DEPTS else HB_DEPTS[0],
-                         "remarks": _hb_s(r.get("Remarks")), "issue": issue})
+                         "remarks": _hb_s(r.get("Remarks")), "responsible": _hb_s(r.get("Responsible")), "issue": issue})
         if errs:
             st.error("এই সারিগুলোতে Challan/Invoice No, Supplier বা Item Name নেই: " + ", ".join(map(str, errs)) + " — ঠিক করে আবার চাপুন (কিছুই সংরক্ষণ হয়নি)।")
         elif ierrs:
@@ -11792,6 +11842,29 @@ def _hb_phys(qty, issued):
     return "NIL - issued"
 
 
+def _hb_norm(v):
+    """Supplier name key: upper/lower case, dots, commas and extra spaces do not make a different supplier."""
+    return re.sub(r"\s+", " ", re.sub(r"[.,]", " ", str(v or "").lower())).strip()
+
+
+def _hb_add_supplier_cols(df):
+    df["supplier_key"] = df["supplier_name"].map(_hb_norm)
+    df["challan_key"] = [(_hb_s(c) or _hb_s(i)) for c, i in zip(df["challan_no"], df["invoice_no"])]
+    disp = df.groupby("supplier_key")["supplier_name"].agg(lambda x: x.value_counts().index[0])
+    df["supplier_disp"] = df["supplier_key"].map(disp)
+    g = df.groupby("supplier_key")
+    df["sup_items"] = g["id"].transform("count")
+    df["sup_challans"] = g["challan_key"].transform("nunique")
+    df["sup_value"] = g["total_value"].transform("sum")
+    df["challan_items"] = df.groupby(["supplier_key", "challan_key"])["id"].transform("count")
+    df["days_num"] = pd.to_numeric(df["days_held"], errors="coerce")
+
+
+def _hb_sorted(df):
+    cols = ["dept_to", "supplier_key", "challan_key", "problem_type"] if "supplier_key" in df.columns else ["dept_to", "problem_type", "received_date"]
+    return df.sort_values(cols)
+
+
 def _hb_load(kp, default_status):
     """Filters shared by the list and the report: period (Received Date), status, problem, department, search."""
     fsql, fp = fw(FAC)
@@ -11800,7 +11873,7 @@ def _hb_load(kp, default_status):
                           COALESCE(h.problem_type,'') AS problem_type, COALESCE(h.dept_to,'') AS dept_to,
                           COALESCE(h.remarks,'') AS remarks, COALESCE(h.status,'Open') AS status,
                           COALESCE(h.resolved_date,'') AS resolved_date, COALESCE(h.resolved_note,'') AS resolved_note,
-                          COALESCE(h.entered_by,'') AS entered_by, COALESCE(h.erp_grn,'Pending') AS erp_grn,
+                          COALESCE(h.entered_by,'') AS entered_by, COALESCE(h.erp_grn,'Pending') AS erp_grn, COALESCE(h.responsible,'') AS responsible,
                           COALESCE(x.iq,0) AS issued_qty, COALESCE(x.txt,'') AS issue_text
                    FROM hold_bills h
                    LEFT JOIN (SELECT bill_id, SUM(qty) AS iq,
@@ -11809,11 +11882,14 @@ def _hb_load(kp, default_status):
                               FROM hold_bill_issues GROUP BY bill_id) x ON x.bill_id=h.id
                    WHERE 1=1{fsql} ORDER BY h.id DESC LIMIT 3000""", fp)
     d1, d2, lbl = report_period(kp, label="📅 Received Date সময়কাল (মাস / তারিখ)")
-    c1, c2, c3, c4 = st.columns([1, 1.3, 1.3, 2])
+    c1, c2, c3, c4, c5 = st.columns([0.9, 1.2, 1.2, 1.5, 1.8])
     stat = c1.selectbox("Status", ["Open", "Resolved", "সব"], index=["Open", "Resolved", "সব"].index(default_status), key=f"{kp}_stat")
     prob = c2.selectbox("Problem", ["সব"] + HB_PROBLEMS, key=f"{kp}_prob")
     dept = c3.selectbox("কাকে জানাতে হবে", ["সব"] + HB_DEPTS, key=f"{kp}_dept")
-    term = c4.text_input("🔍 Challan / Invoice / Supplier / Item", key=f"{kp}_term").strip().lower()
+    _noone = "— নির্ধারিত নয় —"
+    pnames = sorted({str(x).strip() for x in df["responsible"] if str(x).strip()}) if not df.empty else []
+    resp = c4.selectbox("দায়িত্বে (Pending with)", ["সব", _noone] + pnames, key=f"{kp}_resp")
+    term = c5.text_input("🔍 Challan / Invoice / Supplier / Item", key=f"{kp}_term").strip().lower()
     if df.empty:
         return df, lbl
     df = period_filter_df(df, "received_date", d1, d2)
@@ -11823,8 +11899,12 @@ def _hb_load(kp, default_status):
         df = df[df["problem_type"] == prob]
     if dept != "সব":
         df = df[df["dept_to"] == dept]
+    if resp == _noone:
+        df = df[df["responsible"].astype(str).str.strip() == ""]
+    elif resp != "সব":
+        df = df[df["responsible"] == resp]
     if term and not df.empty:
-        m = df[["challan_no", "invoice_no", "supplier_name", "item_name", "remarks"]].astype(str).apply(
+        m = df[["challan_no", "invoice_no", "supplier_name", "item_name", "remarks", "responsible"]].astype(str).apply(
             lambda c: c.str.lower().str.contains(term, regex=False)).any(axis=1)
         df = df[m]
     if not df.empty:
@@ -11832,6 +11912,7 @@ def _hb_load(kp, default_status):
         df["days_held"] = [age_days(a, b or None) for a, b in zip(df["received_date"], df["resolved_date"])]
         df["in_store_qty"] = (df["qty"] - df["issued_qty"]).clip(lower=0)
         df["physical"] = [_hb_phys(a, b) for a, b in zip(df["qty"], df["issued_qty"])]
+        _hb_add_supplier_cols(df)
     return df, lbl
 
 
@@ -11842,7 +11923,9 @@ def _hb_show(df):
                               "remarks": "Remarks", "status": "Status", "resolved_date": "Resolved Date",
                               "resolved_note": "Resolution", "entered_by": "Entered by", "days_held": "Days Held",
                               "issued_qty": "Issued Qty", "in_store_qty": "In Store Qty", "physical": "Physical Stock",
-                              "issue_text": "Issue details (date | SR | dept | qty)", "erp_grn": "ERP GRN"})
+                              "issue_text": "Issue details (date | SR | dept | qty)", "erp_grn": "ERP GRN",
+                              "responsible": "Responsible", "sup_items": "Supplier Items", "sup_challans": "Supplier Challans",
+                              "challan_items": "Items in Challan", "sup_value": "Supplier Total"})
 
 
 def _hb_pick(df, key):
@@ -11851,81 +11934,214 @@ def _hb_pick(df, key):
     return lab[st.selectbox("কোন Hold Bill?", list(lab), key=key)]
 
 
+def _hb_names():
+    try:
+        d = qdf_c("SELECT DISTINCT TRIM(responsible) AS n FROM hold_bills WHERE COALESCE(TRIM(responsible),'')<>'' ORDER BY 1")
+        return [str(x) for x in d["n"].tolist()] if not d.empty else []
+    except Exception:
+        return []
+
+
+def _hb_person_pick(label, current, key):
+    """Pick an earlier-used responsible person or type a new name. Returns '' when nobody."""
+    names = _hb_names()
+    if current and current not in names:
+        names.append(current)
+    NEW, NONE = "➕ নতুন নাম লিখুন", "— কেউ নির্ধারিত নয় —"
+    opts = [NONE] + names + [NEW]
+    sel = st.selectbox(label, opts, index=opts.index(current) if current in opts else 0, key=key)
+    if sel == NEW:
+        return st.text_input("নাম ও পদবি লিখুন (যেমন: Mr. Karim — Sourcing Manager)", key=key + "_new").strip()
+    return "" if sel == NONE else sel
+
+
+def _hb_issue_fix(bid, kp, can_write, show_table=True):
+    """Edit / delete the issue records of ONE hold bill (this is how a wrong 'NIL - issued' is corrected)."""
+    iss = qdf_c("""SELECT id, issue_date, req_no, department, qty, remarks, erp_issue
+                   FROM hold_bill_issues WHERE bill_id=%s ORDER BY id""", (int(bid),))
+    if iss.empty:
+        if show_table:
+            st.caption("এই বিলে কোনো Issue রেকর্ড নেই — মাল স্টোরে (In store) আছে ধরা হচ্ছে। Issue হয়ে থাকলে ‘🔻 Issue রেকর্ড’ ট্যাব থেকে যোগ করুন।")
+        return
+    st.markdown("**🔻 Issue রেকর্ড — ভুল থাকলে এখান থেকেই ঠিক করুন / মুছুন**")
+    if show_table:
+        st.dataframe(iss.rename(columns={"id": "ID", "issue_date": "Issue Date", "req_no": "Requisition No", "department": "Department",
+                                         "qty": "Qty", "remarks": "Remarks", "erp_issue": "ERP Issue"}),
+                     hide_index=True, use_container_width=True)
+    if not can_write:
+        return
+    lab = {f"#{x['id']} · {x['issue_date']} · SR {x['req_no'] or '-'} · {x['department']} · {float(x['qty']):g}": int(x["id"])
+           for x in iss.to_dict("records")}
+    pick = lab[st.selectbox("কোন Issue রেকর্ড ঠিক করবেন?", list(lab), key=f"{kp}_ipick")]
+    row = next(x for x in iss.to_dict("records") if int(x["id"]) == pick)
+    idt = parse_date(row["issue_date"])
+    a1, a2, a3, a4 = st.columns([1, 1.1, 1.4, 1])
+    e_date = a1.date_input("Issue তারিখ", value=idt.date() if idt else local_now().date(), key=f"{kp}_idt_{pick}")
+    e_req = a2.text_input("Requisition No", value=row["req_no"] or "", key=f"{kp}_ireq_{pick}")
+    dl = HB_ISSUE_DEPTS if row["department"] in HB_ISSUE_DEPTS else HB_ISSUE_DEPTS + [row["department"]]
+    e_dept = a3.selectbox("কোন Department", dl, index=dl.index(row["department"]) if row["department"] in dl else 0, key=f"{kp}_idept_{pick}")
+    e_qty = a4.number_input("Qty", min_value=0.0, step=1.0, value=float(row["qty"]), format="%g", key=f"{kp}_iqty_{pick}")
+    e_rem = st.text_input("Remarks", value=row["remarks"] or "", key=f"{kp}_irem_{pick}")
+    if st.button("💾 Issue রেকর্ড আপডেট", key=f"{kp}_isave_{pick}", type="primary"):
+        if e_qty <= 0:
+            st.error("Qty ০-র বেশি দিন (Issue একেবারেই না হলে নিচের মুছে ফেলার অপশন ব্যবহার করুন)।")
+        elif guard() and update_hold_issue(pick, {"date": e_date.strftime(DATE_FMT), "req": e_req.strip(), "dept": e_dept,
+                                                  "qty": e_qty, "remarks": e_rem.strip()}):
+            done("✅ Issue রেকর্ড আপডেট হয়েছে।")
+    if st.toggle("🗑 Issue রেকর্ড মুছতে চাই (Manager password লাগবে)", key=f"{kp}_idel_tg_{bid}"):
+        pw_ok = mgr_check(f"{kp}_ipw_{bid}")
+        conf = confirm_box(f"{kp}_iconf_{bid}", "⚠️ আমি নিশ্চিত — Issue রেকর্ড মুছে যাবে।")
+        d1, d2 = st.columns(2)
+        if d1.button("🗑 শুধু এই রেকর্ডটি মুছুন", key=f"{kp}_idel_{pick}"):
+            if not pw_ok:
+                st.error("Manager password ঠিক নেই।")
+            elif not conf:
+                st.error("নিশ্চিত করার টিক দিন।")
+            elif guard() and delete_hold_issue(pick):
+                done("Issue রেকর্ড মুছে ফেলা হয়েছে।")
+        if d2.button("↩ সব Issue মুছে মাল ‘In store’ করুন", key=f"{kp}_iclr_{bid}"):
+            if not pw_ok:
+                st.error("Manager password ঠিক নেই।")
+            elif not conf:
+                st.error("নিশ্চিত করার টিক দিন।")
+            elif guard() and clear_hold_issues(bid):
+                done("সব Issue রেকর্ড মুছে মাল আবার ‘In store’ করা হয়েছে।")
+
+
+def _hb_supplier_view(df):
+    """One row per supplier: how many items / challans of that supplier are held, then a drill-down by challan."""
+    g = df.groupby("supplier_key")
+    summ = pd.DataFrame({
+        "Supplier": g["supplier_disp"].first(),
+        "Challan": g["challan_key"].nunique(),
+        "Items (লাইন)": g["id"].count(),
+        "Total Value": g["total_value"].sum(),
+        "In store": g["physical"].apply(lambda x: int((x != "NIL - issued").sum())),
+        "NIL - issued": g["physical"].apply(lambda x: int((x == "NIL - issued").sum())),
+        "Oldest (দিন)": g["days_num"].max().fillna(0),
+        "Responsible": g["responsible"].apply(lambda x: ", ".join(sorted({str(v).strip() for v in x if str(v).strip()})) or "—"),
+    }).reset_index(drop=True).sort_values("Total Value", ascending=False)
+    st.dataframe(summ, hide_index=True, use_container_width=True, height=min(90 + 35 * len(summ), 420), column_config={
+        "Total Value": st.column_config.NumberColumn(format="%.0f"), "Oldest (দিন)": st.column_config.NumberColumn(format="%d")})
+    sel = st.selectbox("🏢 কোন Supplier-এর বিস্তারিত (Challan অনুযায়ী) দেখবেন?", summ["Supplier"].tolist(), key="hbl_sup_pick")
+    sd = df[df["supplier_disp"] == sel]
+    st.markdown(f"### {sel}")
+    st.caption(f"এই Supplier-এর **{len(sd)}টি আইটেম** / {sd['challan_key'].nunique()}টি চালান আটকে আছে — মোট ৳{float(sd['total_value'].sum()):,.0f}")
+    for ch, cd in sd.groupby("challan_key", sort=False):
+        who = ", ".join(sorted({str(v).strip() for v in cd["responsible"] if str(v).strip()})) or "নির্ধারিত নয়"
+        st.markdown(f"🧾 **Challan / Invoice {ch or '-'}** · {len(cd)}টি আইটেম · ৳{float(cd['total_value'].sum()):,.0f} · দায়িত্বে: **{who}**")
+        st.dataframe(_hb_show(cd)[["ID", "Received Date", "Item", "Qty", "Rate", "Total Value", "Problem", "Responsible", "Days Held",
+                                   "Physical Stock", "ERP GRN", "Remarks"]], hide_index=True, use_container_width=True)
+    return summ
+
+
 @_frag
 def _hb_list():
     df, lbl = _hb_load("hbl", "Open")
     if df.empty:
         st.info("এই শর্তে কোনো Hold Bill নেই।")
         return
-    k = st.columns(5)
+    k = st.columns(6)
     k[0].metric("মোট লাইন", f"{len(df):,}")
-    k[1].metric("Open", f"{int((df['status'] == 'Open').sum()):,}")
-    k[2].metric("মোট মূল্য", f"৳{float(df['total_value'].sum()):,.0f}")
-    k[3].metric("Physically NIL (Issue হয়ে গেছে)", f"{int((df['physical'] == 'NIL - issued').sum()):,}")
-    k[4].metric("গড় কত দিন পড়ে আছে", f"{_hb_num(pd.to_numeric(df['days_held'], errors='coerce').mean()):.0f} দিন")
-    show = _hb_show(df)[["ID", "Received Date", "Challan No", "Invoice No", "Supplier", "Item", "Qty", "Rate", "Total Value",
-                         "Problem", "Dept", "Status", "Days Held", "Issued Qty", "In Store Qty", "Physical Stock", "ERP GRN",
-                         "Issue details (date | SR | dept | qty)", "Remarks"]]
-    st.dataframe(show, hide_index=True, use_container_width=True, height=min(90 + 35 * len(show), 460), column_config={
-        "Rate": st.column_config.NumberColumn(format="%.2f"), "Total Value": st.column_config.NumberColumn(format="%.0f"),
-        "Qty": st.column_config.NumberColumn(format="%g"), "Issued Qty": st.column_config.NumberColumn(format="%g"),
-        "In Store Qty": st.column_config.NumberColumn(format="%g")})
-    export_buttons(show, "hold_bills")
+    k[1].metric("Supplier", f"{df['supplier_key'].nunique():,}")
+    k[2].metric("Open", f"{int((df['status'] == 'Open').sum()):,}")
+    k[3].metric("মোট মূল্য", f"৳{float(df['total_value'].sum()):,.0f}")
+    k[4].metric("Physically NIL (Issue হয়ে গেছে)", f"{int((df['physical'] == 'NIL - issued').sum()):,}")
+    k[5].metric("গড় কত দিন পড়ে আছে", f"{_hb_num(df['days_num'].mean()):.0f} দিন")
+    view = st.radio("দেখার ধরন", ["📋 লাইন অনুযায়ী", "🏢 Supplier অনুযায়ী (কোন Supplier-এর কয়টি আইটেম আটকে)"], horizontal=True,
+                    key="hbl_view", label_visibility="collapsed")
+    st.caption("‘Supplier Items’ = বর্তমান ফিল্টারে ওই Supplier-এর মোট আটকে থাকা লাইন; ‘Items in Challan’ = একই চালানের লাইন সংখ্যা। "
+               "নামের বানানে বড়/ছোট হাতের অক্ষর বা ‘.’ আলাদা হলেও একই Supplier ধরা হয়েছে।")
+    if view.startswith("🏢"):
+        export_buttons(_hb_supplier_view(df), "hold_bills_supplier_wise")
+    else:
+        show = _hb_show(df)[["ID", "Received Date", "Challan No", "Invoice No", "Supplier", "Supplier Items", "Items in Challan", "Item", "Qty",
+                             "Rate", "Total Value", "Problem", "Dept", "Responsible", "Status", "Days Held", "Issued Qty", "In Store Qty",
+                             "Physical Stock", "ERP GRN", "Issue details (date | SR | dept | qty)", "Remarks"]]
+        st.dataframe(show, hide_index=True, use_container_width=True, height=min(90 + 35 * len(show), 460), column_config={
+            "Rate": st.column_config.NumberColumn(format="%.2f"), "Total Value": st.column_config.NumberColumn(format="%.0f"),
+            "Qty": st.column_config.NumberColumn(format="%g"), "Issued Qty": st.column_config.NumberColumn(format="%g"),
+            "In Store Qty": st.column_config.NumberColumn(format="%g"),
+            "Supplier Items": st.column_config.NumberColumn(help="এই Supplier-এর মোট কয়টি আইটেমের বিল আটকে আছে", format="%d"),
+            "Items in Challan": st.column_config.NumberColumn(format="%d")})
+        export_buttons(show, "hold_bills")
 
     can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor" and not is_cons_view
     with st.expander("✏️ Edit / ✅ Resolve / 🗑 Delete"):
         if not can_write:
             st.caption("এর জন্য login + নির্দিষ্ট Unit নির্বাচন (CONSOLIDATED নয়) + non-Auditor role লাগবে।")
-            return
-        r = _hb_pick(df, "hbl_pick")
-        k_ = str(r["id"])
-        cd = parse_date(r["received_date"])
-        e1, e2, e3 = st.columns(3)
-        n_date = e1.date_input("Received Date", value=cd.date() if cd else local_now().date(), key=f"hbe_dt_{k_}")
-        n_ch = e2.text_input("Challan No", value=r["challan_no"] or "", key=f"hbe_ch_{k_}")
-        n_inv = e3.text_input("Invoice No / Name", value=r["invoice_no"] or "", key=f"hbe_inv_{k_}")
-        n_sup = e1.text_input("Supplier", value=r["supplier_name"] or "", key=f"hbe_sup_{k_}")
-        n_item = e2.text_input("Item Name", value=r["item_name"] or "", key=f"hbe_it_{k_}")
-        n_qty = e3.number_input("Qty", min_value=0.0, value=float(r["qty"]), format="%g", key=f"hbe_q_{k_}")
-        n_rate = e1.number_input("Rate (৳)", min_value=0.0, value=float(r["rate"]), key=f"hbe_r_{k_}")
-        n_tot = e2.number_input("Total Value (৳)", min_value=0.0, value=float(r["total_value"]), key=f"hbe_t_{k_}")
-        probs = HB_PROBLEMS if r["problem_type"] in HB_PROBLEMS else HB_PROBLEMS + [r["problem_type"]]
-        depts = HB_DEPTS if r["dept_to"] in HB_DEPTS else HB_DEPTS + [r["dept_to"]]
-        n_prob = e3.selectbox("Problem", probs, index=probs.index(r["problem_type"]) if r["problem_type"] in probs else 0, key=f"hbe_p_{k_}")
-        n_dept = e1.selectbox("কাকে জানাতে হবে", depts, index=depts.index(r["dept_to"]) if r["dept_to"] in depts else 0, key=f"hbe_d_{k_}")
-        n_rem = st.text_input("Remarks", value=r["remarks"] or "", key=f"hbe_rm_{k_}")
-        if st.button("💾 Edit সংরক্ষণ", key=f"hbe_save_{k_}"):
-            if not (n_ch.strip() or n_inv.strip()) or not n_sup.strip() or not n_item.strip():
-                st.error("Challan/Invoice No, Supplier ও Item Name লাগবে।")
-            elif n_qty > 0 and float(r["issued_qty"]) > n_qty + 1e-9:
-                st.error(f"এই বিলে আগেই {float(r['issued_qty']):g} Issue রেকর্ড আছে — Qty তার চেয়ে কম করা যাবে না।")
-            elif guard() and update_hold_bill(r["id"], {"date": n_date.strftime(DATE_FMT), "challan": n_ch.strip(), "invoice": n_inv.strip(),
-                                                         "supplier": n_sup.strip(), "item": n_item.strip(), "qty": n_qty, "rate": n_rate,
-                                                         "total": n_tot if n_tot > 0 else round(n_qty * n_rate, 2), "problem": n_prob,
-                                                         "dept": n_dept, "remarks": n_rem.strip()}):
-                done("✅ Hold Bill আপডেট হয়েছে।")
-        st.markdown("---")
-        if r["status"] == "Open":
-            rd = st.date_input("সমাধানের তারিখ", value=local_now().date(), key=f"hbr_dt_{k_}")
-            rn = st.text_input("কীভাবে সমাধান হলো (note)", key=f"hbr_n_{k_}")
-            if st.button("✅ Resolved করুন", key=f"hbr_btn_{k_}", type="primary"):
-                if guard() and set_hold_bill_status(r["id"], True, rd.strftime(DATE_FMT), rn.strip()):
-                    done("✅ Resolved হিসেবে চিহ্নিত হয়েছে।")
         else:
-            st.caption(f"Resolved: {r['resolved_date']} — {r['resolved_note'] or '-'}")
-            if st.button("↩ আবার Open করুন", key=f"hbr_re_{k_}"):
-                if guard() and set_hold_bill_status(r["id"], False):
-                    done("আবার Open করা হয়েছে।")
-        st.markdown("---")
-        pw_ok = mgr_check(f"hbd_pw_{k_}")
-        conf = confirm_box(f"hbd_conf_{k_}", "⚠️ আমি নিশ্চিত — এই Hold Bill (ও এর Issue রেকর্ড) মুছে যাবে।")
-        if st.button("🗑 Delete", key=f"hbd_btn_{k_}"):
-            if not pw_ok:
-                st.error("Manager password ঠিক নেই।")
-            elif not conf:
-                st.error("Delete নিশ্চিত করার টিক দিন।")
-            elif guard() and delete_hold_bill(r["id"], f"{r['challan_no']} {r['supplier_name']} {r['item_name']}"):
-                done("Hold Bill মুছে ফেলা হয়েছে।")
+            r = _hb_pick(df, "hbl_pick")
+            k_ = str(r["id"])
+            cd = parse_date(r["received_date"])
+            e1, e2, e3 = st.columns(3)
+            n_date = e1.date_input("Received Date", value=cd.date() if cd else local_now().date(), key=f"hbe_dt_{k_}")
+            n_ch = e2.text_input("Challan No", value=r["challan_no"] or "", key=f"hbe_ch_{k_}")
+            n_inv = e3.text_input("Invoice No / Name", value=r["invoice_no"] or "", key=f"hbe_inv_{k_}")
+            n_sup = e1.text_input("Supplier", value=r["supplier_name"] or "", key=f"hbe_sup_{k_}")
+            n_item = e2.text_input("Item Name", value=r["item_name"] or "", key=f"hbe_it_{k_}")
+            n_qty = e3.number_input("Qty", min_value=0.0, value=float(r["qty"]), format="%g", key=f"hbe_q_{k_}")
+            n_rate = e1.number_input("Rate (৳)", min_value=0.0, value=float(r["rate"]), key=f"hbe_r_{k_}")
+            n_tot = e2.number_input("Total Value (৳)", min_value=0.0, value=float(r["total_value"]), key=f"hbe_t_{k_}")
+            probs = HB_PROBLEMS if r["problem_type"] in HB_PROBLEMS else HB_PROBLEMS + [r["problem_type"]]
+            depts = HB_DEPTS if r["dept_to"] in HB_DEPTS else HB_DEPTS + [r["dept_to"]]
+            n_prob = e3.selectbox("Problem", probs, index=probs.index(r["problem_type"]) if r["problem_type"] in probs else 0, key=f"hbe_p_{k_}")
+            n_dept = e1.selectbox("কাকে জানাতে হবে", depts, index=depts.index(r["dept_to"]) if r["dept_to"] in depts else 0, key=f"hbe_d_{k_}")
+            with e2:
+                n_resp = _hb_person_pick("দায়িত্বে কে (Responsible — যার অধীনে Pending)", (r.get("responsible") or "").strip(), f"hbe_resp_{k_}")
+            n_rem = st.text_input("Remarks", value=r["remarks"] or "", key=f"hbe_rm_{k_}")
+            if st.button("💾 Edit সংরক্ষণ", key=f"hbe_save_{k_}"):
+                if not (n_ch.strip() or n_inv.strip()) or not n_sup.strip() or not n_item.strip():
+                    st.error("Challan/Invoice No, Supplier ও Item Name লাগবে।")
+                elif n_qty > 0 and float(r["issued_qty"]) > n_qty + 1e-9:
+                    st.error(f"এই বিলে আগেই {float(r['issued_qty']):g} Issue রেকর্ড আছে — Qty তার চেয়ে কম করা যাবে না। "
+                             "Issue ভুল হলে নিচের ‘Issue রেকর্ড’ অংশ থেকে ঠিক করুন।")
+                elif guard() and update_hold_bill(r["id"], {"date": n_date.strftime(DATE_FMT), "challan": n_ch.strip(), "invoice": n_inv.strip(),
+                                                             "supplier": n_sup.strip(), "item": n_item.strip(), "qty": n_qty, "rate": n_rate,
+                                                             "total": n_tot if n_tot > 0 else round(n_qty * n_rate, 2), "problem": n_prob,
+                                                             "dept": n_dept, "remarks": n_rem.strip(), "responsible": n_resp}):
+                    done("✅ Hold Bill আপডেট হয়েছে।")
+            st.markdown("---")
+            _hb_issue_fix(int(r["id"]), f"hbl_{k_}", can_write)
+            st.markdown("---")
+            if r["status"] == "Open":
+                rd = st.date_input("সমাধানের তারিখ", value=local_now().date(), key=f"hbr_dt_{k_}")
+                rn = st.text_input("কীভাবে সমাধান হলো (note)", key=f"hbr_n_{k_}")
+                if st.button("✅ Resolved করুন", key=f"hbr_btn_{k_}", type="primary"):
+                    if guard() and set_hold_bill_status(r["id"], True, rd.strftime(DATE_FMT), rn.strip()):
+                        done("✅ Resolved হিসেবে চিহ্নিত হয়েছে।")
+            else:
+                st.caption(f"Resolved: {r['resolved_date']} — {r['resolved_note'] or '-'}")
+                if st.button("↩ আবার Open করুন", key=f"hbr_re_{k_}"):
+                    if guard() and set_hold_bill_status(r["id"], False):
+                        done("আবার Open করা হয়েছে।")
+            st.markdown("---")
+            pw_ok = mgr_check(f"hbd_pw_{k_}")
+            conf = confirm_box(f"hbd_conf_{k_}", "⚠️ আমি নিশ্চিত — এই Hold Bill (ও এর Issue রেকর্ড) মুছে যাবে।")
+            if st.button("🗑 Delete", key=f"hbd_btn_{k_}"):
+                if not pw_ok:
+                    st.error("Manager password ঠিক নেই।")
+                elif not conf:
+                    st.error("Delete নিশ্চিত করার টিক দিন।")
+                elif guard() and delete_hold_bill(r["id"], f"{r['challan_no']} {r['supplier_name']} {r['item_name']}"):
+                    done("Hold Bill মুছে ফেলা হয়েছে।")
+
+    with st.expander("👤 দায়িত্বে কে (Responsible) — একসাথে একাধিক বিলে নির্ধারণ"):
+        if not can_write:
+            st.caption("এর জন্য login + নির্দিষ্ট Unit নির্বাচন (CONSOLIDATED নয়) + non-Auditor role লাগবে।")
+            return
+        st.caption("কোন বিলটি কার অধীনে / কার সমাধানের অপেক্ষায় পেন্ডিং আছে সেই Sir/ব্যক্তির নাম দিন — তালিকা, ফিল্টার ও রিপোর্টে নাম দেখাবে।")
+        sups = ["সব Supplier"] + sorted(df["supplier_disp"].unique().tolist())
+        s_sel = st.selectbox("Supplier বাছুন (তার সব বিল একবারে বাছা হবে)", sups, key="hbb_sup")
+        sub = df if s_sel == sups[0] else df[df["supplier_disp"] == s_sel]
+        lab = {f"#{x['id']} · {x['challan_key'] or '-'} · {x['supplier_disp']} · {x['item_name']}": int(x["id"]) for x in sub.head(300).to_dict("records")}
+        chosen = st.multiselect("কোন বিলগুলো", list(lab), default=list(lab), key=f"hbb_ms_{s_sel}")
+        person = _hb_person_pick("দায়িত্বে কে", "", "hbb_person")
+        if st.button("👤 নির্ধারণ করুন" if person else "👤 নাম মুছে দিন (কেউ নির্ধারিত নয়)", key="hbb_btn", type="primary"):
+            if not chosen:
+                st.error("অন্তত একটি বিল বাছুন।")
+            elif guard() and assign_hold_responsible([lab[x] for x in chosen], person):
+                done(f"✅ {len(chosen)}টি বিলের দায়িত্ব ‘{person or '—'}’-কে দেওয়া হয়েছে।")
 
 
 @_frag
@@ -11969,6 +12185,9 @@ def _hb_issues():
         elif guard() and add_hold_issue(bid, r["factory_name"], {"date": i_date.strftime(DATE_FMT), "req": i_req.strip(), "dept": i_dept,
                                                                   "qty": i_qty, "remarks": i_rem.strip()}):
             done("✅ Issue রেকর্ড যোগ হয়েছে।")
+    if not iss.empty:
+        st.markdown("---")
+        _hb_issue_fix(bid, "hbi", True, show_table=False)
     if not iss.empty:
         with st.expander("🗑 ভুল Issue রেকর্ড মুছুন"):
             lab = {f"#{x['id']} · {x['issue_date']} · SR {x['req_no'] or '-'} · {x['department']} · {float(x['qty']):g}": int(x["id"])
@@ -12049,6 +12268,20 @@ def _hb_erp():
         if st.button("ERP Issue Done করুন", key="hbx_iss_btn") and ip and guard():
             if set_hold_erp("issue", [ilab[x] for x in ip], e_date.strftime(DATE_FMT)):
                 done(f"{len(ip)}টি Issue-র ERP Done হয়েছে।")
+    with st.expander("↩ ভুল ‘Done’ চিহ্ন ফেরত নিন (আবার Pending করুন)"):
+        st.caption("‘Done’ হয়ে যাওয়া লাইন দেখতে ওপরে ERP GRN / ERP Issue ফিল্টারে ‘Done’ বা ‘সব’ বাছুন।")
+        gdone = {f"Bill #{r['bill_id']} · {r['challan_no'] or r['invoice_no']} · {r['supplier_name']} · {r['item_name']}": int(r["bill_id"])
+                 for r in df.drop_duplicates("bill_id").to_dict("records") if r["erp_grn"] == "Done"}
+        gu = st.multiselect("ERP GRN → Pending", list(gdone), key="hbx_grn_undo")
+        if st.button("ERP GRN আবার Pending করুন", key="hbx_grn_undo_btn") and gu and guard():
+            if reset_hold_erp("grn", [gdone[x] for x in gu]):
+                done(f"{len(gu)}টি বিলের ERP GRN আবার Pending করা হয়েছে।")
+        idone = {f"Issue #{r['issue_id']} · {r['issue_date']} · SR {r['req_no'] or '-'} · {r['item_name']} · {float(r['qty']):g}": int(r["issue_id"])
+                 for r in df.to_dict("records") if r["erp_issue"] == "Done"}
+        iu = st.multiselect("ERP Issue → Pending", list(idone), key="hbx_iss_undo")
+        if st.button("ERP Issue আবার Pending করুন", key="hbx_iss_undo_btn") and iu and guard():
+            if reset_hold_erp("issue", [idone[x] for x in iu]):
+                done(f"{len(iu)}টি Issue-র ERP আবার Pending করা হয়েছে।")
 
 
 def _hb_pdf(df, title, sub):
@@ -12064,19 +12297,19 @@ def _hb_pdf(df, title, sub):
     sty = ParagraphStyle("c", fontSize=6.5, leading=8)
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=18, rightMargin=18, topMargin=18, bottomMargin=18)
-    head = ["#", "Received", "Challan No", "Invoice", "Supplier", "Item", "Qty", "Rate", "Total (Tk)", "Problem", "Dept", "Days",
+    head = ["#", "Received", "Challan No", "Invoice", "Supplier", "Item", "Qty", "Rate", "Total (Tk)", "Problem", "Dept", "Responsible", "Days",
             "Issued", "Physical", "Issue details (date | SR | dept | qty)", "Remarks"]
     data = [head]
-    d = df.sort_values(["dept_to", "problem_type", "received_date"])
+    d = _hb_sorted(df)
     P = lambda v: Paragraph(clean(v), sty)
     for i, r in enumerate(d.to_dict("records"), 1):
-        data.append([str(i), clean(r["received_date"]), P(r["challan_no"]), P(r["invoice_no"]), P(r["supplier_name"]), P(r["item_name"]),
+        data.append([str(i), clean(r["received_date"]), P(r["challan_no"]), P(r["invoice_no"]), P(f"{r['supplier_name']} [{int(r.get('sup_items', 1))} items]"), P(r["item_name"]),
                      f"{float(r['qty']):g}", f"{float(r['rate']):,.2f}", f"{float(r['total_value']):,.0f}", P(r["problem_type"]),
-                     P(r["dept_to"]), clean(r.get("days_held") if r.get("days_held") is not None else ""),
+                     P(r["dept_to"]), P(r.get("responsible", "")), clean(r.get("days_held") if r.get("days_held") is not None else ""),
                      f"{float(r['issued_qty']):g}", P(r["physical"]), P(r["issue_text"]), P(r["remarks"])])
-    data.append(["", "", "", "", "", "TOTAL", f"{float(d['qty'].sum()):g}", "", f"{float(d['total_value'].sum()):,.0f}", "", "", "",
+    data.append(["", "", "", "", "", "TOTAL", f"{float(d['qty'].sum()):g}", "", f"{float(d['total_value'].sum()):,.0f}", "", "", "", "",
                  f"{float(d['issued_qty'].sum()):g}", "", "", ""])
-    t = Table(data, repeatRows=1, colWidths=[16, 44, 46, 42, 60, 84, 24, 30, 42, 54, 46, 20, 28, 44, 116, 88])
+    t = Table(data, repeatRows=1, colWidths=[16, 44, 46, 42, 60, 76, 24, 30, 42, 52, 44, 48, 20, 28, 42, 90, 70])
     t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8590C")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                            ("FONTSIZE", (0, 0), (-1, -1), 6.5), ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
                            ("VALIGN", (0, 0), (-1, -1), "TOP"), ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold")]))
@@ -12087,18 +12320,18 @@ def _hb_pdf(df, title, sub):
 
 def _hb_html(df, title, sub):
     e = html_lib.escape
-    d = df.sort_values(["dept_to", "problem_type", "received_date"])
+    d = _hb_sorted(df)
     body, cur = "", None
     for i, r in enumerate(d.to_dict("records"), 1):
         if r["dept_to"] != cur:
             cur = r["dept_to"]
-            body += f"<tr><td colspan='16' class='grp'>কাকে জানাতে হবে: {e(str(cur or '-'))}</td></tr>"
+            body += f"<tr><td colspan='17' class='grp'>কাকে জানাতে হবে: {e(str(cur or '-'))}</td></tr>"
         dh = r.get("days_held")
         cls = " class='nil'" if r["physical"] == "NIL - issued" else ""
         body += (f"<tr{cls}><td>{i}</td><td>{e(str(r['received_date']))}</td><td>{e(str(r['challan_no']))}</td><td>{e(str(r['invoice_no']))}</td>"
-                 f"<td>{e(str(r['supplier_name']))}</td><td>{e(str(r['item_name']))}</td><td class='n'>{float(r['qty']):g}</td>"
+                 f"<td>{e(str(r['supplier_name']))}<br><small>({int(r.get('sup_items', 1))} items)</small></td><td>{e(str(r['item_name']))}</td><td class='n'>{float(r['qty']):g}</td>"
                  f"<td class='n'>{float(r['rate']):,.2f}</td><td class='n'>{float(r['total_value']):,.0f}</td>"
-                 f"<td>{e(str(r['problem_type']))}</td><td>{e(str(r['dept_to']))}</td><td class='n'>{'' if dh is None else int(dh)}</td>"
+                 f"<td>{e(str(r['problem_type']))}</td><td>{e(str(r['dept_to']))}</td><td>{e(str(r.get('responsible', '')))}</td><td class='n'>{'' if dh is None else int(dh)}</td>"
                  f"<td class='n'>{float(r['issued_qty']):g}</td><td>{e(str(r['physical']))}</td><td>{e(str(r['issue_text']))}</td>"
                  f"<td>{e(str(r['remarks']))}</td></tr>")
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>{e(title)}</title>
@@ -12110,10 +12343,10 @@ td.n{{text-align:right}}td.grp{{background:#fde8d8;font-weight:bold}}tr.nil td{{
 <button class="btn" onclick="window.print()">🖨 Print / Save as PDF</button>
 <h2>{e(title)}</h2><div class="sub">{e(sub)}</div>
 <table><thead><tr><th>#</th><th>Received</th><th>Challan No</th><th>Invoice</th><th>Supplier</th><th>Item</th><th>Qty</th><th>Rate</th>
-<th>Total (৳)</th><th>Problem</th><th>Dept</th><th>Days Held</th><th>Issued</th><th>Physical Stock</th><th>Issue details (date | SR | dept | qty)</th>
+<th>Total (৳)</th><th>Problem</th><th>Dept</th><th>Responsible</th><th>Days Held</th><th>Issued</th><th>Physical Stock</th><th>Issue details (date | SR | dept | qty)</th>
 <th>Remarks</th></tr></thead><tbody>{body}</tbody>
 <tfoot><tr><td colspan="6">TOTAL ({len(d)} lines)</td><td class="n">{float(d['qty'].sum()):g}</td><td></td>
-<td class="n">{float(d['total_value'].sum()):,.0f}</td><td colspan="3"></td><td class="n">{float(d['issued_qty'].sum()):g}</td><td colspan="3"></td></tr></tfoot></table>
+<td class="n">{float(d['total_value'].sum()):,.0f}</td><td colspan="4"></td><td class="n">{float(d['issued_qty'].sum()):g}</td><td colspan="3"></td></tr></tfoot></table>
 <p style="margin-top:8px;color:#444">“NIL - issued” = মালটি ফ্যাক্টরিতে আগেই Issue হয়ে গেছে, স্টোরে Physically নেই; ERP-তে GRN হলে Issue এন্ট্রি দিতে হবে।</p>
 </body></html>"""
 
@@ -12142,9 +12375,14 @@ def _hb_report():
     g2.dataframe(by_d, hide_index=True, use_container_width=True, column_config=cfg)
     g3.markdown("**Physical অবস্থা**")
     g3.dataframe(by_s, hide_index=True, use_container_width=True, column_config=cfg)
-    top = df.groupby("supplier_name").agg(Lines=("id", "count"), Value=("total_value", "sum")).reset_index().sort_values("Value", ascending=False).head(15)
-    st.markdown("**Supplier অনুযায়ী (শীর্ষ ১৫)**")
-    st.dataframe(top.rename(columns={"supplier_name": "Supplier"}), hide_index=True, use_container_width=True, column_config=cfg)
+    top = df.groupby("supplier_disp").agg(Items=("id", "count"), Challans=("challan_key", "nunique"), Value=("total_value", "sum")).reset_index().sort_values("Value", ascending=False).head(15)
+    st.markdown("**Supplier অনুযায়ী — কোন Supplier-এর কয়টি আইটেম আটকে (শীর্ষ ১৫)**")
+    st.dataframe(top.rename(columns={"supplier_disp": "Supplier"}), hide_index=True, use_container_width=True, column_config=cfg)
+    rp = df.assign(Person=df["responsible"].replace("", "— নির্ধারিত নয় —")).groupby("Person").agg(
+        Lines=("id", "count"), Suppliers=("supplier_key", "nunique"), Value=("total_value", "sum"), Oldest=("days_num", "max")).reset_index().sort_values("Value", ascending=False)
+    rp["Oldest"] = rp["Oldest"].fillna(0).astype(int)
+    st.markdown("**👤 দায়িত্বে কে — কার কাছে কতগুলো বিল Pending**")
+    st.dataframe(rp.rename(columns={"Person": "দায়িত্বে", "Oldest": "সবচেয়ে পুরোনো (দিন)"}), hide_index=True, use_container_width=True, column_config=cfg)
     if not nil.empty:
         with st.expander(f"🔴 Physically NIL — ফ্যাক্টরিতে Issue হয়ে গেছে ({len(nil)}টি) — ERP GRN হলে Issue এন্ট্রি লাগবে"):
             st.dataframe(_hb_show(nil)[["ID", "Challan No", "Supplier", "Item", "Qty", "Issued Qty", "ERP GRN",
@@ -12173,6 +12411,8 @@ def _hb_report():
     lines = [f"Hold Bills in Store - {unit}", f"Period: {lbl}", f"Total: {len(df)} lines, Tk {float(df['total_value'].sum()):,.0f}",
              f"Already issued in factory (physically NIL): {len(nil)} lines", "", "Problem-wise:"] + \
             [f"- {r['Problem']}: {int(r['Lines'])} lines, Tk {float(r['Value']):,.0f}" for r in by_p.to_dict("records")] + \
+            ["", "Pending with (responsible person):"] + \
+            [f"- {r['Person']}: {int(r['Lines'])} lines, Tk {float(r['Value']):,.0f}" for r in rp.to_dict("records")] + \
             ["", "Details are in the attached PDF report. Please arrange Requisition / PO / vehicle-fare clearance and ERP GRN so the bills can be processed.", "",
              f"Regards, {st.session_state.get('user') or 'Store'}"]
     body = "\n".join(lines)
