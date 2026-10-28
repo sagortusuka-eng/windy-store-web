@@ -6993,7 +6993,7 @@ def _tab_daily_sheet_inner():
     exp = view.copy()
     if not exp.empty:
         exp.insert(0, "Date", d.strftime(DATE_FMT))
-        exp.insert(0, "Unit", fac)
+        exp.insert(0, "Factory", fac)   # the sheet already has a "Unit" (UOM) column, so this one is called Factory
     export_buttons(exp, f"daily_work_sheet_{short_fac(fac)}_{d:%Y%m%d}",
                    title=f"Daily Work Sheet - {fac} - Date: {d.strftime(DATE_FMT)}")
     st.download_button("🖨️ Download print sheet (HTML → open & Print)", sheet_html(d, fac, df, auto),
