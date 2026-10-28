@@ -6041,11 +6041,75 @@ def auto_map(heads):
     return mp
 
 
+def pdf_to_raw(upload):
+    """Reads a requisition PDF into a plain grid (list of rows) so the normal Excel/CSV import steps can be used on it.
+    Tables are read with pdfplumber when installed; otherwise (or when the PDF has no ruled table) the text lines are split
+    on 2+ spaces with pypdf. Returns (DataFrame or None, {'req_no':..., 'date':...}, error text)."""
+    data = upload.getvalue()
+    rows, text = [], ""
+    try:
+        import pdfplumber
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            for pg in pdf.pages:
+                text += (pg.extract_text() or "") + "\n"
+                for tb in pg.extract_tables() or []:
+                    rows += [[("" if c is None else str(c).replace("\n", " ").strip()) for c in r] for r in tb if r]
+    except ImportError:
+        rows = []
+    except Exception as e:
+        return None, {}, f"PDF পড়া যায়নি: {e}"
+    if len(rows) < 2:   # no ruled table found: use the text lines
+        rows = []
+        try:
+            if not text:
+                from pypdf import PdfReader
+                for pg in PdfReader(io.BytesIO(data)).pages:
+                    text += (pg.extract_text() or "") + "\n"
+        except ImportError:
+            return None, {}, "PDF পড়ার লাইব্রেরি নেই — requirements.txt-এ `pdfplumber` (বা `pypdf`) যোগ করে redeploy করুন।"
+        except Exception as e:
+            return None, {}, f"PDF পড়া যায়নি: {e}"
+        for ln in text.splitlines():
+            parts = [p.strip() for p in re.split(r"\s{2,}|\t", ln) if p.strip()]
+            if len(parts) >= 2:
+                rows.append(parts)
+    if not rows:
+        return None, {}, "PDF থেকে কোনো লেখা/টেবিল পাওয়া যায়নি (স্ক্যান করা ছবির PDF হতে পারে) — Excel/CSV ব্যবহার করুন।"
+    w = max(len(r) for r in rows)
+    raw = pd.DataFrame([r + [""] * (w - len(r)) for r in rows])
+    meta = {}
+    m = re.search(r"(?:requisition|req\.?)\s*(?:no\.?|number|#)\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9\-/]*)", text, re.I)
+    if m:
+        meta["req_no"] = m.group(1)
+    m = re.search(r"date\s*[:\-]?\s*(\d{1,2}[-/ ][A-Za-z]{3}[-/ ]\d{4}|\d{1,2}[-/]\d{1,2}[-/]\d{4}|\d{4}-\d{2}-\d{2})", text, re.I)
+    if m:
+        d = parse_date(m.group(1).replace(" ", "-"))
+        if d:
+            meta["date"] = d.date()
+    return raw, meta, ""
+
+
 def req_import_view():
-    f = st.file_uploader("ERP Requisition file (Excel / CSV)", type=["xlsx", "xls", "csv"], key="req_file")
+    f = st.file_uploader("ERP Requisition file (Excel / CSV / PDF)", type=["xlsx", "xls", "csv", "pdf"], key="req_file")
     if not f:
         return
-    if f.name.lower().endswith(".csv"):
+    if f.name.lower().endswith(".pdf"):
+        raw, meta, err = pdf_to_raw(f)
+        if raw is None:
+            st.error(err)
+            return
+        sig = f"{f.name}:{f.size}"
+        if st.session_state.get("_req_pdf_sig") != sig:   # new PDF -> pre-fill Requisition No / date found in its text
+            st.session_state["_req_pdf_sig"] = sig
+            if meta.get("req_no"):
+                st.session_state["req_fx_no"] = meta["req_no"]
+            if meta.get("date"):
+                st.session_state["req_fx_date"] = meta["date"]
+        st.caption("📄 PDF থেকে টেবিল পড়া হয়েছে — নিচে Header row ও কলাম মিলিয়ে নিন (PDF-এর ওপরের লেখা থেকে পাওয়া Requisition No / তারিখ নিচে বসানো হয়েছে, ভুল হলে বদলান)। "
+                   "মিললে ‘Import requisition’ চাপুন।")
+        with st.expander("PDF থেকে পড়া কাঁচা টেবিল"):
+            st.dataframe(raw.head(80), hide_index=True, use_container_width=True)
+    elif f.name.lower().endswith(".csv"):
         raw = pd.read_csv(f, header=None, dtype=object, keep_default_na=False)
     else:
         xls = pd.ExcelFile(f)
