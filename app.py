@@ -5881,7 +5881,20 @@ def edit_transfer(t, new_qty, date_s, time_s, notes):
     return True
 
 
+def ensure_transfer_size_column():
+    """Idempotently add inter_factory_transfers.size even if the cached init_db skipped the DDL (fixes UndefinedColumn)."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE inter_factory_transfers ADD COLUMN IF NOT EXISTS size TEXT")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def tab_transfer_history():
+    run_once_per_process("transfer_size_column", ensure_transfer_size_column)
     cols_sql = """SELECT id, transfer_ref, source_factory, dest_factory, prod_id, item_name,
                   COALESCE(NULLIF(size,''),
                            (SELECT i.size FROM inventory i WHERE i.prod_id=inter_factory_transfers.prod_id
