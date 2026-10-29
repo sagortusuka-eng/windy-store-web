@@ -13662,6 +13662,8 @@ def ensure_msc_tables():
                 sw_closing REAL DEFAULT 0, received_qty REAL DEFAULT 0, issued_qty REAL DEFAULT 0, expected_qty REAL DEFAULT 0,
                 current_qty REAL DEFAULT 0, physical_qty REAL, counter TEXT DEFAULT '', remarks TEXT DEFAULT '',
                 entered_by TEXT, entered_at TEXT, applied INTEGER DEFAULT 0, applied_by TEXT, applied_at TEXT)""")
+            cur.execute("ALTER TABLE msc_items ADD COLUMN IF NOT EXISTS extra_issued REAL DEFAULT 0")
+            cur.execute("ALTER TABLE msc_items ADD COLUMN IF NOT EXISTS extra_received REAL DEFAULT 0")
             cur.execute("CREATE INDEX IF NOT EXISTS ix_msc_items_sid ON msc_items(session_id)")
         conn.commit()
     except Exception:
@@ -13670,10 +13672,10 @@ def ensure_msc_tables():
 
 
 def msc_ensure():
-    if st.session_state.get("_msc_ready"):
+    if st.session_state.get("_msc_ready2"):
         return
-    run_once_per_process("msc_tables", ensure_msc_tables)
-    st.session_state["_msc_ready"] = True
+    run_once_per_process("msc_tables_v2", ensure_msc_tables)
+    st.session_state["_msc_ready2"] = True
 
 
 def _msc_pdate(s):
@@ -13822,11 +13824,13 @@ def msc_set_counters(sid, mapping):
 
 @tx
 def msc_save_physical(sid, changes):
+    """changes = (id, physical, remarks, extra_issued, extra_received)"""
     user, when = st.session_state.get("user", ""), local_now().strftime("%d-%b-%Y %I:%M %p")
     n = 0
-    for iid, phys, rem in changes:
-        run("""UPDATE msc_items SET physical_qty=%s, remarks=%s, entered_by=%s, entered_at=%s
-               WHERE id=%s AND session_id=%s AND COALESCE(applied,0)=0""", (phys, rem or "", user, when, int(iid), sid))
+    for iid, phys, rem, ex_i, ex_r in changes:
+        run("""UPDATE msc_items SET physical_qty=%s, remarks=%s, extra_issued=%s, extra_received=%s, entered_by=%s, entered_at=%s
+               WHERE id=%s AND session_id=%s AND COALESCE(applied,0)=0""",
+            (phys, rem or "", float(ex_i or 0), float(ex_r or 0), user, when, int(iid), sid))
         n += 1
     audit("MSC_ENTRY", f"Monthly stock check #{sid}: {n} physical count(s) saved by {user}")
     return n
@@ -13841,7 +13845,8 @@ def msc_apply(sid, fac, count_d, label, ids):
     for it in rows:
         if it["physical_qty"] is None:
             continue
-        delta = round(float(it["physical_qty"]) - float(it["expected_qty"] or 0), 6)
+        exp_q = float(it["expected_qty"] or 0) + float(it.get("extra_received") or 0) - float(it.get("extra_issued") or 0)
+        delta = round(float(it["physical_qty"]) - exp_q, 6)
         if abs(delta) < MSC_EPS:
             continue
         live = run("SELECT COALESCE(current_stock,0) FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE", (it["sl_no"], fac))
@@ -13854,7 +13859,7 @@ def msc_apply(sid, fac, count_d, label, ids):
         run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (delta, it["sl_no"], fac))
         insert_tx(fac, user, it["sl_no"], it["prod_id"], it["item_name"], abs(delta),
                   "Stock Adjustment (+)" if delta > 0 else ADJ_OUT, count_d.day,
-                  f"Monthly stock check {label}: expected {float(it['expected_qty']):g}, physical {float(it['physical_qty']):g}",
+                  f"Monthly stock check {label}: expected {exp_q:g}, physical {float(it['physical_qty']):g}",
                   count_d.strftime(DATE_FMT), local_now().strftime("%I:%M %p"), "Verified")
         run("UPDATE msc_items SET applied=1, applied_by=%s, applied_at=%s WHERE id=%s",
             (user, local_now().strftime("%d-%b-%Y %I:%M %p"), it["id"]))
@@ -13887,21 +13892,26 @@ def msc_sessions(fac):
 def msc_load(sid):
     df = qdf_c("""SELECT m.id, m.sl_no, m.prod_id, m.item_name, m.size, m.unit, m.category, m.unit_price, m.closing_qty,
                   m.closing_src, m.received_qty, m.issued_qty, m.expected_qty, m.physical_qty, m.counter, m.remarks,
-                  m.entered_by, m.applied, COALESCE(i.current_stock,0) AS live_qty
+                  m.entered_by, m.applied, COALESCE(m.extra_issued,0) AS extra_issued, COALESCE(m.extra_received,0) AS extra_received,
+                  COALESCE(i.current_stock,0) AS live_qty
                   FROM msc_items m JOIN msc_sessions s ON s.id=m.session_id
                   LEFT JOIN inventory i ON i.sl_no=m.sl_no AND i.factory_name=s.factory_name
                   WHERE m.session_id=%s ORDER BY m.category, m.item_name, m.size, m.sl_no""", (int(sid),))
     if df.empty:
         return df
     import numpy as np
-    for c in ("unit_price", "closing_qty", "received_qty", "issued_qty", "expected_qty", "physical_qty", "live_qty"):
+    for c in ("unit_price", "closing_qty", "received_qty", "issued_qty", "expected_qty", "physical_qty", "live_qty",
+              "extra_issued", "extra_received"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["extra_issued"], df["extra_received"] = df["extra_issued"].fillna(0.0), df["extra_received"].fillna(0.0)
+    df["expected_qty"] = df["expected_qty"] + df["extra_received"] - df["extra_issued"]
     for c in ("size", "counter", "remarks", "prod_id", "unit"):
         df[c] = df[c].fillna("").astype(str)
     df["diff"] = df["physical_qty"] - df["expected_qty"]
     df["diff_value"] = df["diff"] * df["unit_price"].fillna(0)
-    df["status"] = np.select([df["physical_qty"].isna(), df["diff"].abs() < MSC_EPS, df["diff"] < 0],
-                             ["⏳ Not counted", "✅ Match", "🔻 Short"], default="🔺 Excess")
+    df["status"] = np.select([df["physical_qty"].isna() & (df["expected_qty"].abs() < MSC_EPS), df["physical_qty"].isna(),
+                              df["diff"].abs() < MSC_EPS, df["diff"] < 0],
+                             ["⚪ No stock", "⏳ Not counted", "✅ Match", "🔻 Short"], default="🔺 Excess")
     return df
 
 
@@ -13930,35 +13940,46 @@ tr:nth-child(even) td { background:#fafafa; }
 </style>"""
 
 
-def msc_sheet_html(df, meta, blind=True):
+def msc_sheet_html(df, meta, blind=True, blank_rows=0):
     esc = html_lib.escape
     kind = "COUNT SHEET (blind)" if blind else "COUNT SHEET (office copy)"
     parts = [f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(kind)}</title>{_MSC_HTML_CSS}</head><body>",
              "<div class='noprint'><button onclick='window.print()'>🖨 Print</button> &nbsp; (A4 landscape)</div>"]
+    ncol = 10 if blind else 15
     for cat in list(dict.fromkeys(df["category"])):
         sub = df[df["category"] == cat]
         counters = sorted({c for c in sub["counter"] if c})
         head = ("<tr><th>#</th><th>SL</th><th>ERP code</th><th>Item</th><th>Size</th><th>UOM</th>"
                 + ("" if blind else "<th>Closing</th><th>Recd / In</th><th>Issued / Out</th><th>Expected</th>")
-                + "<th style='width:16%'>PHYSICAL</th>" + ("" if blind else "<th>Diff</th>") + "<th style='width:14%'>Remarks</th></tr>")
+                + "<th style='width:11%'>PHYSICAL</th>" + ("" if blind else "<th>Diff</th>")
+                + "<th style='width:9%'>ISSUED after print (write)</th><th style='width:9%'>RECEIVED after print (write)</th>"
+                + "<th style='width:10%'>Remarks</th></tr>")
         body = []
         for n, (_, r) in enumerate(sub.iterrows(), 1):
             nums = "" if blind else (f"<td class='n'>{_g(r['closing_qty'])}</td><td class='n'>{_g(r['received_qty'])}</td>"
                                      f"<td class='n'>{_g(r['issued_qty'])}</td><td class='n'><b>{_g(r['expected_qty'])}</b></td>")
             body.append(f"<tr><td>{n}</td><td>{esc(str(r['sl_no']))}</td><td>{esc(r['prod_id'])}</td><td>{esc(r['item_name'])}</td>"
                         f"<td>{esc(r['size'])}</td><td>{esc(r['unit'])}</td>{nums}<td class='box'></td>"
-                        + ("" if blind else "<td class='box'></td>") + "<td></td></tr>")
+                        + ("" if blind else "<td class='box'></td>") + "<td class='box'></td><td class='box'></td><td></td></tr>")
+        if blank_rows:
+            body.append(f"<tr><td colspan='{ncol}' style='background:#FFF4E6;font-weight:bold'>Items NOT in this list - write item name, size and quantity</td></tr>")
+            blank = ("<tr><td>+</td>" + "<td></td>" * 5 + "<td class='box'></td>" * 3 + "<td></td></tr>") if blind else \
+                    ("<tr><td>+</td>" + "<td></td>" * 9 + "<td class='box'></td>" * 4 + "<td></td></tr>")
+            body.extend([blank] * int(blank_rows))
         parts.append(
             f"<div class='cat'><h1>{esc(kind)} — {esc(str(cat))}</h1>"
             f"<div class='meta'><b>{esc(meta['factory'])}</b> &nbsp;|&nbsp; Closing balance date: <b>{esc(meta['closing'])}</b> "
             f"&nbsp;|&nbsp; Count date: <b>{esc(meta['count'])}</b> &nbsp;|&nbsp; Counter: <b>{esc(', '.join(counters) or '________')}</b> "
-            f"&nbsp;|&nbsp; Items: {len(sub)}</div><table><thead>{head}</thead><tbody>{''.join(body)}</tbody></table>"
+            f"&nbsp;|&nbsp; Items: {len(sub)}</div>"
+            f"<div class='meta'>If anything is <b>issued</b> or <b>received</b> after this sheet was printed (and is not yet in the software), "
+            f"write the quantity in the ISSUED / RECEIVED (write) columns - it is added to the system figure.</div>"
+            f"<table><thead>{head}</thead><tbody>{''.join(body)}</tbody></table>"
             f"<div class='sig'><span>Counted by: ____________</span><span>Checked by: ____________</span><span>Signature / Date: ____________</span></div></div>")
     parts.append("</body></html>")
     return "".join(parts).encode("utf-8")
 
 
-def msc_sheet_pdf(df, meta, blind=True):
+def msc_sheet_pdf(df, meta, blind=True, blank_rows=0):
     try:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4, landscape
@@ -13977,25 +13998,35 @@ def msc_sheet_pdf(df, meta, blind=True):
         story.append(Paragraph(_pdf_txt(f"Count sheet {'(blind)' if blind else '(office copy)'} - {cat}"), ss["Heading3"]))
         story.append(Paragraph(_pdf_txt(f"{meta['factory']}  |  Closing date: {meta['closing']}  |  Count date: {meta['count']}  |  "
                                         f"Counter: {', '.join(counters) or '________'}  |  Items: {len(sub)}"), ss["Normal"]))
+        story.append(Paragraph("Anything issued / received after this sheet was printed (not yet in the software): write it in the "
+                               "ISSUED / RECEIVED (write) columns.", ss["Normal"]))
         story.append(Spacer(1, 5))
         if blind:
-            data = [["#", "SL", "ERP code", "Item", "Size", "UOM", "PHYSICAL", "Remarks"]]
-            widths = [24, 32, 80, 300, 70, 40, 110, 130]
+            data = [["#", "SL", "ERP code", "Item", "Size", "UOM", "PHYSICAL", "ISSUED (write)", "RECEIVED (write)", "Remarks"]]
+            widths = [22, 30, 70, 230, 60, 36, 90, 80, 80, 100]
         else:
-            data = [["#", "SL", "ERP code", "Item", "Size", "UOM", "Closing", "Recd/In", "Issued/Out", "Expected", "PHYSICAL", "Diff", "Remarks"]]
-            widths = [22, 28, 66, 175, 50, 32, 46, 44, 48, 50, 68, 40, 70]
+            data = [["#", "SL", "ERP code", "Item", "Size", "UOM", "Closing", "Recd/In", "Issued/Out", "Expected", "PHYSICAL", "Diff",
+                     "ISSUED (write)", "RECD (write)", "Remarks"]]
+            widths = [22, 26, 60, 150, 46, 30, 42, 40, 44, 46, 60, 36, 52, 52, 50]
         for n, (_, r) in enumerate(sub.iterrows(), 1):
             base = [str(n), str(r["sl_no"]), Paragraph(_pdf_txt(r["prod_id"]), cell), Paragraph(_pdf_txt(r["item_name"]), cell),
                     Paragraph(_pdf_txt(r["size"]), cell), _pdf_txt(r["unit"])]
             if blind:
-                data.append(base + ["", ""])
+                data.append(base + ["", "", "", ""])
             else:
-                data.append(base + [_g(r["closing_qty"]), _g(r["received_qty"]), _g(r["issued_qty"]), _g(r["expected_qty"]), "", "", ""])
+                data.append(base + [_g(r["closing_qty"]), _g(r["received_qty"]), _g(r["issued_qty"]), _g(r["expected_qty"]), "", "", "", "", ""])
+        extra = []
+        if blank_rows:
+            data.append(["Items NOT in this list - write item name, size and quantity"] + [""] * (len(widths) - 1))
+            lab = len(data) - 1
+            extra = [("SPAN", (0, lab), (-1, lab)), ("BACKGROUND", (0, lab), (-1, lab), colors.HexColor("#FFF4E6"))]
+            for _ in range(int(blank_rows)):
+                data.append(["+"] + [""] * (len(widths) - 1))
         t = Table(data, colWidths=widths, repeatRows=1)
         t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8590C")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                               ("FONTSIZE", (0, 0), (-1, -1), 7.5), ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+                               ("FONTSIZE", (0, 0), (-1, -1), 7), ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
                                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 1), (-1, -1), 6),
-                               ("BOTTOMPADDING", (0, 1), (-1, -1), 6)]))
+                               ("BOTTOMPADDING", (0, 1), (-1, -1), 6)] + extra))
         story.append(t)
         story.append(Spacer(1, 10))
         story.append(Paragraph("Counted by: ______________    Checked by: ______________    Signature / Date: ______________", ss["Normal"]))
@@ -14104,28 +14135,40 @@ def msc_print_view(sid, sess, df, fac):
     msc_assign_panel(sid, df, sess)
     msc_recalc_panel(sid, sess, fac)
     st.markdown("##### 🖨 Print sheets")
-    cats = list(dict.fromkeys(df["category"]))
-    counters = sorted({c for c in df["counter"] if c})
+    o1, o2 = st.columns(2)
+    skip0 = o1.checkbox("Skip items with zero balance (no stock)", value=True, key=f"msc_skip0_{sid}")
+    blanks = int(o2.number_input("Blank rows at the end of each category (for items not in the list)", min_value=0, max_value=30,
+                                 value=5, step=1, key=f"msc_blank_{sid}"))
+    pool = df[df["expected_qty"].abs() > MSC_EPS] if skip0 else df
+    hidden = len(df) - len(pool)
+    cats = list(dict.fromkeys(pool["category"]))
+    counters = sorted({c for c in pool["counter"] if c})
     c1, c2 = st.columns(2)
     scope_opts = ["All categories"] + [f"Counter: {c}" for c in counters] + [f"Category: {c}" for c in cats]
     scope = c1.selectbox("Sheets for", scope_opts, key=f"msc_scope_{sid}")
     kind = c2.radio("Sheet type", ["Blind (counters) - no system qty", "Office copy - with Closing / Expected"], key=f"msc_kind_{sid}")
     blind = kind.startswith("Blind")
     if scope.startswith("Counter: "):
-        sub = df[df["counter"] == scope[len("Counter: "):]]
+        sub = pool[pool["counter"] == scope[len("Counter: "):]]
     elif scope.startswith("Category: "):
-        sub = df[df["category"] == scope[len("Category: "):]]
+        sub = pool[pool["category"] == scope[len("Category: "):]]
     else:
-        sub = df
+        sub = pool
+    if sub.empty:
+        st.info("No items with stock to print for this selection.")
+        return
     meta = {"factory": fac, "closing": _msc_fmt(sess["closing_date"]), "count": _msc_fmt(sess["count_date"])}
-    st.caption(f"{len(sub)} items in {sub['category'].nunique()} categories. HTML opens in the browser and prints with page breaks per "
-               f"category (Bangla text safe); PDF is the same layout (Bangla letters show as ?).")
+    st.caption(f"{len(sub)} items in {sub['category'].nunique()} categories" + (f" ({hidden} zero-balance items left out)" if hidden else "")
+               + (f" + {blanks} blank rows per category" if blanks else "")
+               + ". HTML opens in the browser and prints with a page break per category (Bangla text safe); "
+                 "PDF has the same layout (Bangla letters show as ?).")
     d1, d2 = st.columns(2)
     stem = f"count_sheet_{sid}_{'blind' if blind else 'office'}"
-    _lazy_download(d1, "🖨 Download print-ready HTML", lambda: msc_sheet_html(sub, meta, blind), f"{stem}.html", "text/html", f"msc_h_{sid}_{blind}_{scope}")
+    tag = f"{sid}_{blind}_{scope}_{int(skip0)}_{blanks}"
+    _lazy_download(d1, "🖨 Download print-ready HTML", lambda: msc_sheet_html(sub, meta, blind, blanks), f"{stem}.html", "text/html", f"msc_h_{tag}")
     try:
         import reportlab  # noqa: F401
-        _lazy_download(d2, "📄 Download PDF", lambda: msc_sheet_pdf(sub, meta, blind), f"{stem}.pdf", "application/pdf", f"msc_p_{sid}_{blind}_{scope}")
+        _lazy_download(d2, "📄 Download PDF", lambda: msc_sheet_pdf(sub, meta, blind, blanks), f"{stem}.pdf", "application/pdf", f"msc_p_{tag}")
     except ImportError:
         d2.caption("PDF: 'pip install reportlab'")
 
@@ -14142,24 +14185,38 @@ def msc_entry_editor(sid, df, locked, fac):
     prog = {c: (int(sub_all[sub_all["category"] == c]["physical_qty"].notna().sum()), int((sub_all["category"] == c).sum())) for c in cats}
     pick = st.selectbox("Category", cats, format_func=lambda c: f"{c}  ({prog[c][0]}/{prog[c][1]} counted)", key=f"msc_ecat_{sid}")
     show_exp = st.checkbox("Show expected qty (manager - not blind)", key=f"msc_showexp_{sid}")
+    hide0 = st.checkbox("Hide zero-balance items (untick to enter an item that was not on the sheet)", value=True, key=f"msc_hide0_{sid}")
     sub = df[df["category"] == pick].copy()
-    cols = ["id", "sl_no", "prod_id", "item_name", "size", "unit"] + (["expected_qty"] if show_exp else []) + ["physical_qty", "remarks"]
+    if hide0:
+        sub = sub[(sub["expected_qty"].abs() > MSC_EPS) | sub["physical_qty"].notna()
+                  | (sub["extra_issued"] != 0) | (sub["extra_received"] != 0)]
+    cols = ["id", "sl_no", "prod_id", "item_name", "size", "unit"] + (["expected_qty"] if show_exp else []) + \
+           ["extra_issued", "extra_received", "physical_qty", "remarks"]
     base = sub[cols].reset_index(drop=True)
     cfg = {"id": None, "sl_no": st.column_config.NumberColumn("SL", format="%d"), "prod_id": "ERP code",
            "item_name": st.column_config.TextColumn("Item", width="large"), "size": "Size", "unit": "UOM",
            "expected_qty": st.column_config.NumberColumn("Expected"),
+           "extra_issued": st.column_config.NumberColumn("ISSUED after print", min_value=0.0, step=1.0,
+                                                         help="Written on the sheet: issued after the sheet was printed and not yet in the software"),
+           "extra_received": st.column_config.NumberColumn("RECEIVED after print", min_value=0.0, step=1.0,
+                                                           help="Written on the sheet: received after the sheet was printed and not yet in the software"),
            "physical_qty": st.column_config.NumberColumn("PHYSICAL", min_value=0.0, step=1.0),
            "remarks": st.column_config.TextColumn("Remarks")}
-    ed = st.data_editor(base, hide_index=True, use_container_width=True, key=f"msc_ed_{sid}_{pick}", column_config=cfg,
-                        disabled=[c for c in cols if c not in ("physical_qty", "remarks")] + (["physical_qty", "remarks"] if locked else []),
+    ed = st.data_editor(base, hide_index=True, use_container_width=True, key=f"msc_ed_{sid}_{pick}_{int(hide0)}_{int(show_exp)}", column_config=cfg,
+                        disabled=[c for c in cols if c not in ("physical_qty", "remarks", "extra_issued", "extra_received")]
+                        + (["physical_qty", "remarks", "extra_issued", "extra_received"] if locked else []),
                         height=min(620, 60 + 36 * len(base)))
     changes = []
     for i in range(len(base)):
         o, n = base.loc[i, "physical_qty"], ed.loc[i, "physical_qty"]
         orem, nrem = str(base.loc[i, "remarks"] or ""), str(ed.loc[i, "remarks"] or "")
         same_q = (pd.isna(o) and pd.isna(n)) or (not pd.isna(o) and not pd.isna(n) and abs(float(o) - float(n)) < 1e-9)
-        if not same_q or orem != nrem:
-            changes.append((int(base.loc[i, "id"]), None if pd.isna(n) else float(n), nrem))
+        oi, ni = float(base.loc[i, "extra_issued"] or 0), float(0 if pd.isna(ed.loc[i, "extra_issued"]) else ed.loc[i, "extra_issued"])
+        orc, nrc = float(base.loc[i, "extra_received"] or 0), float(0 if pd.isna(ed.loc[i, "extra_received"]) else ed.loc[i, "extra_received"])
+        if not same_q or orem != nrem or abs(oi - ni) > 1e-9 or abs(orc - nrc) > 1e-9:
+            changes.append((int(base.loc[i, "id"]), None if pd.isna(n) else float(n), nrem, ni, nrc))
+    if base.empty:
+        st.info("No items with stock in this category (untick 'Hide zero-balance items' to see all).")
     if locked:
         st.warning("This check is closed - entry is locked.")
     elif st.button(f"💾 Save this category ({len(changes)} changed)", key=f"msc_save_{sid}_{pick}", type="primary",
@@ -14171,12 +14228,17 @@ def msc_entry_editor(sid, df, locked, fac):
 
 
 def msc_entry_view(sid, sess, df, fac):
-    st.caption("Type the physical quantity from the filled sheets, category by category. Only the rows you change are saved, "
-               "so different people can enter different categories at the same time.")
+    st.caption("Type the physical quantity from the filled sheets, category by category. Also type what was written in the "
+               "ISSUED / RECEIVED (after print) columns: it is added to the system figure (Expected = software figure + received - issued). "
+               "Write only what is NOT yet in the software, otherwise it is counted twice. "
+               "Only the rows you change are saved, so different people can enter different categories at the same time.")
     msc_entry_editor(sid, df, sess["status"] != "Open", fac)
 
 
-def msc_result_view(sid, sess, df, fac):
+def msc_result_view(sid, sess, df_all, fac):
+    df = df_all[df_all["status"] != "⚪ No stock"]          # zero-balance items nobody had to count
+    if len(df_all) - len(df):
+        st.caption(f"{len(df_all) - len(df)} zero-balance items are not included below (nothing to count).")
     cats = list(dict.fromkeys(df["category"]))
     f1, f2 = st.columns(2)
     cat = f1.selectbox("Category", ["All"] + cats, key=f"msc_rcat_{sid}")
@@ -14201,10 +14263,10 @@ def msc_result_view(sid, sess, df, fac):
     show = view if stt == "All" else view[view["status"] == stt]
     out = show.rename(columns={"category": "Category", "sl_no": "SL", "prod_id": "ERP code", "item_name": "Item", "size": "Size", "unit": "UOM",
                                "closing_qty": "Closing", "received_qty": "Received/In", "issued_qty": "Issued/Out", "expected_qty": "Expected",
-                               "physical_qty": "Physical", "diff": "Difference", "diff_value": "Value diff", "status": "Status",
+                               "physical_qty": "Physical", "extra_issued": "Issued after print", "extra_received": "Received after print", "diff": "Difference", "diff_value": "Value diff", "status": "Status",
                                "counter": "Counter", "remarks": "Remarks", "live_qty": "Software now"})
-    out = out[["Category", "SL", "ERP code", "Item", "Size", "UOM", "Closing", "Received/In", "Issued/Out", "Expected", "Physical",
-               "Difference", "Value diff", "Status", "Software now", "Counter", "Remarks"]]
+    out = out[["Category", "SL", "ERP code", "Item", "Size", "UOM", "Closing", "Received/In", "Issued/Out", "Issued after print", "Received after print",
+               "Expected", "Physical", "Difference", "Value diff", "Status", "Software now", "Counter", "Remarks"]]
     st.markdown(f"##### Items ({len(out)})")
     st.dataframe(out, hide_index=True, use_container_width=True, height=420)
     export_buttons(out, f"monthly_stock_check_{sid}", f"Monthly stock check #{sid} - {sess['month_label']}")
@@ -14215,7 +14277,7 @@ def msc_result_view(sid, sess, df, fac):
         r1, r2 = st.columns(2)
         _lazy_download(r1, "🖨 Recount sheet (blind, HTML)", lambda: msc_sheet_html(bad, meta, True), f"recount_{sid}.html", "text/html", f"msc_rh_{sid}")
         _lazy_download(r2, "🖨 Recount sheet (office, HTML)", lambda: msc_sheet_html(bad, meta, False), f"recount_office_{sid}.html", "text/html", f"msc_ro_{sid}")
-    msc_approve_panel(sid, sess, df, fac)
+    msc_approve_panel(sid, sess, df_all, fac)
 
 
 def msc_approve_panel(sid, sess, df, fac):
@@ -14271,7 +14333,7 @@ def msc_history_view(fac, sessions):
         return
     h = qdf_c("""SELECT s.id, s.month_label, s.closing_date, s.count_date, s.status, s.source, s.created_by, s.created_at,
                  COUNT(m.id) AS items, COUNT(m.physical_qty) AS counted,
-                 SUM(CASE WHEN m.physical_qty IS NOT NULL AND ABS(m.physical_qty-m.expected_qty)<0.000001 THEN 1 ELSE 0 END) AS matched,
+                 SUM(CASE WHEN m.physical_qty IS NOT NULL AND ABS(m.physical_qty-(m.expected_qty+COALESCE(m.extra_received,0)-COALESCE(m.extra_issued,0)))<0.000001 THEN 1 ELSE 0 END) AS matched,
                  SUM(COALESCE(m.applied,0)) AS applied
                  FROM msc_sessions s LEFT JOIN msc_items m ON m.session_id=s.id WHERE s.factory_name=%s
                  GROUP BY s.id ORDER BY s.id DESC LIMIT 60""", (fac,))
