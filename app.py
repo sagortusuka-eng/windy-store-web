@@ -12297,73 +12297,6 @@ def _hb_erp():
                 done(f"{len(iu)}টি Issue-র ERP আবার Pending করা হয়েছে।")
 
 
-def _hb_pdf(df, title, sub):
-    """Quick PDF (English text only - the built-in PDF font cannot draw Bangla; Bangla remarks show as [Bangla])."""
-    try:
-        from reportlab.lib import colors
-        from reportlab.lib.pagesizes import A4, landscape
-        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-    except ImportError:
-        return None
-    clean = lambda v: re.sub(r"[^\x00-\xff]+", "[Bangla]", "" if v is None else str(v))
-    sty = ParagraphStyle("c", fontSize=6.5, leading=8)
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=18, rightMargin=18, topMargin=18, bottomMargin=18)
-    head = ["#", "Received", "Challan No", "Invoice", "Supplier", "Item", "Qty", "Rate", "Total (Tk)", "Problem", "Dept", "Responsible", "Days",
-            "Issued", "Physical", "Issue details (date | SR | dept | qty)", "Remarks"]
-    data = [head]
-    d = _hb_sorted(df)
-    P = lambda v: Paragraph(clean(v), sty)
-    for i, r in enumerate(d.to_dict("records"), 1):
-        data.append([str(i), clean(r["received_date"]), P(r["challan_no"]), P(r["invoice_no"]), P(f"{r['supplier_name']} [{int(r.get('sup_items', 1))} items]"), P(r["item_name"]),
-                     f"{float(r['qty']):g}", f"{float(r['rate']):,.2f}", f"{float(r['total_value']):,.0f}", P(r["problem_type"]),
-                     P(r["dept_to"]), P(r.get("responsible", "")), clean(r.get("days_held") if r.get("days_held") is not None else ""),
-                     f"{float(r['issued_qty']):g}", P(r["physical"]), P(r["issue_text"]), P(r["remarks"])])
-    data.append(["", "", "", "", "", "TOTAL", f"{float(d['qty'].sum()):g}", "", f"{float(d['total_value'].sum()):,.0f}", "", "", "", "",
-                 f"{float(d['issued_qty'].sum()):g}", "", "", ""])
-    t = Table(data, repeatRows=1, colWidths=[16, 44, 46, 42, 60, 76, 24, 30, 42, 52, 44, 48, 20, 28, 42, 90, 70])
-    t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8590C")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                           ("FONTSIZE", (0, 0), (-1, -1), 6.5), ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
-                           ("VALIGN", (0, 0), (-1, -1), "TOP"), ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold")]))
-    ss = getSampleStyleSheet()
-    doc.build([Paragraph(clean(title), ss["Title"]), Paragraph(clean(sub), ss["Normal"]), Spacer(1, 8), t])
-    return buf.getvalue()
-
-
-def _hb_html(df, title, sub):
-    e = html_lib.escape
-    d = _hb_sorted(df)
-    body, cur = "", None
-    for i, r in enumerate(d.to_dict("records"), 1):
-        if r["dept_to"] != cur:
-            cur = r["dept_to"]
-            body += f"<tr><td colspan='17' class='grp'>কাকে জানাতে হবে: {e(str(cur or '-'))}</td></tr>"
-        dh = r.get("days_held")
-        cls = " class='nil'" if r["physical"] == "NIL - issued" else ""
-        body += (f"<tr{cls}><td>{i}</td><td>{e(str(r['received_date']))}</td><td>{e(str(r['challan_no']))}</td><td>{e(str(r['invoice_no']))}</td>"
-                 f"<td>{e(str(r['supplier_name']))}<br><small>({int(r.get('sup_items', 1))} items)</small></td><td>{e(str(r['item_name']))}</td><td class='n'>{float(r['qty']):g}</td>"
-                 f"<td class='n'>{float(r['rate']):,.2f}</td><td class='n'>{float(r['total_value']):,.0f}</td>"
-                 f"<td>{e(str(r['problem_type']))}</td><td>{e(str(r['dept_to']))}</td><td>{e(str(r.get('responsible', '')))}</td><td class='n'>{'' if dh is None else int(dh)}</td>"
-                 f"<td class='n'>{float(r['issued_qty']):g}</td><td>{e(str(r['physical']))}</td><td>{e(str(r['issue_text']))}</td>"
-                 f"<td>{e(str(r['remarks']))}</td></tr>")
-    return f"""<!doctype html><html><head><meta charset="utf-8"><title>{e(title)}</title>
-<style>@page{{size:A4 landscape;margin:8mm}}body{{font-family:Arial,sans-serif;font-size:10px;margin:14px;color:#111}}
-h2{{margin:0}}.sub{{margin:4px 0 10px;color:#444}}table{{border-collapse:collapse;width:100%}}
-th,td{{border:1px solid #444;padding:3px 4px;text-align:left;vertical-align:top}}th{{background:#E8590C;color:#fff}}
-td.n{{text-align:right}}td.grp{{background:#fde8d8;font-weight:bold}}tr.nil td{{background:#fff4f4}}tfoot td{{font-weight:bold;background:#f3f3f3}}
-.btn{{margin-bottom:10px;padding:6px 14px;cursor:pointer}}@media print{{.btn{{display:none}}}}</style></head><body>
-<button class="btn" onclick="window.print()">🖨 Print / Save as PDF</button>
-<h2>{e(title)}</h2><div class="sub">{e(sub)}</div>
-<table><thead><tr><th>#</th><th>Received</th><th>Challan No</th><th>Invoice</th><th>Supplier</th><th>Item</th><th>Qty</th><th>Rate</th>
-<th>Total (৳)</th><th>Problem</th><th>Dept</th><th>Responsible</th><th>Days Held</th><th>Issued</th><th>Physical Stock</th><th>Issue details (date | SR | dept | qty)</th>
-<th>Remarks</th></tr></thead><tbody>{body}</tbody>
-<tfoot><tr><td colspan="6">TOTAL ({len(d)} lines)</td><td class="n">{float(d['qty'].sum()):g}</td><td></td>
-<td class="n">{float(d['total_value'].sum()):,.0f}</td><td colspan="4"></td><td class="n">{float(d['issued_qty'].sum()):g}</td><td colspan="3"></td></tr></tfoot></table>
-<p style="margin-top:8px;color:#444">“NIL - issued” = মালটি ফ্যাক্টরিতে আগেই Issue হয়ে গেছে, স্টোরে Physically নেই; ERP-তে GRN হলে Issue এন্ট্রি দিতে হবে।</p>
-</body></html>"""
-
-
 @_frag
 def _hb_report():
     df, lbl = _hb_load("hbr", "Open")
@@ -12462,6 +12395,1194 @@ def tab_hold_bills():
 
 
 # ============================================================
+#  REPORTS - read-only ERP report centre
+#  Centralised Reports page (16 reports). Every report is built from the live database tables with parameterised,
+#  read-only queries, shown as a formal A4 document, and exported as a real PDF (reportlab) and a real .xlsx (openpyxl)
+#  from the very same document object - so print, PDF and Excel always match what is on the screen.
+#  Nothing here writes to the database. The Hold Bill print / PDF (_hb_html / _hb_pdf) reuse the same renderers.
+# ============================================================
+NAV_REPORTS = "🧾 Reports"
+if NAV_REPORTS not in TAB_NAMES:
+    TAB_NAMES.insert(6, NAV_REPORTS)            # first item under "Management"; the six Workspace buttons stay as they were
+REPORT_COMPANY = "Windy Group"                   # company / group name printed on every report (same name as the app logo)
+RP_ALL_UNITS = "All Units (each unit shown separately)"
+RP_NAMES = {"Supplier. Rec": "Supplier Receipt", "Issued": "Issue to Production", "Internal Rec": "Internal Receipt (from other unit)",
+            "Internal Issue": "Internal Issue (to other unit)", "Stock Adjustment (+)": "Stock Adjustment (+)",
+            "Stock Adjustment (-)": "Stock Adjustment (-)", "Opening Balance": "Opening Balance / Stock Set"}
+RP_NUMK = ("i", "q", "r", "a", "p")
+
+
+class _RpSub(list):
+    """A sub-total row inside a report table (bold, shaded). cells[0] is the label and spans the empty cells after it."""
+
+
+def _rp_span(cells):
+    k = 1
+    while k < len(cells) and cells[k] is None:
+        k += 1
+    return k
+
+
+def _rp_blank(v):
+    return v is None or (isinstance(v, float) and math.isnan(v))
+
+
+def _rp_fmt(v, kind):
+    if _rp_blank(v):
+        return ""
+    if kind == "t":
+        return str(v)
+    if kind == "d":
+        d = parse_date(v)
+        return d.strftime(DATE_FMT) if d else str(v)
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if kind == "i":
+        return f"{x:,.0f}"
+    if kind == "q":
+        return f"{x:,.0f}" if abs(x - round(x)) < 1e-9 else f"{x:,.3f}".rstrip("0").rstrip(".")
+    if kind == "p":
+        return f"{x:,.1f}%"
+    return f"{x:,.2f}"
+
+
+def _rp_pdftxt(s):
+    """Text for the PDF: the built-in PDF font cannot draw Bangla letters, so they show as [Bangla] (same as the existing PDFs)."""
+    t = "" if s is None else str(s)
+    t = re.sub(r"[\u0980-\u09FF]+", "[Bangla]", t)
+    return html_lib.escape(t.encode("cp1252", "replace").decode("cp1252"))
+
+
+def _rp_doc(title, rtype, units, period, filters, orient, blocks, notes=None):
+    rows = sum(1 for b in blocks for s in b["sections"] for r in s["rows"] if not isinstance(r, _RpSub))
+    return {"title": title, "type": rtype, "company": REPORT_COMPANY, "units": list(units), "period": period,
+            "filters": list(filters), "orient": orient, "blocks": blocks, "notes": list(notes or []),
+            "generated": local_now().strftime("%d-%b-%Y %I:%M %p"), "rows": rows}
+
+
+def _rp_filters_text(doc):
+    return "; ".join(f"{k}: {v}" for k, v in doc["filters"]) or "None (all records)"
+
+
+# ---------------------------------------------------------------- HTML (preview + print)
+def _rp_html(doc, button=True):
+    e = html_lib.escape
+    land = doc["orient"] == "L"
+    units = " | ".join(doc["units"])
+    run = f"{doc['company']}  ·  Unit: {units}  ·  {doc['title']}  ·  {doc['period']}"
+    foot = re.sub(r'["\\\n]', " ", f"{doc['company']} - {units} - {doc['title']}")
+    css = f"""@page{{size:A4 {'landscape' if land else 'portrait'};margin:9mm 9mm 13mm 9mm;
+@bottom-right{{content:"Page " counter(page) " of " counter(pages);font:8px Arial,sans-serif;color:#444}}
+@bottom-left{{content:"{foot}";font:8px Arial,sans-serif;color:#444}}}}
+*{{box-sizing:border-box}}body{{margin:0;background:#E9EDF2;font-family:'Segoe UI','Noto Sans Bengali','Nirmala UI',Arial,sans-serif;color:#111;font-size:{'10.5' if land else '11'}px}}
+.bar{{position:sticky;top:0;z-index:5;background:#0B1F3A;color:#fff;padding:8px 14px;display:flex;gap:12px;align-items:center;font-size:12px}}
+.bar button{{background:#F59E0B;border:0;border-radius:6px;padding:7px 16px;font-weight:700;cursor:pointer;font-size:13px}}
+.paper{{width:{'297' if land else '210'}mm;max-width:100%;margin:12px auto;background:#fff;padding:9mm;box-shadow:0 1px 8px rgba(0,0,0,.25)}}
+table.frame{{width:100%;border-collapse:collapse}}table.frame>thead{{display:table-header-group}}table.frame>tbody>tr>td,table.frame>thead>tr>td{{padding:0;border:0}}
+.run{{font-size:8.5px;color:#555;border-bottom:1px solid #999;padding-bottom:3px;margin-bottom:6px}}
+h1{{text-align:center;margin:0 0 2px;font-size:19px;letter-spacing:.3px}}.co{{text-align:center;font-weight:700;font-size:13px;margin-bottom:6px}}
+table.meta{{width:100%;border-collapse:collapse;margin:6px 0 10px}}table.meta td{{border:1px solid #777;padding:3px 6px;vertical-align:top}}
+table.meta td.k{{background:#EEF2F7;font-weight:700;width:17%}}
+.ub{{background:#0B1F3A;color:#fff;font-weight:700;padding:5px 8px;margin:12px 0 6px;font-size:12.5px}}.ub.brk{{break-before:page}}
+.sh{{font-weight:700;font-size:12.5px;margin:12px 0 2px;border-bottom:2px solid #0B1F3A;padding-bottom:2px;break-after:avoid}}
+.ss{{color:#333;margin:0 0 4px;break-after:avoid}}.note{{color:#444;font-size:9px;margin:3px 0 4px}}.none{{color:#777;font-style:italic;margin:6px 0}}
+table.rt{{width:100%;border-collapse:collapse;margin:3px 0 4px}}table.rt thead{{display:table-header-group}}
+table.rt th{{background:#1F3A5F;color:#fff;border:1px solid #444;padding:3px 4px;text-align:left;vertical-align:middle}}
+table.rt td{{border:1px solid #666;padding:2.5px 4px;vertical-align:top;word-break:break-word}}table.rt tr{{break-inside:avoid}}
+table.rt tbody tr:nth-child(even) td{{background:#F7F9FC}}td.r,th.r{{text-align:right;white-space:nowrap}}td.c,th.c{{text-align:center;white-space:nowrap}}
+tr.sub td{{background:#E9EFF7!important;font-weight:700}}tr.tot td{{background:#D5DFEC!important;font-weight:700;border-top:2px solid #111}}
+table.sig{{width:100%;border-collapse:collapse;margin-top:18px;break-inside:avoid}}table.sig td{{border:1px solid #777;padding:3px 6px;height:42px;vertical-align:top;font-weight:700}}
+.gen{{font-size:8.5px;color:#555;margin-top:6px}}
+@media print{{body{{background:#fff}}.noprint{{display:none!important}}.paper{{width:auto;max-width:none;margin:0;padding:0;box-shadow:none}}}}"""
+    h = [f"<!doctype html><html><head><meta charset='utf-8'><title>{e(doc['title'])}</title><style>{css}</style></head><body>"]
+    if button:
+        h.append("<div class='bar noprint'><button onclick='window.print()'>🖨 Print Report</button>"
+                 f"<span>A4 {'landscape' if land else 'portrait'} · only this report is printed (menu, filters and buttons are left out)</span></div>")
+    h.append(f"<div class='paper'><table class='frame'><thead><tr><td><div class='run'>{e(run)}</div></td></tr></thead><tbody><tr><td>")
+    h.append(f"<div class='co'>{e(doc['company'])}</div><h1>{e(doc['title'].upper())}</h1>")
+    meta = [("Company", doc["company"]), ("Unit / Factory", units), ("Report Title", doc["title"]), ("Report Type", doc["type"]),
+            ("Reporting Period", doc["period"]), ("Generated On", doc["generated"]), ("Filters", _rp_filters_text(doc))]
+    h.append("<table class='meta'>")
+    for i in range(0, len(meta) - 1, 2):
+        h.append(f"<tr><td class='k'>{e(meta[i][0])}</td><td>{e(meta[i][1])}</td><td class='k'>{e(meta[i + 1][0])}</td><td>{e(meta[i + 1][1])}</td></tr>")
+    h.append(f"<tr><td class='k'>{e(meta[-1][0])}</td><td colspan='3'>{e(meta[-1][1])}</td></tr></table>")
+    for bi, b in enumerate(doc["blocks"]):
+        h.append(f"<div class='ub{' brk' if bi else ''}'>UNIT / FACTORY: {e(b['unit'])}</div>")
+        if not any(s["rows"] for s in b["sections"]):
+            h.append("<div class='none'>No records found for this unit with the selected dates and filters.</div>")
+            continue
+        for s in b["sections"]:
+            if s.get("heading"):
+                h.append(f"<div class='sh'>{e(s['heading'])}</div>")
+            if s.get("sub"):
+                h.append(f"<div class='ss'>{e(s['sub'])}</div>")
+            if not s["rows"]:
+                h.append(f"<div class='none'>{e(s.get('empty') or 'No records.')}</div>")
+                continue
+            cols = s["cols"]
+            al = ["r" if k in RP_NUMK else ("c" if k == "d" else "") for _, k in cols]
+            h.append("<table class='rt'><thead><tr>" + "".join(f"<th class='{a}'>{e(n)}</th>" for (n, _), a in zip(cols, al)) + "</tr></thead><tbody>")
+            body = list(s["rows"]) + ([("TOT", s["total"])] if s.get("total") else [])
+            for r in body:
+                cls, cells = ("tot", r[1]) if isinstance(r, tuple) else (("sub", r) if isinstance(r, _RpSub) else ("", r))
+                if cls:
+                    k = _rp_span(cells)
+                    tds = f"<td colspan='{k}'>{e(_rp_fmt(cells[0], 't'))}</td>" + "".join(
+                        f"<td class='{al[j]}'>{e(_rp_fmt(cells[j], cols[j][1]))}</td>" for j in range(k, len(cols)))
+                else:
+                    tds = "".join(f"<td class='{al[j]}'>{e(_rp_fmt(cells[j], cols[j][1]))}</td>" for j in range(len(cols)))
+                h.append(f"<tr class='{cls}'>{tds}</tr>")
+            h.append("</tbody></table>")
+            if s.get("note"):
+                h.append(f"<div class='note'>{e(s['note'])}</div>")
+    for n in doc["notes"]:
+        h.append(f"<div class='note'>{e(n)}</div>")
+    h.append("<table class='sig'><tr><td>Prepared by (Store)</td><td>Checked by</td><td>Approved by</td></tr></table>")
+    h.append(f"<div class='gen'>Generated {e(doc['generated'])} · KC &amp; Windy Smart Inventory</div>")
+    h.append("</td></tr></tbody></table></div></body></html>")
+    return "".join(h)
+
+
+# ---------------------------------------------------------------- PDF (real, selectable text, A4)
+def _rp_pdf(doc):
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.styles import ParagraphStyle
+        from reportlab.pdfgen import canvas as _cv
+        from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    except ImportError:
+        return None
+    land = doc["orient"] == "L"
+    ps = landscape(A4) if land else A4
+    lm = rm = 26
+    avail = ps[0] - lm - rm
+    fs = 7.3 if land else 7.8
+    base = ParagraphStyle("b", fontName="Helvetica", fontSize=fs, leading=fs + 1.8)
+    bold = ParagraphStyle("bb", parent=base, fontName="Helvetica-Bold")
+    hdr = ParagraphStyle("h", parent=bold, textColor=colors.white)
+    rgt, ctr = ParagraphStyle("r", parent=base, alignment=TA_RIGHT), ParagraphStyle("c", parent=base, alignment=TA_CENTER)
+    rgtb = ParagraphStyle("rb", parent=rgt, fontName="Helvetica-Bold")
+    P = lambda t, s=base: Paragraph(_rp_pdftxt(t), s)
+    units = " | ".join(doc["units"])
+    story = [Paragraph(_rp_pdftxt(doc["company"]), ParagraphStyle("co", parent=bold, fontSize=11, alignment=TA_CENTER, spaceAfter=2)),
+             Paragraph(_rp_pdftxt(doc["title"].upper()), ParagraphStyle("t", fontName="Helvetica-Bold", fontSize=15, leading=18, alignment=TA_CENTER, spaceAfter=6))]
+    meta = [("Company", doc["company"]), ("Unit / Factory", units), ("Report Title", doc["title"]), ("Report Type", doc["type"]),
+            ("Reporting Period", doc["period"]), ("Generated On", doc["generated"])]
+    kw = avail * 0.14
+    vw = (avail - 2 * kw) / 2
+    mrows = [[P(meta[i][0], bold), P(meta[i][1]), P(meta[i + 1][0], bold), P(meta[i + 1][1])] for i in range(0, 6, 2)]
+    mrows.append([P("Filters", bold), P(_rp_filters_text(doc)), "", ""])
+    mt = Table(mrows, colWidths=[kw, vw, kw, vw])
+    mt.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.4, colors.grey), ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#EEF2F7")),
+                            ("BACKGROUND", (2, 0), (2, -2), colors.HexColor("#EEF2F7")), ("SPAN", (1, -1), (3, -1)), ("VALIGN", (0, 0), (-1, -1), "TOP")]))
+    story += [mt, Spacer(1, 6)]
+    ub = ParagraphStyle("ub", parent=bold, textColor=colors.white, backColor=colors.HexColor("#0B1F3A"), borderPadding=(3, 4, 3, 4), spaceBefore=6, spaceAfter=6, fontSize=fs + 2)
+    sh = ParagraphStyle("sh", parent=bold, fontSize=fs + 2.2, spaceBefore=7, spaceAfter=1, keepWithNext=1)
+    ss = ParagraphStyle("ss", parent=base, spaceAfter=3, keepWithNext=1)
+    for bi, b in enumerate(doc["blocks"]):
+        if bi:
+            story.append(PageBreak())
+        story.append(Paragraph(_rp_pdftxt(f"UNIT / FACTORY: {b['unit']}"), ub))
+        if not any(s["rows"] for s in b["sections"]):
+            story.append(P("No records found for this unit with the selected dates and filters."))
+            continue
+        for s in b["sections"]:
+            if s.get("heading"):
+                story.append(Paragraph(_rp_pdftxt(s["heading"]), sh))
+            if s.get("sub"):
+                story.append(Paragraph(_rp_pdftxt(s["sub"]), ss))
+            if not s["rows"]:
+                story.append(P(s.get("empty") or "No records."))
+                continue
+            cols = s["cols"]
+            body = list(s["rows"]) + ([("TOT", s["total"])] if s.get("total") else [])
+            wts = []
+            for j, (n, k) in enumerate(cols):
+                mx = 0
+                for r in body[:250]:
+                    cells = r[1] if isinstance(r, tuple) else r
+                    if isinstance(r, (tuple, _RpSub)) and j < _rp_span(cells):
+                        continue
+                    mx = max(mx, len(_rp_fmt(cells[j], k)))
+                hw = max((len(w) for w in n.split()), default=3) + 1
+                w = max(mx, hw, 4)
+                wts.append(min(w, 34) if k == "t" else min(w, 16))
+            tot = sum(wts)
+            widths = [avail * w / tot for w in wts]
+            data = [[Paragraph(_rp_pdftxt(n), hdr) for n, _ in cols]]
+            style = [("GRID", (0, 0), (-1, -1), 0.3, colors.grey), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F3A5F")),
+                     ("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 2.5), ("RIGHTPADDING", (0, 0), (-1, -1), 2.5),
+                     ("TOPPADDING", (0, 0), (-1, -1), 1.6), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.6)]
+            for ri, r in enumerate(body, start=1):
+                special = isinstance(r, (tuple, _RpSub))
+                cells = r[1] if isinstance(r, tuple) else r
+                if special:
+                    k0 = _rp_span(cells)
+                    row = [Paragraph(_rp_pdftxt(_rp_fmt(cells[0], "t")), bold)] + [""] * (k0 - 1)
+                    row += [Paragraph(_rp_pdftxt(_rp_fmt(cells[j], cols[j][1])), rgtb if cols[j][1] in RP_NUMK else bold) for j in range(k0, len(cols))]
+                    if k0 > 1:
+                        style.append(("SPAN", (0, ri), (k0 - 1, ri)))
+                    style.append(("BACKGROUND", (0, ri), (-1, ri), colors.HexColor("#D5DFEC" if isinstance(r, tuple) else "#E9EFF7")))
+                    if isinstance(r, tuple):
+                        style.append(("LINEABOVE", (0, ri), (-1, ri), 1.2, colors.black))
+                else:
+                    row = [Paragraph(_rp_pdftxt(_rp_fmt(cells[j], cols[j][1])), rgt if cols[j][1] in RP_NUMK else (ctr if cols[j][1] == "d" else base))
+                           for j in range(len(cols))]
+                    if ri % 2 == 0:
+                        style.append(("BACKGROUND", (0, ri), (-1, ri), colors.HexColor("#F7F9FC")))
+                data.append(row)
+            t = Table(data, colWidths=widths, repeatRows=1)
+            t.setStyle(TableStyle(style))
+            story += [t]
+            if s.get("note"):
+                story.append(Paragraph(_rp_pdftxt(s["note"]), ParagraphStyle("nt", parent=base, fontSize=fs - 0.6, textColor=colors.HexColor("#444444"), spaceBefore=2)))
+            story.append(Spacer(1, 4))
+    for n in doc["notes"]:
+        story.append(Paragraph(_rp_pdftxt(n), ParagraphStyle("nt2", parent=base, fontSize=fs - 0.6, textColor=colors.HexColor("#444444"), spaceBefore=2)))
+    sw = avail / 3
+    sig = Table([[P("Prepared by (Store)", bold), P("Checked by", bold), P("Approved by", bold)], ["", "", ""]], colWidths=[sw] * 3, rowHeights=[14, 34])
+    sig.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.4, colors.grey), ("INNERGRID", (0, 0), (-1, -1), 0.4, colors.grey)]))
+    story += [Spacer(1, 12), sig]
+
+    top = lambda s: re.sub(r"[\u0980-\u09FF]+", "[Bangla]", str(s)).encode("cp1252", "replace").decode("cp1252")
+    head_line = top(f"{doc['company']}  |  Unit: {units}  |  {doc['title']}  |  {doc['period']}")
+    foot_line = top(f"Generated {doc['generated']}  |  KC & Windy Smart Inventory")
+
+    class _NC(_cv.Canvas):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self._pages = []
+
+        def showPage(self):
+            self._pages.append(dict(self.__dict__))
+            self._startPage()
+
+        def save(self):
+            n = len(self._pages)
+            for pg in self._pages:
+                self.__dict__.update(pg)
+                self.setFont("Helvetica", 7)
+                self.setFillGray(0.3)
+                self.drawString(lm, ps[1] - 16, head_line[:200])
+                self.setLineWidth(0.4)
+                self.line(lm, ps[1] - 19, ps[0] - rm, ps[1] - 19)
+                self.line(lm, 24, ps[0] - rm, 24)
+                self.drawString(lm, 15, foot_line)
+                self.drawRightString(ps[0] - rm, 15, f"Page {self._pageNumber} of {n}")
+                super().showPage()
+            super().save()
+
+    buf = io.BytesIO()
+    SimpleDocTemplate(buf, pagesize=ps, leftMargin=lm, rightMargin=rm, topMargin=30, bottomMargin=32, title=doc["title"], author="KC & Windy Smart Inventory"
+                      ).build(story, canvasmaker=_NC)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------- Excel (real cells)
+def _rp_xlsx(doc):
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        return None
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Report"
+    thin = Side(style="thin", color="888888")
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    navy, sub_f, tot_f = PatternFill("solid", fgColor="1F3A5F"), PatternFill("solid", fgColor="E9EFF7"), PatternFill("solid", fgColor="D5DFEC")
+    units = " | ".join(doc["units"])
+    info = [(doc["company"], Font(bold=True, size=14)), (doc["title"].upper(), Font(bold=True, size=13)), (f"Report Type: {doc['type']}", Font(bold=True)),
+            (f"Unit / Factory: {units}", Font(bold=True)), (f"Reporting Period: {doc['period']}", Font()), (f"Filters: {_rp_filters_text(doc)}", Font()),
+            (f"Generated On: {doc['generated']}", Font())]
+    r = 1
+    for txt, f in info:
+        ws.cell(r, 1, txt).font = f
+        r += 1
+    r += 1
+    widths = {}
+    first_hdr = None
+    maxcols = max([len(s["cols"]) for b in doc["blocks"] for s in b["sections"]] or [1])
+    for b in doc["blocks"]:
+        c = ws.cell(r, 1, f"UNIT / FACTORY: {b['unit']}")
+        c.font, c.fill = Font(bold=True, color="FFFFFF"), PatternFill("solid", fgColor="0B1F3A")
+        for j in range(2, maxcols + 1):
+            ws.cell(r, j).fill = PatternFill("solid", fgColor="0B1F3A")
+        r += 1
+        if not any(s["rows"] for s in b["sections"]):
+            ws.cell(r, 1, "No records found for this unit with the selected dates and filters.").font = Font(italic=True)
+            r += 2
+            continue
+        for s in b["sections"]:
+            if not s["rows"]:
+                continue
+            if s.get("heading"):
+                ws.cell(r, 1, s["heading"]).font = Font(bold=True, size=12)
+                r += 1
+            if s.get("sub"):
+                ws.cell(r, 1, s["sub"])
+                r += 1
+            cols = s["cols"]
+            for j, (n, k) in enumerate(cols, start=1):
+                c = ws.cell(r, j, n)
+                c.font, c.fill, c.border = Font(bold=True, color="FFFFFF"), navy, box
+                c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                widths[j] = max(widths.get(j, 0), min(max((len(w) for w in n.split()), default=4) + 2, 20))
+            if first_hdr is None:
+                first_hdr = r
+            r += 1
+            body = list(s["rows"]) + ([("TOT", s["total"])] if s.get("total") else [])
+            for row in body:
+                special = isinstance(row, (tuple, _RpSub))
+                cells = row[1] if isinstance(row, tuple) else row
+                k0 = _rp_span(cells) if special else 0
+                for j, (n, k) in enumerate(cols, start=1):
+                    v = cells[j - 1]
+                    if special and j <= k0 and j > 1:
+                        ws.cell(r, j).border = box
+                        continue
+                    if _rp_blank(v):
+                        v = None
+                    elif k == "d":
+                        d = parse_date(v)
+                        v = d if d else str(v)
+                    elif k in RP_NUMK:
+                        try:
+                            v = float(v)
+                        except (TypeError, ValueError):
+                            v = str(v)
+                    else:
+                        v = str(v)
+                    c = ws.cell(r, j, v)
+                    c.border = box
+                    if isinstance(v, float):
+                        c.number_format = ("0.0\"%\"" if k == "p" else ("#,##0" if (k == "i" or (k == "q" and abs(v - round(v)) < 1e-9)) else "#,##0.00"))
+                        c.alignment = Alignment(horizontal="right", vertical="top")
+                    elif k == "d" and not isinstance(v, str):
+                        c.number_format = "DD-MMM-YYYY"
+                        c.alignment = Alignment(horizontal="center", vertical="top")
+                    else:
+                        c.alignment = Alignment(vertical="top", wrap_text=(k == "t"))
+                    if special:
+                        c.font, c.fill = Font(bold=True), (tot_f if isinstance(row, tuple) else sub_f)
+                    shown = len(str(v)) if isinstance(v, str) else 12
+                    if not (special and j <= k0):
+                        widths[j] = max(widths.get(j, 0), min(shown + 2, 46))
+                if special and k0 > 1:
+                    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=k0)
+                r += 1
+            if s.get("note"):
+                ws.cell(r, 1, s["note"]).font = Font(italic=True, size=9)
+                r += 1
+            r += 1
+        r += 1
+    for n in doc["notes"]:
+        ws.cell(r, 1, n).font = Font(italic=True, size=9)
+        r += 1
+    for j, w in widths.items():
+        ws.column_dimensions[get_column_letter(j)].width = max(w, 7)
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.orientation = "landscape" if doc["orient"] == "L" else "portrait"
+    ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_margins.left = ws.page_margins.right = 0.35
+    ws.oddHeader.center.text = f"{doc['company']} - {units} - {doc['title']}"
+    ws.oddFooter.left.text = f"Generated {doc['generated']}"
+    ws.oddFooter.right.text = "Page &P of &N"
+    if first_hdr:
+        ws.print_title_rows = f"{first_hdr}:{first_hdr}"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------- data helpers (all read-only, parameterised)
+def _rpn(df, *cols):
+    for c in cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+    return df
+
+
+def _rp_uom_note(d, qcol, ucol="uom"):
+    g = d.groupby(ucol)[qcol].sum()
+    return "Quantity by UOM: " + "; ".join(f"{u}: {_rp_fmt(v, 'q')}" for u, v in g.items())
+
+
+def _rp_qty_tot(d, qcol, ucol="uom"):
+    """Quantities of different UOMs (Pcs, Kg ...) are never added together: a total is shown only when one UOM is present."""
+    return float(d[qcol].sum()) if d[ucol].nunique() <= 1 else None
+
+
+def _rp_inv_where(P, a=""):
+    s, p = "", []
+    if P.get("bcat"):
+        s += f" AND {a}category=%s"
+        p.append(P["bcat"])
+    if P.get("pcat"):
+        s += f" AND COALESCE({a}product_category,'')=%s"
+        p.append(P["pcat"])
+    if P.get("item"):
+        s += f" AND ({a}item_name ILIKE %s OR COALESCE({a}prod_id,'') ILIKE %s)"
+        p += [f"%{P['item']}%"] * 2
+    return s, p
+
+
+def _rp_sec(cols, rows, total=None, heading=None, sub=None, note=None, empty=None):
+    return {"heading": heading, "sub": sub, "cols": cols, "rows": rows, "total": total, "note": note, "empty": empty}
+
+
+def _rp_blocks(P, build):
+    return [{"unit": u, "sections": build(u)} for u in P["units"]]
+
+
+def _rp_stock_df(P):
+    isql, ip = _rp_inv_where(P)
+    st_sql = ""
+    if P.get("status") == "In stock (quantity above zero)":
+        st_sql = " AND COALESCE(current_stock,0)>0"
+    elif P.get("status") == "Zero or negative stock":
+        st_sql = " AND COALESCE(current_stock,0)<=0"
+    df = qdf(f"""SELECT factory_name, sl_no, COALESCE(prod_id,'') AS code, item_name, COALESCE(size,'') AS size,
+                        COALESCE(NULLIF(TRIM(category),''),'(No budget category)') AS bcat,
+                        COALESCE(NULLIF(TRIM(product_category),''),'(No product category)') AS pcat,
+                        COALESCE(NULLIF(unit_name,''),'Pcs') AS uom, COALESCE(current_stock,0) AS stock, COALESCE(erp_stock,0) AS erp,
+                        COALESCE(unit_price,0) AS price, COALESCE(min_stock,0) AS min_stock, COALESCE(preferred_supplier,'') AS pref_sup
+                 FROM inventory WHERE factory_name = ANY(%s){isql}{st_sql} ORDER BY factory_name, sl_no""", tuple([P["units"]] + ip))
+    return _rpn(df, "stock", "erp", "price", "min_stock")
+
+
+def _rp_norate_note(d):
+    n = int((d["price"] <= 0).sum())
+    return f"{n} item(s) have no stock rate recorded; their value is not shown and is not included in the totals." if n else None
+
+
+def rp_current_stock(P):
+    df = _rp_stock_df(P)
+    cols = [("SL", "i"), ("Item Code", "t"), ("Item Name", "t"), ("Size", "t"), ("Product Category", "t"), ("UOM", "t"),
+            ("Stock Qty", "q"), ("Stock Rate (Tk)", "r"), ("Stock Value (Tk)", "a")]
+
+    def build(u):
+        d = df[df["factory_name"] == u]
+        if d.empty:
+            return []
+        rows, n = [], 0
+        for pc, g in d.sort_values(["pcat", "sl_no"]).groupby("pcat", sort=True):
+            for r in g.itertuples():
+                n += 1
+                hv = r.price > 0
+                rows.append([n, r.code, r.item_name, r.size, pc, r.uom, r.stock, r.price if hv else None, r.stock * r.price if hv else None])
+            rows.append(_RpSub([f"Sub-total: {pc} ({len(g)} items)", None, None, None, None, None, _rp_qty_tot(g, "stock"), None,
+                                float((g["stock"] * g["price"]).where(g["price"] > 0, 0).sum())]))
+        tot = [f"TOTAL - {u} ({len(d)} items)", None, None, None, None, None, _rp_qty_tot(d, "stock"), None,
+               float((d["stock"] * d["price"]).where(d["price"] > 0, 0).sum())]
+        notes = [x for x in (_rp_uom_note(d, "stock") if d["uom"].nunique() > 1 else None, _rp_norate_note(d)) if x]
+        return [_rp_sec(cols, rows, tot, note=" ".join(notes) or None)]
+    return _rp_blocks(P, build), []
+
+
+def rp_stock_qty_value(P):
+    df = _rp_stock_df(P)
+    cols = [("SL", "i"), ("Item Code", "t"), ("Item Name", "t"), ("Size", "t"), ("UOM", "t"), ("Rate (Tk)", "r"), ("ERP Qty", "q"),
+            ("Physical Qty", "q"), ("Variance", "q"), ("ERP Value (Tk)", "a"), ("Physical Value (Tk)", "a"), ("Status", "t")]
+
+    def vsum(g, col):
+        return float((g[col] * g["price"]).where(g["price"] > 0, 0).sum())
+
+    def build(u):
+        d = df[df["factory_name"] == u]
+        if d.empty:
+            return []
+        rows, n = [], 0
+        for bc, g in d.sort_values(["bcat", "sl_no"]).groupby("bcat", sort=True):
+            for r in g.itertuples():
+                n += 1
+                var = r.stock - r.erp
+                hv = r.price > 0
+                rows.append([n, r.code, r.item_name, r.size, r.uom, r.price if hv else None, r.erp, r.stock, var,
+                             r.erp * r.price if hv else None, r.stock * r.price if hv else None,
+                             "Match" if abs(var) < 1e-9 else ("Excess" if var > 0 else "Shortage")])
+            one = g["uom"].nunique() <= 1
+            rows.append(_RpSub([f"Sub-total: {bc} ({len(g)} items)", None, None, None, None, None, float(g["erp"].sum()) if one else None,
+                                float(g["stock"].sum()) if one else None, float((g["stock"] - g["erp"]).sum()) if one else None,
+                                vsum(g, "erp"), vsum(g, "stock"), None]))
+        one = d["uom"].nunique() <= 1
+        tot = [f"TOTAL - {u} ({len(d)} items)", None, None, None, None, None, float(d["erp"].sum()) if one else None,
+               float(d["stock"].sum()) if one else None, float((d["stock"] - d["erp"]).sum()) if one else None,
+               vsum(d, "erp"), vsum(d, "stock"), None]
+        notes = [x for x in (_rp_uom_note(d, "stock") if not one else None, _rp_norate_note(d)) if x]
+        return [_rp_sec(cols, rows, tot, note=" ".join(notes) or None)]
+    return _rp_blocks(P, build), ["Variance = Physical Qty - ERP Qty. Values = quantity x stock rate. Quantities of different UOMs are not added together."]
+
+
+def rp_unit_stock(P):
+    df = _rp_stock_df(P)
+    cols = [("Budget Category", "t"), ("Items", "i"), ("Items In Stock", "i"), ("Zero / Negative Stock", "i"), ("Stock Value (Tk)", "a")]
+
+    def build(u):
+        d = df[df["factory_name"] == u]
+        if d.empty:
+            return []
+        d = d.assign(val=(d["stock"] * d["price"]).where(d["price"] > 0, 0.0))
+        rows = []
+        for bc, g in d.sort_values("bcat").groupby("bcat", sort=True):
+            rows.append([bc, len(g), int((g["stock"] > 0).sum()), int((g["stock"] <= 0).sum()), float(g["val"].sum())])
+        tot = [f"TOTAL - {u}", len(d), int((d["stock"] > 0).sum()), int((d["stock"] <= 0).sum()), float(d["val"].sum())]
+        return [_rp_sec(cols, rows, tot, note=_rp_norate_note(d))]
+    return _rp_blocks(P, build), ["Each unit is reported separately; stock of different units is never added together."]
+
+
+def rp_item_stock(P):
+    df = _rp_stock_df(P)
+    cols = [("SL", "i"), ("Item Code", "t"), ("Item Name", "t"), ("Size", "t"), ("UOM", "t"), ("Stock Qty", "q"), ("Minimum Stock", "q"),
+            ("Stock Position", "t"), ("Preferred Supplier", "t"), ("Stock Rate (Tk)", "r"), ("Stock Value (Tk)", "a")]
+
+    def build(u):
+        d = df[df["factory_name"] == u].sort_values(["item_name", "size"])
+        if d.empty:
+            return []
+        rows = []
+        for n, r in enumerate(d.itertuples(), 1):
+            pos = "No minimum set" if r.min_stock <= 0 else ("Below minimum" if r.stock < r.min_stock else "OK")
+            hv = r.price > 0
+            rows.append([n, r.code, r.item_name, r.size, r.uom, r.stock, r.min_stock if r.min_stock > 0 else None, pos, r.pref_sup,
+                         r.price if hv else None, r.stock * r.price if hv else None])
+        tot = [f"TOTAL - {u} ({len(d)} items)", None, None, None, None, None, None, f"{sum(1 for x in rows if x[7] == 'Below minimum')} below minimum", None, None,
+               float((d["stock"] * d["price"]).where(d["price"] > 0, 0).sum())]
+        return [_rp_sec(cols, rows, tot, note=_rp_norate_note(d))]
+    return _rp_blocks(P, build), []
+
+
+def rp_pcat_stock(P):
+    df = _rp_stock_df(P)
+    cols = [("Product Category", "t"), ("Items", "i"), ("Stock Quantity (by UOM)", "t"), ("Stock Value (Tk)", "a")]
+
+    def build(u):
+        d = df[df["factory_name"] == u]
+        if d.empty:
+            return []
+        d = d.assign(val=(d["stock"] * d["price"]).where(d["price"] > 0, 0.0))
+        rows = []
+        for pc, g in d.sort_values("pcat").groupby("pcat", sort=True):
+            rows.append([pc, len(g), "; ".join(f"{_rp_fmt(v, 'q')} {k}" for k, v in g.groupby("uom")["stock"].sum().items()), float(g["val"].sum())])
+        tot = [f"TOTAL - {u}", len(d), None, float(d["val"].sum())]
+        return [_rp_sec(cols, rows, tot, note=_rp_norate_note(d))]
+    return _rp_blocks(P, build), []
+
+
+# ---------------------------------------------------------------- transaction based reports
+def _rp_tx(P, types):
+    psql, pp = period_sql("t.date", P["d1"], P["d2"])
+    isql, ip = _rp_inv_where(P, "i.")
+    ssql, sp = ("", [])
+    if P.get("sup_raw"):
+        ssql, sp = " AND TRIM(COALESCE(t.supplier_name,'')) = ANY(%s)", [P["sup_raw"]]
+    df = qdf(f"""SELECT t.id, t.factory_name, t.date, t.time, t.trans_type, COALESCE(t.qty,0) AS qty,
+                        COALESCE(NULLIF(t.prod_id,''), i.prod_id, '') AS code, COALESCE(NULLIF(t.item_name,''), i.item_name, '') AS item,
+                        COALESCE(i.size,'') AS size, COALESCE(NULLIF(i.unit_name,''),'Pcs') AS uom, COALESCE(i.unit_price,0) AS price,
+                        COALESCE(NULLIF(TRIM(i.category),''),'(No budget category)') AS bcat, COALESCE(t.officer_name,'') AS officer,
+                        COALESCE(NULLIF(TRIM(t.supplier_name),''),'') AS supplier, COALESCE(t.challan_no,'') AS challan,
+                        COALESCE(t.req_no,'') AS req_no, t.unit_price_at_tx AS tx_rate
+                 FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                 WHERE t.factory_name = ANY(%s) AND t.trans_type = ANY(%s){psql}{isql}{ssql}
+                 ORDER BY t.factory_name, {_sql_date('t.date')} NULLS LAST, t.id""", tuple([P["units"], list(types)] + pp + ip + sp))
+    return _rpn(df, "qty", "price", "tx_rate").assign(tx_rate=lambda x: x["tx_rate"].where(x["tx_rate"] > 0))
+
+
+def _rp_rate(r, recv):
+    """Receipts: the purchase rate saved with the receipt. Issues: the item's current stock rate (same as the Budget / Ledger pages)."""
+    if recv:
+        return None if pd.isna(r.tx_rate) else float(r.tx_rate)
+    return float(r.price) if r.price > 0 else None
+
+
+def rp_supplier(P):
+    df = _rp_tx(P, ["Supplier. Rec"])
+    cols = [("SL", "i"), ("Date", "d"), ("Challan No", "t"), ("Item Code", "t"), ("Item Name", "t"), ("Size", "t"), ("UOM", "t"),
+            ("Qty", "q"), ("Rate (Tk)", "r"), ("Amount (Tk)", "a")]
+
+    def build(u):
+        d = df[df["factory_name"] == u].copy()
+        if d.empty:
+            return []
+        d["skey"] = d["supplier"].map(_hb_norm)
+        disp = d[d["skey"] != ""].groupby("skey")["supplier"].agg(lambda x: x.value_counts().index[0])
+        d["sdisp"] = d["skey"].map(disp).fillna("(Supplier not recorded)")
+        secs, grand, miss = [], 0.0, 0
+        for sd, g in sorted(d.groupby("sdisp"), key=lambda kv: (kv[0].startswith("("), kv[0].lower())):
+            rows, amt = [], 0.0
+            for n, r in enumerate(g.itertuples(), 1):
+                rt = _rp_rate(r, True)
+                a = r.qty * rt if rt else None
+                miss += 0 if rt else 1
+                amt += a or 0.0
+                rows.append([n, r.date, r.challan, r.code, r.item, r.size, r.uom, r.qty, rt, a])
+            grand += amt
+            tot = [f"Sub-total: {sd} ({len(g)} receipts)", None, None, None, None, None, None, _rp_qty_tot(g, "qty"), None, amt]
+            secs.append(_rp_sec(cols, rows, tot, heading=f"SUPPLIER: {sd}", note=_rp_uom_note(g, "qty") if g["uom"].nunique() > 1 else None))
+        secs.append(_rp_sec([("Summary", "t"), ("Receipts", "i"), ("Total Amount (Tk)", "a")], [[f"All suppliers - {u}", len(d), grand]],
+                            note=f"{miss} receipt(s) have no purchase rate recorded; their amount is not included." if miss else None, heading="UNIT TOTAL"))
+        return secs
+    return _rp_blocks(P, build), []
+
+
+def rp_receive(P):
+    df = _rp_tx(P, P.get("ttypes") or ["Supplier. Rec", "Internal Rec"])
+    cols = [("SL", "i"), ("Date", "d"), ("Txn Ref", "t"), ("Type", "t"), ("Supplier", "t"), ("Challan No", "t"), ("Item Code", "t"),
+            ("Item Name", "t"), ("Size", "t"), ("UOM", "t"), ("Qty", "q"), ("Rate (Tk)", "r"), ("Amount (Tk)", "a")]
+
+    def build(u):
+        d = df[df["factory_name"] == u]
+        if d.empty:
+            return []
+        rows, amt, miss = [], 0.0, 0
+        for n, r in enumerate(d.itertuples(), 1):
+            rt = _rp_rate(r, r.trans_type == "Supplier. Rec")
+            a = r.qty * rt if rt else None
+            miss += 0 if rt else 1
+            amt += a or 0.0
+            rows.append([n, r.date, f"TX-{r.id}", RP_NAMES.get(r.trans_type, r.trans_type), r.supplier, r.challan, r.code, r.item, r.size, r.uom, r.qty, rt, a])
+        tot = [f"TOTAL - {u} ({len(d)} receipts)", None, None, None, None, None, None, None, None, None, _rp_qty_tot(d, "qty"), None, amt]
+        note = " ".join(x for x in (_rp_uom_note(d, "qty") if d["uom"].nunique() > 1 else None,
+                                    f"{miss} line(s) have no purchase rate recorded (rate is saved only with Supplier Receipts); their amount is not included." if miss else None) if x)
+        return [_rp_sec(cols, rows, tot, note=note or None)]
+    return _rp_blocks(P, build), []
+
+
+def rp_issue(P):
+    df = _rp_tx(P, P.get("ttypes") or list(ISSUE_TYPES))
+    cols = [("SL", "i"), ("Date", "d"), ("Txn Ref", "t"), ("SR / Req No", "t"), ("Item Code", "t"), ("Item Name", "t"), ("Size", "t"), ("UOM", "t"),
+            ("Issued Qty", "q"), ("Rate (Tk)", "r"), ("Amount (Tk)", "a"), ("Issued By", "t")]
+
+    def build(u):
+        d = df[df["factory_name"] == u]
+        if d.empty:
+            return []
+        rows, n, grand, miss = [], 0, 0.0, 0
+        for bc, g in d.sort_values("bcat", kind="stable").groupby("bcat", sort=True):
+            amt = 0.0
+            for r in g.itertuples():
+                n += 1
+                rt = _rp_rate(r, False)
+                a = r.qty * rt if rt else None
+                miss += 0 if rt else 1
+                amt += a or 0.0
+                rows.append([n, r.date, f"TX-{r.id}", r.req_no, r.code, r.item, r.size, r.uom, r.qty, rt, a, r.officer])
+            grand += amt
+            rows.append(_RpSub([f"Sub-total: {bc} ({len(g)} issues)", None, None, None, None, None, None, None, _rp_qty_tot(g, "qty"), None, amt, None]))
+        tot = [f"TOTAL - {u} ({len(d)} issues)", None, None, None, None, None, None, None, _rp_qty_tot(d, "qty"), None, grand, None]
+        note = " ".join(x for x in (_rp_uom_note(d, "qty") if d["uom"].nunique() > 1 else None,
+                                    f"{miss} issue(s) have no stock rate; their amount is not included." if miss else None) if x)
+        return [_rp_sec(cols, rows, tot, note=note or None)]
+    return _rp_blocks(P, build), ["Issue amount = issued quantity x the item's stock rate (same basis as the Budget page). Grouped by Budget Category."]
+
+
+def rp_tx_history(P):
+    df = _rp_tx(P, P.get("ttypes") or list(RP_NAMES))
+    cols = [("SL", "i"), ("Date", "d"), ("Time", "t"), ("Txn Ref", "t"), ("Type", "t"), ("Item Code", "t"), ("Item Name", "t"), ("UOM", "t"),
+            ("Received Qty", "q"), ("Issued Qty", "q"), ("Opening / Set Qty", "q"), ("Supplier", "t"), ("Challan / SR No", "t"), ("Officer", "t")]
+
+    def build(u):
+        d = df[df["factory_name"] == u]
+        if d.empty:
+            return []
+        rows = []
+        for n, r in enumerate(d.itertuples(), 1):
+            rc = r.qty if r.trans_type in RP_RECV_T else None
+            isu = r.qty if r.trans_type in RP_ISSUE_T else None
+            op = r.qty if r.trans_type == "Opening Balance" else None
+            rows.append([n, r.date, r.time, f"TX-{r.id}", RP_NAMES.get(r.trans_type, r.trans_type), r.code, r.item, r.uom, rc, isu, op,
+                         r.supplier, r.challan or r.req_no, r.officer])
+        one = d["uom"].nunique() <= 1
+        sm = lambda t: float(d.loc[d["trans_type"].isin(t), "qty"].sum()) if one else None
+        tot = [f"TOTAL - {u} ({len(d)} transactions)", None, None, None, None, None, None, None, sm(RP_RECV_T), sm(RP_ISSUE_T), sm(("Opening Balance",)), None, None, None]
+        return [_rp_sec(cols, rows, tot, note=_rp_uom_note(d, "qty") if not one else None)]
+    return _rp_blocks(P, build), ["Received = Supplier / Internal Receipt and Stock Adjustment (+). Issued = Issue, Internal Issue and Stock Adjustment (-)."]
+
+
+RP_RECV_T = ("Supplier. Rec", "Internal Rec", "Stock Adjustment (+)")
+RP_ISSUE_T = ("Issued", "Internal Issue", "Stock Adjustment (-)")
+
+
+def rp_ledger(P):
+    df = _rp_tx(P, P.get("ttypes") or list(RP_NAMES))
+    cols = [("Date", "d"), ("Txn Ref", "t"), ("Type", "t"), ("Supplier / SR No", "t"), ("Officer", "t"), ("Received", "q"), ("Issued", "q"), ("Value (Tk)", "a")]
+
+    def build(u):
+        d = df[df["factory_name"] == u].copy()
+        if d.empty:
+            return []
+        d["ik"] = d["code"].astype(str) + "|" + d["item"].astype(str) + "|" + d["size"].astype(str)
+        secs = []
+        for _, g in sorted(d.groupby("ik", sort=False), key=lambda kv: str(kv[1].iloc[0]["item"]).lower()):
+            r0 = g.iloc[0]
+            rows, rc, isu, val = [], 0.0, 0.0, 0.0
+            for r in g.itertuples():
+                recv, iss = r.trans_type in RP_RECV_T, r.trans_type in RP_ISSUE_T
+                rt = _rp_rate(r, r.trans_type == "Supplier. Rec") if (recv or iss) else None
+                v = r.qty * rt if rt else None
+                rc += r.qty if recv else 0.0
+                isu += r.qty if iss else 0.0
+                val += v or 0.0
+                rows.append([r.date, f"TX-{r.id}", RP_NAMES.get(r.trans_type, r.trans_type), r.supplier or r.req_no, r.officer,
+                             r.qty if recv else None, r.qty if iss else None, v])
+            tot = [f"Item total ({len(g)} entries)", None, None, None, None, rc, isu, val]
+            secs.append(_rp_sec(cols, rows, tot, heading=f"{r0['item']}  [{r0['size'] or '-'}]  -  Code {r0['code'] or '-'}  -  UOM {r0['uom']}"))
+        return secs
+    return _rp_blocks(P, build), ["Item-wise ledger of the transactions in the period. Opening Balance entries are listed without Received / Issued quantity "
+                                  "because they set the stock instead of moving it."]
+
+
+def rp_movement(P):
+    psql, pp = period_sql("t.date", P["d1"], P["d2"])
+    isql, ip = _rp_inv_where(P, "i.")
+    df = qdf(f"""SELECT t.factory_name, t.sl_no, MAX(COALESCE(NULLIF(i.prod_id,''), t.prod_id, '')) AS code,
+                        MAX(COALESCE(NULLIF(t.item_name,''), i.item_name, '')) AS item, MAX(COALESCE(i.size,'')) AS size,
+                        MAX(COALESCE(NULLIF(i.unit_name,''),'Pcs')) AS uom, MAX(COALESCE(i.current_stock,0)) AS stock,
+                        SUM(CASE WHEN t.trans_type IN ('Supplier. Rec','Internal Rec') THEN t.qty ELSE 0 END) AS recv,
+                        SUM(CASE WHEN t.trans_type='Stock Adjustment (+)' THEN t.qty ELSE 0 END) AS adj_p,
+                        SUM(CASE WHEN t.trans_type IN ('Issued','Internal Issue') THEN t.qty ELSE 0 END) AS iss,
+                        SUM(CASE WHEN t.trans_type='Stock Adjustment (-)' THEN t.qty ELSE 0 END) AS adj_m
+                 FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                 WHERE t.factory_name = ANY(%s) AND t.trans_type IN ('Supplier. Rec','Internal Rec','Stock Adjustment (+)','Issued','Internal Issue','Stock Adjustment (-)'){psql}{isql}
+                 GROUP BY t.factory_name, t.sl_no ORDER BY t.factory_name, 4""", tuple([P["units"]] + pp + ip))
+    _rpn(df, "stock", "recv", "adj_p", "iss", "adj_m")
+    cols = [("SL", "i"), ("Item Code", "t"), ("Item Name", "t"), ("Size", "t"), ("UOM", "t"), ("Received", "q"), ("Adjustment (+)", "q"),
+            ("Issued", "q"), ("Adjustment (-)", "q"), ("Net Movement", "q"), ("Current Stock", "q")]
+
+    def build(u):
+        d = df[df["factory_name"] == u]
+        if d.empty:
+            return []
+        rows = []
+        for n, r in enumerate(d.itertuples(), 1):
+            rows.append([n, r.code, r.item, r.size, r.uom, r.recv, r.adj_p, r.iss, r.adj_m, r.recv + r.adj_p - r.iss - r.adj_m, r.stock])
+        one = d["uom"].nunique() <= 1
+        s = lambda c: float(d[c].sum()) if one else None
+        tot = [f"TOTAL - {u} ({len(d)} items)", None, None, None, None, s("recv"), s("adj_p"), s("iss"), s("adj_m"),
+               float((d["recv"] + d["adj_p"] - d["iss"] - d["adj_m"]).sum()) if one else None, s("stock")]
+        return [_rp_sec(cols, rows, tot, note=("Items with different UOMs are not added together, so column totals are left blank for this unit." if not one else None))]
+    return _rp_blocks(P, build), ["Net Movement = Received + Adjustment (+) - Issued - Adjustment (-) within the period. Current Stock is today's balance. "
+                                  "Opening Balance / stock-set entries are not part of the movement."]
+
+
+# ---------------------------------------------------------------- hold bills (also used by the existing Hold Bill print / PDF)
+def _rp_hb_enrich(d):
+    d = d.copy()
+    for c, f in (("qty", 0.0), ("rate", 0.0), ("total_value", 0.0), ("issued_qty", 0.0)):
+        d[c] = pd.to_numeric(d[c], errors="coerce").fillna(f)
+    if "days_held" not in d.columns:
+        d["days_held"] = [age_days(a, b or None) for a, b in zip(d["received_date"], d["resolved_date"])]
+    d["in_store_qty"] = (d["qty"] - d["issued_qty"]).clip(lower=0)
+    d["physical"] = [_hb_phys(a, b) for a, b in zip(d["qty"], d["issued_qty"])]
+    _hb_add_supplier_cols(d)
+    return d
+
+
+def _rp_hb_load(P):
+    psql, pp = period_sql("h.received_date", P["d1"], P["d2"])
+    st_sql = " AND COALESCE(h.status,'Open')=%s" if P.get("status") in ("Open", "Resolved") else ""
+    sp = [P["status"]] if st_sql else []
+    ssql, sup = ("", [])
+    if P.get("sup_raw"):
+        ssql, sup = " AND TRIM(COALESCE(h.supplier_name,'')) = ANY(%s)", [P["sup_raw"]]
+    df = qdf(f"""SELECT h.id, h.factory_name, h.received_date, h.challan_no, h.invoice_no, h.supplier_name, h.item_name,
+                        COALESCE(h.qty,0) AS qty, COALESCE(h.rate,0) AS rate, COALESCE(h.total_value,0) AS total_value,
+                        COALESCE(h.problem_type,'') AS problem_type, COALESCE(h.dept_to,'') AS dept_to, COALESCE(h.remarks,'') AS remarks,
+                        COALESCE(h.status,'Open') AS status, COALESCE(h.resolved_date,'') AS resolved_date,
+                        COALESCE(h.erp_grn,'Pending') AS erp_grn, COALESCE(h.responsible,'') AS responsible,
+                        COALESCE(x.iq,0) AS issued_qty, COALESCE(x.txt,'') AS issue_text
+                 FROM hold_bills h
+                 LEFT JOIN (SELECT bill_id, SUM(qty) AS iq,
+                                   STRING_AGG(COALESCE(issue_date,'') || ' | SR ' || COALESCE(NULLIF(req_no,''),'-') || ' | '
+                                              || COALESCE(department,'-') || ' | ' || qty::text, '; ' ORDER BY id) AS txt
+                            FROM hold_bill_issues GROUP BY bill_id) x ON x.bill_id=h.id
+                 WHERE h.factory_name = ANY(%s){psql}{st_sql}{ssql} ORDER BY h.factory_name, h.id""", tuple([P["units"]] + pp + sp + sup))
+    return df
+
+
+RP_HB_DET = [("SL", "i"), ("Bill Date", "d"), ("Challan No", "t"), ("Invoice No", "t"), ("Item Name", "t"), ("Qty", "q"), ("Rate (Tk)", "r"),
+             ("Amount (Tk)", "a"), ("Issued Qty", "q"), ("In Store Qty", "q"), ("Bill Status", "t"), ("Days Held", "i"), ("Physical Stock", "t"),
+             ("Problem", "t"), ("Issue details (date | SR | dept | qty)", "t"), ("Remarks", "t")]
+
+
+def _rp_hb_row(n, r):
+    dh = r.days_held
+    return [n, r.received_date, r.challan_no, r.invoice_no, r.item_name, r.qty, r.rate if r.rate > 0 else None, r.total_value, r.issued_qty,
+            r.in_store_qty, r.status, None if dh is None or pd.isna(dh) else float(dh), r.physical, r.problem_type, r.issue_text, r.remarks]
+
+
+def _rp_hb_supplier_blocks(df, units):
+    """Layout of the supplied Excel example: a supplier summary (Supplier | Total Item | Issued Qty | In Store Balance | Total Value |
+    Oldest days | Responsible), then every supplier named in its own heading with the bill / item lines underneath and a sub-total."""
+    sumcols = [("Supplier", "t"), ("Total Item", "i"), ("Issued Qty", "q"), ("In Store Balance", "q"), ("Total Value (Tk)", "a"),
+               ("Oldest (Days)", "i"), ("Responsible", "t")]
+    blocks = []
+    for u in units:
+        d = df[df["factory_name"] == u] if len(df) else df
+        if d.empty:
+            blocks.append({"unit": u, "sections": []})
+            continue
+        d = _rp_hb_enrich(d)
+        order = d.groupby("supplier_key")["total_value"].sum().sort_values(ascending=False).index.tolist()
+        srows = []
+        for k in order:
+            g = d[d["supplier_key"] == k]
+            who = ", ".join(sorted({str(v).strip() for v in g["responsible"] if str(v).strip()})) or "-"
+            old = g["days_num"].max()
+            srows.append([g["supplier_disp"].iloc[0], len(g), float(g["issued_qty"].sum()), float(g["in_store_qty"].sum()), float(g["total_value"].sum()),
+                          None if pd.isna(old) else float(old), who])
+        old_all = d["days_num"].max()
+        stot = [f"GRAND TOTAL - {u}", len(d), float(d["issued_qty"].sum()), float(d["in_store_qty"].sum()), float(d["total_value"].sum()),
+                None if pd.isna(old_all) else float(old_all), None]
+        secs = [_rp_sec(sumcols, srows, stot, heading="SUMMARY - SUPPLIER WISE",
+                        note="Total Item = number of held bill lines. Issued Qty = quantity already issued in the factory. In Store Balance = Qty - Issued Qty. "
+                             "Oldest = days held of the oldest bill of that supplier.")]
+        for k in order:
+            g = d[d["supplier_key"] == k].copy()
+            g["_dt"] = _parse_dates(g["received_date"])
+            g = g.sort_values(["challan_key", "_dt", "id"])
+            who = ", ".join(sorted({str(v).strip() for v in g["responsible"] if str(v).strip()})) or "not assigned"
+            rows = [_rp_hb_row(n, r) for n, r in enumerate(g.itertuples(), 1)]
+            tot = [f"Sub-total: {g['supplier_disp'].iloc[0]}", None, None, None, None, float(g["qty"].sum()), None, float(g["total_value"].sum()),
+                   float(g["issued_qty"].sum()), float(g["in_store_qty"].sum()), None, None, None, None, None, None]
+            secs.append(_rp_sec(RP_HB_DET, rows, tot, heading=f"SUPPLIER: {g['supplier_disp'].iloc[0]}",
+                                sub=f"{len(g)} item line(s) in {g['challan_key'].nunique()} challan/invoice(s) - Total value Tk {float(g['total_value'].sum()):,.2f} - Responsible: {who}"))
+        blocks.append({"unit": u, "sections": secs})
+    return blocks
+
+
+def rp_hold_bill(P):
+    df = _rp_hb_load(P)
+    cols = [("SL", "i"), ("Bill Date", "d"), ("Supplier", "t"), ("Challan No", "t"), ("Invoice No", "t"), ("Item Name", "t"), ("Qty", "q"), ("Rate (Tk)", "r"),
+            ("Amount (Tk)", "a"), ("Issued Qty", "q"), ("In Store Qty", "q"), ("Bill Status", "t"), ("Days Held", "i"), ("Physical Stock", "t"),
+            ("Problem", "t"), ("Responsible", "t"), ("Remarks", "t")]
+
+    def build(u):
+        d = df[df["factory_name"] == u] if len(df) else df
+        if d.empty:
+            return []
+        d = _rp_hb_enrich(d)
+        d["_dt"] = _parse_dates(d["received_date"])
+        d = d.sort_values(["_dt", "id"])
+        rows = []
+        for n, r in enumerate(d.itertuples(), 1):
+            dh = r.days_held
+            rows.append([n, r.received_date, r.supplier_name, r.challan_no, r.invoice_no, r.item_name, r.qty, r.rate if r.rate > 0 else None, r.total_value,
+                         r.issued_qty, r.in_store_qty, r.status, None if dh is None or pd.isna(dh) else float(dh), r.physical, r.problem_type, r.responsible, r.remarks])
+        tot = [f"TOTAL - {u} ({len(d)} lines)", None, None, None, None, None, float(d["qty"].sum()), None, float(d["total_value"].sum()),
+               float(d["issued_qty"].sum()), float(d["in_store_qty"].sum()), None, None, None, None, None, None]
+        return [_rp_sec(cols, rows, tot)]
+    return _rp_blocks(P, build), ["Physical Stock: 'NIL - issued' means the item was already issued in the factory; 'In store' means nothing issued yet."]
+
+
+def rp_hold_bill_supplier(P):
+    return _rp_hb_supplier_blocks(_rp_hb_load(P), P["units"]), ["Hold bill records are shown exactly as saved in Hold Bill in Store; nothing was changed to create this report."]
+
+
+def _rp_hb_doc_from_df(df, title, sub):
+    """Existing Hold Bill page -> same supplier-wise A4 document (the page's own filters were already applied to df)."""
+    units = [u for u in sorted(df["factory_name"].dropna().unique())] if len(df) else ["-"]
+    m = re.match(r"\s*Period:\s*(.*?)\s*\|", sub or "")
+    period = m.group(1) if m else "All dates"
+    blocks = _rp_hb_supplier_blocks(df, units)
+    return _rp_doc("HOLD BILL REPORT — SUPPLIER WISE", "Hold Bill in Store", units, period,
+                   [("Selection", "as filtered on the Hold Bill page (period, status, problem, department, responsible, search)")], "L", blocks,
+                   notes=[sub or ""] if sub else None)
+
+
+# ---------------------------------------------------------------- budget / requisition / transfers
+def rp_budget(P):
+    fsql = " AND category_name=%s" if P.get("bcat") else ""
+    bud = qdf(f"""SELECT factory_name, department_name, category_name, COALESCE(allocated_budget,0) AS b FROM category_budgets
+                  WHERE factory_name = ANY(%s){fsql} ORDER BY factory_name, department_name, category_name""",
+              tuple([P["units"]] + ([P["bcat"]] if fsql else [])))
+    psql, pp = period_sql("t.date", P["d1"], P["d2"])
+    cost = qdf(f"""SELECT t.factory_name, i.category, SUM(t.qty*i.unit_price) AS cost
+                   FROM transactions t JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
+                   WHERE t.trans_type IN ('Issued','Internal Issue') AND t.factory_name = ANY(%s){psql} GROUP BY t.factory_name, i.category""",
+               tuple([P["units"]] + pp))
+    cm = {(r.factory_name, r.category): float(r.cost or 0) for r in cost.itertuples()}
+    cols = [("SL", "i"), ("Department", "t"), ("Budget Category", "t"), ("Budget (Tk)", "a"), ("Issued Value (Tk)", "a"), ("Remaining (Tk)", "a"),
+            ("Used %", "p"), ("Status", "t")]
+
+    def build(u):
+        d = bud[bud["factory_name"] == u]
+        rows, n, tb, tu = [], 0, 0.0, 0.0
+        for r in d.itertuples():
+            b, c = float(r.b), cm.get((u, r.category_name), 0.0)
+            stt = "SAFE" if b - c >= 0 else "OVER BUDGET"
+            if P.get("status") in ("SAFE", "OVER BUDGET") and stt != P["status"]:
+                continue
+            n += 1
+            tb, tu = tb + b, tu + c
+            rows.append([n, r.department_name, r.category_name, b, c, b - c, (c / b * 100) if b > 0 else (100.0 if c > 0 else 0.0), stt])
+        if not rows:
+            return []
+        tot = [f"TOTAL - {u}", None, None, tb, tu, tb - tu, (tu / tb * 100) if tb > 0 else (100.0 if tu > 0 else 0.0), None]
+        return [_rp_sec(cols, rows, tot)]
+    notes = ["Issued Value = issued quantity x item stock rate, per Budget Category (same calculation as the Budget page)."]
+    if P["d1"] and (P["d1"].year, P["d1"].month) != (P["d2"].year, P["d2"].month):
+        notes.append("Budget amounts are monthly allocations; for a period longer than one month, Used % compares the whole period's issues with one month's budget.")
+    return _rp_blocks(P, build), notes
+
+
+def rp_requisition(P):
+    psql, pp = period_sql("req_date", P["d1"], P["d2"])
+    st_sql = " AND status=%s" if P.get("status") not in (None, "All") else ""
+    item_sql, ip = "", []
+    if P.get("item"):
+        item_sql, ip = " AND (item_name ILIKE %s OR COALESCE(prod_id,'') ILIKE %s)", [f"%{P['item']}%"] * 2
+    rq = qdf(f"""SELECT factory_name, req_no, department, req_date, item_name, COALESCE(prod_id,'') AS code, COALESCE(req_qty,0) AS req_qty,
+                        COALESCE(audit_approved_qty,0) AS appr, COALESCE(actual_received_qty,0) AS recv, po_date, received_date, status,
+                        COALESCE(po_delay_days,0) AS delay
+                 FROM requisition_tracking WHERE factory_name = ANY(%s){psql}{st_sql}{item_sql}
+                 ORDER BY factory_name, {_sql_date('req_date')} NULLS LAST, req_no, id""",
+             tuple([P["units"]] + pp + ([P["status"]] if st_sql else []) + ip))
+    p2, pp2 = period_sql("t.date", P["d1"], P["d2"])
+    i2, ip2 = _rp_inv_where({"item": P.get("item")}, "t.")
+    iss = qdf(f"""SELECT t.factory_name, t.date, t.req_no, COALESCE(NULLIF(t.prod_id,''), i.prod_id, '') AS code, COALESCE(NULLIF(t.item_name,''), i.item_name, '') AS item,
+                         COALESCE(NULLIF(i.unit_name,''),'Pcs') AS uom, COALESCE(t.qty,0) AS qty, COALESCE(t.officer_name,'') AS officer
+                  FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                  WHERE t.factory_name = ANY(%s) AND t.trans_type = ANY(%s) AND COALESCE(t.req_no,'')<>''{p2}{i2}
+                  ORDER BY t.factory_name, {_sql_date('t.date')} NULLS LAST, t.id""", tuple([P["units"], list(ISSUE_TYPES)] + pp2 + ip2))
+    _rpn(rq, "req_qty", "appr", "recv", "delay")
+    _rpn(iss, "qty")
+    c1 = [("SL", "i"), ("Req No", "t"), ("Req Date", "d"), ("Department", "t"), ("Item Code", "t"), ("Item Name", "t"), ("Req Qty", "q"),
+          ("Audit Approved", "q"), ("Received Qty", "q"), ("PO Date", "d"), ("Received Date", "d"), ("PO Delay (days)", "i"), ("Status", "t")]
+    c2 = [("SL", "i"), ("Issue Date", "d"), ("SR / Req No", "t"), ("Item Code", "t"), ("Item Name", "t"), ("UOM", "t"), ("Issued Qty", "q"), ("Issued By", "t")]
+
+    def build(u):
+        secs = []
+        d = rq[rq["factory_name"] == u]
+        if not d.empty:
+            rows = [[n, r.req_no, r.req_date, r.department, r.code, r.item_name, r.req_qty, r.appr, r.recv, r.po_date, r.received_date, r.delay, r.status]
+                    for n, r in enumerate(d.itertuples(), 1)]
+            secs.append(_rp_sec(c1, rows, [f"TOTAL - {u}: {len(d)} requisition line(s) in {d['req_no'].nunique()} requisition(s)"] + [None] * 12,
+                                heading="REQUISITION TRACKING", note="Quantities are not added up because the lines are different items / UOMs."))
+        g = iss[iss["factory_name"] == u]
+        if not g.empty:
+            rows = [[n, r.date, r.req_no, r.code, r.item, r.uom, r.qty, r.officer] for n, r in enumerate(g.itertuples(), 1)]
+            secs.append(_rp_sec(c2, rows, [f"TOTAL - {u}: {len(g)} issue line(s) against {g['req_no'].nunique()} SR / requisition number(s)"] + [None] * 7,
+                                heading="ISSUES MADE AGAINST REQUISITION / SR NUMBERS", note=_rp_uom_note(g, "qty") if g["uom"].nunique() > 1 else None))
+        return secs
+    return _rp_blocks(P, build), []
+
+
+def rp_transfer(P):
+    psql, pp = period_sql("t.transfer_date", P["d1"], P["d2"])
+    st_sql = " AND t.status=%s" if P.get("status") not in (None, "All") else ""
+    item_sql, ip = "", []
+    if P.get("item"):
+        item_sql, ip = " AND (t.item_name ILIKE %s OR COALESCE(t.prod_id,'') ILIKE %s)", [f"%{P['item']}%"] * 2
+    df = qdf(f"""SELECT t.transfer_ref, t.source_factory, t.dest_factory, COALESCE(t.prod_id,'') AS code, t.item_name, COALESCE(t.size,'') AS size,
+                        COALESCE(t.qty,0) AS qty, t.transfer_date, COALESCE(t.initiated_by,'') AS by, COALESCE(t.status,'') AS status, COALESCE(t.notes,'') AS notes,
+                        COALESCE((SELECT NULLIF(i.unit_name,'') FROM inventory i WHERE i.prod_id=t.prod_id AND i.factory_name=t.source_factory LIMIT 1),'') AS uom
+                 FROM inter_factory_transfers t
+                 WHERE (t.source_factory = ANY(%s) OR t.dest_factory = ANY(%s)){psql}{st_sql}{item_sql}
+                 ORDER BY {_sql_date('t.transfer_date')} NULLS LAST, t.id""", tuple([P["units"], P["units"]] + pp + ([P["status"]] if st_sql else []) + ip))
+    _rpn(df, "qty")
+    cols = [("SL", "i"), ("Date", "d"), ("Transfer Ref", "t"), ("Item Code", "t"), ("Item Name", "t"), ("Size", "t"), ("UOM", "t"), ("Qty", "q"),
+            ("From Unit", "t"), ("To Unit", "t"), ("Initiated By", "t"), ("Status", "t"), ("Notes", "t")]
+
+    def part(g, head, u):
+        rows = [[n, r.transfer_date, r.transfer_ref, r.code, r.item_name, r.size, r.uom, r.qty, r.source_factory, r.dest_factory, r.by, r.status, r.notes]
+                for n, r in enumerate(g.itertuples(), 1)]
+        gg = g.assign(uom=g["uom"].replace("", "(UOM not recorded)"))
+        tot = [f"TOTAL - {head} ({len(g)} transfers)", None, None, None, None, None, None, _rp_qty_tot(gg, "qty")] + [None] * 5
+        return _rp_sec(cols, rows, tot, heading=head, note=_rp_uom_note(gg, "qty") if gg["uom"].nunique() > 1 else None)
+
+    def build(u):
+        secs = []
+        out, inn = df[df["source_factory"] == u], df[df["dest_factory"] == u]
+        if not out.empty:
+            secs.append(part(out, f"TRANSFERS OUT OF {u}", u))
+        if not inn.empty:
+            secs.append(part(inn, f"TRANSFERS INTO {u}", u))
+        return secs
+    return _rp_blocks(P, build), ["A transfer between the two units appears under 'OUT' of the sending unit and under 'INTO' of the receiving unit; it is not counted twice inside one unit."]
+
+
+# ---------------------------------------------------------------- registry + page
+RP_STOCK_STATUS = ["All items", "In stock (quantity above zero)", "Zero or negative stock"]
+RP_REGISTRY = [
+    dict(key="stock", label="Current Stock Report", type="Stock Report", dates=False, flt=("pcat", "bcat", "item", "status"), orient="P", fn=rp_current_stock, status=RP_STOCK_STATUS),
+    dict(key="stockqv", label="Stock Quantity and Stock Value Report", type="Stock Report (ERP vs Physical)", dates=False, flt=("pcat", "bcat", "item", "status"), orient="L", fn=rp_stock_qty_value, status=RP_STOCK_STATUS),
+    dict(key="unitstock", label="Unit-wise Stock Report", type="Stock Report (Unit summary)", dates=False, flt=("pcat", "bcat", "item", "status"), orient="P", fn=rp_unit_stock, status=RP_STOCK_STATUS),
+    dict(key="itemstock", label="Item-wise Stock Report", type="Stock Report (Item list with minimum stock)", dates=False, flt=("pcat", "bcat", "item", "status"), orient="L", fn=rp_item_stock, status=RP_STOCK_STATUS),
+    dict(key="supplier", label="Supplier-wise Report", type="Supplier Receipt Report", dates=True, flt=("supplier", "item", "pcat", "bcat"), orient="L", fn=rp_supplier),
+    dict(key="receive", label="Purchase / Receive Report", type="Receipt Report", dates=True, flt=("supplier", "item", "pcat", "bcat", "ttype"), orient="L", fn=rp_receive,
+         tt=("Supplier. Rec", "Internal Rec", "Stock Adjustment (+)"), tt_def=("Supplier. Rec", "Internal Rec")),
+    dict(key="issue", label="Issue / Consumption Report", type="Issue Report", dates=True, flt=("item", "pcat", "bcat", "ttype"), orient="L", fn=rp_issue,
+         tt=("Issued", "Internal Issue"), tt_def=("Issued", "Internal Issue")),
+    dict(key="txhist", label="Transaction History Report", type="Transaction Report", dates=True, flt=("supplier", "item", "pcat", "bcat", "ttype"), orient="L", fn=rp_tx_history,
+         tt=tuple(RP_NAMES), tt_def=tuple(RP_NAMES)),
+    dict(key="hold", label="Hold Bill Report", type="Hold Bill in Store", dates=True, flt=("supplier", "status"), orient="L", fn=rp_hold_bill, status=["Open", "Resolved", "All"]),
+    dict(key="holdsup", label="Supplier-wise Hold Bill Report", title="HOLD BILL REPORT — SUPPLIER WISE", type="Hold Bill in Store (Supplier wise)", dates=True, flt=("supplier", "status"), orient="L", fn=rp_hold_bill_supplier,
+         status=["Open", "Resolved", "All"]),
+    dict(key="pcat", label="Product Category-wise Report", type="Stock Report (Product Category)", dates=False, flt=("pcat", "bcat", "item", "status"), orient="P", fn=rp_pcat_stock, status=RP_STOCK_STATUS),
+    dict(key="budget", label="Budget Category-wise Report", type="Budget Report", dates=True, flt=("bcat", "status"), orient="P", fn=rp_budget, status=["All", "SAFE", "OVER BUDGET"]),
+    dict(key="movement", label="Stock Movement Report", type="Stock Movement Report", dates=True, flt=("item", "pcat", "bcat"), orient="L", fn=rp_movement),
+    dict(key="ledger", label="Ledger Report", type="Item Ledger Report", dates=True, flt=("supplier", "item", "pcat", "bcat", "ttype"), orient="P", fn=rp_ledger,
+         tt=tuple(RP_NAMES), tt_def=tuple(RP_NAMES)),
+    dict(key="req", label="Requisition / Issue Report", type="Requisition Report", dates=True, flt=("item", "status"), orient="L", fn=rp_requisition, status="req"),
+    dict(key="transfer", label="Transfer History Report", type="Transfer Report", dates=True, flt=("item", "status"), orient="L", fn=rp_transfer, status="transfer"),
+]
+
+
+def _rp_sup_map(units):
+    """{display name: [raw spellings]} - spellings that differ only by case, dots, commas or spaces count as one supplier."""
+    df = qdf_c("""SELECT TRIM(supplier_name) AS n FROM transactions WHERE COALESCE(TRIM(supplier_name),'')<>'' AND factory_name = ANY(%s) GROUP BY 1
+                  UNION SELECT TRIM(supplier_name) FROM hold_bills WHERE COALESCE(TRIM(supplier_name),'')<>'' AND factory_name = ANY(%s) GROUP BY 1""",
+               (list(units), list(units)))
+    groups = {}
+    for n in df["n"].tolist() if not df.empty else []:
+        groups.setdefault(_hb_norm(n), []).append(n)
+    return {sorted(v)[0]: v for v in groups.values()}
+
+
+def _rp_status_opts(R, units):
+    if R.get("status") == "req":
+        d = qdf_c("SELECT DISTINCT status FROM requisition_tracking WHERE COALESCE(status,'')<>'' AND factory_name = ANY(%s) ORDER BY 1", (list(units),))
+        return ["All"] + (d["status"].tolist() if not d.empty else [])
+    if R.get("status") == "transfer":
+        d = qdf_c("SELECT DISTINCT status FROM inter_factory_transfers WHERE COALESCE(status,'')<>'' AND (source_factory = ANY(%s) OR dest_factory = ANY(%s)) ORDER BY 1",
+                  (list(units), list(units)))
+        return ["All"] + (d["status"].tolist() if not d.empty else [])
+    return R.get("status")
+
+
+def _rp_show(doc):
+    if not doc["rows"]:
+        st.info("No records found for the selected unit, dates and filters.")
+        return
+    units = " | ".join(doc["units"])
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", f"{doc['title']}_{units}").strip("_")[:90] + f"_{local_now():%Y%m%d}"
+    st.markdown(f"**{html_lib.escape(doc['title'])}** · {doc['rows']:,} record(s) · Unit: **{html_lib.escape(units)}** · Period: {html_lib.escape(doc['period'])}")
+    c1, c2, c3 = st.columns([1, 1, 2.2])
+    xmime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    try:
+        import reportlab  # noqa: F401
+        if not _lazy_download(c1, "⬇ Download PDF (A4)", lambda: _rp_pdf(doc), f"{slug}.pdf", "application/pdf", "rp_dl_pdf"):
+            c1.download_button("⬇ Download PDF (A4)", _rp_pdf(doc), f"{slug}.pdf", "application/pdf", key="rp_dl_pdf_b")
+    except ImportError:
+        c1.caption("PDF needs: pip install reportlab")
+    try:
+        import openpyxl  # noqa: F401
+        if not _lazy_download(c2, "⬇ Download Excel (.xlsx)", lambda: _rp_xlsx(doc), f"{slug}.xlsx", xmime, "rp_dl_xlsx"):
+            c2.download_button("⬇ Download Excel (.xlsx)", _rp_xlsx(doc), f"{slug}.xlsx", xmime, key="rp_dl_xlsx_b")
+    except ImportError:
+        c2.caption("Excel needs: pip install openpyxl")
+    c3.caption("🖨 Print: press **Print Report** at the top of the preview below - only the report is printed, on A4.")
+    components.html(_rp_html(doc), height=820, scrolling=True)
+
+
+def tab_reports():
+    st.title("🧾 Reports")
+    st.caption("Read-only report centre: choose a report, set the filters, press Generate. Reports never change stock, transactions or any other record.")
+    labels = [f"{i + 1}. {r['label']}" for i, r in enumerate(RP_REGISTRY)]
+    top = st.columns([2.4, 1.8, 1.1, 1.1])
+    R = RP_REGISTRY[labels.index(top[0].selectbox("Report", labels, key="rp_pick"))]
+    if unit_lock_active():
+        units = [FAC]
+        top[1].markdown(f"**Unit / Factory**<br>🔒 {html_lib.escape(FAC)}", unsafe_allow_html=True)
+    else:
+        opts = list(FACTORIES) + [RP_ALL_UNITS]
+        if st.session_state.get("rp_unit") not in opts:
+            st.session_state["rp_unit"] = FAC if FAC in FACTORIES else RP_ALL_UNITS
+        usel = top[1].selectbox("Unit / Factory", opts, key="rp_unit")
+        units = list(FACTORIES) if usel == RP_ALL_UNITS else [usel]
+    today = local_now().date()
+    d1 = d2 = None
+    alld = False
+    if R["dates"]:
+        alld = st.session_state.get("rp_alld", False)
+        d1 = top[2].date_input("From Date", value=today.replace(day=1), key="rp_d1", disabled=alld)
+        d2 = top[3].date_input("To Date", value=today, key="rp_d2", disabled=alld)
+        if alld:
+            d1 = d2 = None
+        elif d1 > d2:
+            st.error("From Date must be on or before To Date.")
+            return
+    else:
+        top[2].caption("Balance as on")
+        top[3].markdown(f"**{today:%d-%b-%Y}**")
+    fl = list(R["flt"]) + (["alld"] if R["dates"] else [])
+    cols = st.columns(len(fl))
+    P = {"units": units, "d1": d1, "d2": d2, "item": "", "sup_raw": None, "pcat": None, "bcat": None, "ttypes": None, "status": None}
+    lines = []
+    for c, f in zip(cols, fl):
+        if f == "alld":
+            c.checkbox("All dates", key="rp_alld")
+        elif f == "supplier":
+            smap = _rp_sup_map(units)
+            sel = c.selectbox("Supplier", ["All suppliers"] + sorted(smap, key=str.lower), key="rp_sup")
+            if sel in smap:
+                P["sup_raw"] = smap[sel]
+                lines.append(("Supplier", sel))
+        elif f == "item":
+            P["item"] = c.text_input("Item (name or code contains)", key="rp_item").strip()
+            if P["item"]:
+                lines.append(("Item contains", P["item"]))
+        elif f == "pcat":
+            sel = c.selectbox("Product Category", ["All"] + get_product_categories(), key="rp_pcat")
+            if sel != "All":
+                P["pcat"] = sel
+                lines.append(("Product Category", sel))
+        elif f == "bcat":
+            bc = qdf_c("""SELECT category_name AS c FROM category_budgets WHERE factory_name = ANY(%s) AND COALESCE(category_name,'')<>''
+                          UNION SELECT category FROM inventory WHERE factory_name = ANY(%s) AND COALESCE(category,'')<>'' ORDER BY 1""", (list(units), list(units)))
+            sel = c.selectbox("Budget Category", ["All"] + (bc["c"].tolist() if not bc.empty else []), key="rp_bcat")
+            if sel != "All":
+                P["bcat"] = sel
+                lines.append(("Budget Category", sel))
+        elif f == "ttype":
+            names = [RP_NAMES[t] for t in R["tt"]]
+            chosen = c.multiselect("Transaction Type", names, default=[RP_NAMES[t] for t in R["tt_def"]], key=f"rp_tt_{R['key']}")
+            P["ttypes"] = [t for t in R["tt"] if RP_NAMES[t] in chosen] or list(R["tt_def"])
+            lines.append(("Transaction Type", ", ".join(RP_NAMES[t] for t in P["ttypes"])))
+        elif f == "status":
+            so = _rp_status_opts(R, units)
+            P["status"] = c.selectbox("Status", so, key=f"rp_st_{R['key']}")
+            if P["status"] not in ("All", "All items"):
+                lines.append(("Status", P["status"]))
+    period = (f"{d1:%d-%b-%Y} to {d2:%d-%b-%Y}" if d1 else "All dates") if R["dates"] else f"As on {today:%d-%b-%Y} (current balance)"
+    sig = repr((R["key"], units, d1, d2, P["item"], P["sup_raw"], P["pcat"], P["bcat"], P["ttypes"], P["status"]))
+    if st.button("▶ Generate Report", type="primary", key="rp_gen"):
+        with st.spinner("Preparing report..."):
+            try:
+                blocks, notes = R["fn"](P)
+                st.session_state["rp_doc"] = _rp_doc(R.get("title", R["label"]), R["type"], units, period, lines, R["orient"], blocks, notes)
+                st.session_state["rp_sig"] = sig
+            except Exception as e:
+                st.session_state.pop("rp_doc", None)
+                st.error(f"The report could not be generated: {e}")
+    doc = st.session_state.get("rp_doc")
+    if doc:
+        if st.session_state.get("rp_sig") != sig:
+            st.warning("The report, unit or filters were changed after this report was generated - press **Generate Report** to refresh. "
+                       "The report below still shows the earlier selection.")
+        _rp_show(doc)
+    else:
+        st.info("Choose a report and filters, then press **Generate Report**.")
+
+
+# ---------------------------------------------------------------- existing Hold Bill page: A4 print / PDF now share the supplier-wise layout
+def _hb_pdf(df, title, sub):
+    """A4 landscape PDF: supplier summary, then every supplier named with its bills / items below (Bangla text shows as [Bangla])."""
+    return _rp_pdf(_rp_hb_doc_from_df(df, title, sub))
+
+
+def _hb_html(df, title, sub):
+    """Print-ready A4 landscape page: supplier summary, then every supplier named with its bills / items below. Bangla remarks are kept."""
+    return _rp_html(_rp_hb_doc_from_df(df, title, sub))
+
+
+# ============================================================
 #  MAIN
 # ============================================================
 st.session_state["_dbstat"] = {"n": 0, "t": 0.0, "slow": (0.0, "")}   # fresh counters for this page run
@@ -12555,7 +13676,7 @@ if unit_gate_required():   # signed-in officer who has not chosen a unit yet: no
 autoset_uom_once()
 
 # Render only the selected module; the sidebar buttons update NAV_KEY.
-RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, tab_global_inventory, tab_physical_count, tab_erp_audit, tab_issue_ledger,
+RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, tab_global_inventory, tab_physical_count, tab_reports, tab_erp_audit, tab_issue_ledger,
              tab_transfer_history, tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet,
              tab_stock_cover, tab_data_health, tab_log_sheet, tab_high_value, tab_req_issue, tab_gate_pass, tab_hold_bills]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
