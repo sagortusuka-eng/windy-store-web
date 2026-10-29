@@ -7847,6 +7847,202 @@ def pc_delete_view():
                     done(f"{len(ids)} ti item delete hoyeche.")
 
 
+# ---- Physical Count: Fresh Start (reset month data -> count -> apply count as opening). Added; reversible via archive tables ----
+def _fs_ensure():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("CREATE TABLE IF NOT EXISTS transactions_archive (LIKE transactions)")
+            cur.execute("ALTER TABLE transactions_archive ADD COLUMN IF NOT EXISTS fs_batch TEXT")
+            cur.execute("CREATE TABLE IF NOT EXISTS issue_returns_archive (LIKE issue_returns)")
+            cur.execute("ALTER TABLE issue_returns_archive ADD COLUMN IF NOT EXISTS fs_batch TEXT")
+            cur.execute("CREATE TABLE IF NOT EXISTS fresh_start_stock (fs_batch TEXT, factory_name TEXT, sl_no INTEGER, "
+                        "current_stock REAL, erp_stock REAL)")
+            cur.execute("CREATE TABLE IF NOT EXISTS fresh_start_log (fs_batch TEXT PRIMARY KEY, factory_name TEXT, "
+                        "created_at TEXT, created_by TEXT, scope TEXT, tx_count INTEGER, max_tx_id INTEGER, "
+                        "status TEXT DEFAULT 'Done')")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _fs_common(t1, t2):
+    def cols(t):
+        return [r["column_name"] for r in q("SELECT column_name FROM information_schema.columns "
+                                            "WHERE table_schema='public' AND table_name=%s ORDER BY ordinal_position", (t,))]
+    c2 = set(cols(t2))
+    return [c for c in cols(t1) if c in c2 and c != "fs_batch"]
+
+
+@tx
+def fresh_start_reset(fac, user, d1, d2, scope):
+    """Archives then removes the unit's transactions (+ issue returns) and sets Physical & ERP stock to 0.
+    Item master (names, sizes, prices, serials) is untouched."""
+    psql, pp = period_sql("date", d1, d2)
+    tc = ", ".join(f'"{c}"' for c in _fs_common("transactions", "transactions_archive"))
+    rc = ", ".join(f'"{c}"' for c in _fs_common("issue_returns", "issue_returns_archive"))
+    batch = local_now().strftime("%Y%m%d%H%M%S") + "-" + "".join(ch for ch in fac if ch.isalnum())[:6]
+    max_id = int(q("SELECT COALESCE(MAX(id),0) AS m FROM transactions")[0]["m"])
+    sub = f"SELECT id FROM transactions WHERE factory_name=%s{psql}"
+    sp = [fac] + pp
+    n = int(q(f"SELECT COUNT(*) AS n FROM transactions WHERE factory_name=%s{psql}", sp)[0]["n"])
+    run(f"INSERT INTO issue_returns_archive (fs_batch, {rc}) SELECT %s, {rc} FROM issue_returns WHERE tx_id IN ({sub})", [batch] + sp)
+    run(f"INSERT INTO transactions_archive (fs_batch, {tc}) SELECT %s, {tc} FROM transactions WHERE factory_name=%s{psql}", [batch] + sp)
+    run("INSERT INTO fresh_start_stock (fs_batch, factory_name, sl_no, current_stock, erp_stock) "
+        "SELECT %s, factory_name, sl_no, COALESCE(current_stock,0), COALESCE(erp_stock,0) FROM inventory WHERE factory_name=%s",
+        (batch, fac))
+    run(f"DELETE FROM issue_returns WHERE tx_id IN ({sub})", sp)
+    run(f"DELETE FROM transactions WHERE factory_name=%s{psql}", sp)
+    run("UPDATE inventory SET current_stock=0, erp_stock=0 WHERE factory_name=%s", (fac,))
+    run("INSERT INTO fresh_start_log (fs_batch, factory_name, created_at, created_by, scope, tx_count, max_tx_id) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+        (batch, fac, local_now().strftime("%d-%b-%Y %I:%M %p"), user, scope, n, max_id))
+    audit("FRESH_START_RESET", f"{user} reset {fac}: {n} transaction(s) archived ({scope}), all stock set to 0, batch {batch}")
+    return n
+
+
+@tx
+def fresh_start_undo(batch, user):
+    lg = q("SELECT * FROM fresh_start_log WHERE fs_batch=%s AND status='Done'", (batch,))
+    if not lg:
+        return False
+    fac, max_id = lg[0]["factory_name"], int(lg[0]["max_tx_id"])
+    tc = ", ".join(f'"{c}"' for c in _fs_common("transactions", "transactions_archive"))
+    rc = ", ".join(f'"{c}"' for c in _fs_common("issue_returns", "issue_returns_archive"))
+    run("DELETE FROM transactions WHERE factory_name=%s AND id > %s AND trans_type=%s", (fac, max_id, OPENING_TYPE))
+    run(f"INSERT INTO transactions ({tc}) SELECT {tc} FROM transactions_archive WHERE fs_batch=%s", (batch,))
+    run(f"INSERT INTO issue_returns ({rc}) SELECT {rc} FROM issue_returns_archive WHERE fs_batch=%s", (batch,))
+    run("""UPDATE inventory i SET current_stock=f.current_stock, erp_stock=f.erp_stock
+           FROM fresh_start_stock f WHERE f.fs_batch=%s AND f.factory_name=i.factory_name AND f.sl_no=i.sl_no""", (batch,))
+    run("UPDATE fresh_start_log SET status='Undone' WHERE fs_batch=%s", (batch,))
+    audit("FRESH_START_UNDO", f"{user} restored {fac} to the state before batch {batch}")
+    return True
+
+
+@tx
+def apply_count_as_opening(fac, user, rows, date_s, day):
+    """Sets Physical stock = counted qty for every counted item and logs an Opening Balance transaction each.
+    ERP stock is left as it is (update it later from the ERP update screen)."""
+    for r in rows:
+        run("UPDATE inventory SET current_stock=%s WHERE sl_no=%s AND factory_name=%s", (float(r["counted_qty"]), r["sl_no"], fac))
+        insert_tx(fac, user, r["sl_no"], r["prod_id"], r["item_name"], float(r["counted_qty"]), OPENING_TYPE, day,
+                  f"Opening from Physical Count #{r['count_id']}", date_s, local_now().strftime("%I:%M %p"), "Verified")
+    audit("OPENING_FROM_COUNT", f"{user} applied {len(rows)} counted item(s) as opening for {fac} ({date_s})")
+    return len(rows)
+
+
+@_fragment
+def pc_fresh_view():
+    st.caption("Notun kore shuru korar jonno: (1) backup, (2) ei unit-er transaction muche sob stock 0, "
+               "(3) physical count kora, (4) count-ke opening balance hishabe boshano. Item-er nam/size/price kichu muchbe na.")
+    if st.session_state.get("role") != "Store Manager":
+        st.info("Fresh Start shudhu Store Manager-er permission-e.")
+        return
+    if "CONSOLIDATED" in FAC:
+        st.warning("Specific unit select korun (jemon KC Washing Plant). CONSOLIDATED-e ei option cholbe na.")
+        return
+    user = st.session_state.get("user", "")
+    try:
+        _fs_ensure()
+    except Exception as e:
+        st.error(f"Archive table toiri hoy nai: {e}")
+        return
+
+    st.markdown(f"### Unit: **{FAC}**")
+    # ---------- Step 1 + 2 : backup and reset ----------
+    st.markdown("#### 1️⃣ Backup  →  2️⃣ Reset")
+    if st.button("📦 Backup toiri korun", key="pc_fs_bk"):
+        st.session_state["pc_fs_backup"] = backup_zip()
+    if st.session_state.get("pc_fs_backup"):
+        st.download_button("💾 Backup download (zip)", st.session_state["pc_fs_backup"],
+                           f"windy_backup_{local_now().strftime('%Y%m%d_%H%M')}.zip", "application/zip", key="pc_fs_dl")
+    scope = st.radio("Kon transaction muchben", ["Ei mash-er (1 tarikh theke ajke porjonto)", "Sob transaction (shuru theke)"],
+                     key="pc_fs_scope")
+    today = local_now().date()
+    if scope.startswith("Ei mash"):
+        d1, d2 = today.replace(day=1), today
+    else:
+        d1 = d2 = None
+    psql, pp = period_sql("date", d1, d2)
+    summ = q(f"SELECT trans_type, COUNT(*) AS n FROM transactions WHERE factory_name=%s{psql} GROUP BY trans_type ORDER BY 2 DESC",
+             [FAC] + pp)
+    inv = q("SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN COALESCE(current_stock,0)<>0 OR COALESCE(erp_stock,0)<>0 THEN 1 END),0) AS s "
+            "FROM inventory WHERE factory_name=%s", (FAC,))[0]
+    c1, c2 = st.columns(2)
+    c1.metric("Transaction muchbe", sum(int(r["n"]) for r in summ))
+    c2.metric("Stock 0 hobe (item)", int(inv["s"]))
+    if summ:
+        st.caption(" · ".join(f"{r['trans_type']}: {int(r['n'])}" for r in summ))
+    st.caption("Reset-er age sob muchar jinis archive-e jomaa hoy, tai niche 'Undo' diye ferot ana jabe "
+               "(jodi reset-er por kono Issue/Receipt na hoy). Requisition, Transfer, Repair, Hold Bill-er kichu change hobe na.")
+    ok_bk = st.checkbox("Backup download koreci", key="pc_fs_ok1")
+    word = st.text_input("Confirm korte RESET likhun", key="pc_fs_word")
+    pw = st.text_input("Store Manager Password", type="password", key="pc_fs_pw")
+    if st.button("🧹 Reset: transaction muche sob stock 0 korun", type="primary", key="pc_fs_go",
+                 disabled=not (ok_bk and word.strip() == "RESET")):
+        if not verify_manager_password(pw):
+            st.error("Manager password thik noy.")
+        elif guard():
+            n = fresh_start_reset(FAC, user, d1, d2, "this month" if d1 else "all")
+            for k in ("pc_fs_ok1", "pc_fs_word", "pc_fs_pw", "pc_fs_backup"):
+                st.session_state.pop(k, None)
+            done(f"Reset hoyeche: {n} ti transaction archive hoye muche geche, sob stock 0.")
+
+    # ---------- Undo ----------
+    last = q("SELECT * FROM fresh_start_log WHERE factory_name=%s AND status='Done' ORDER BY fs_batch DESC LIMIT 1", (FAC,))
+    if last:
+        lg = last[0]
+        later = int(q("SELECT COUNT(*) AS n FROM transactions WHERE factory_name=%s AND id > %s AND trans_type<>%s",
+                      (FAC, int(lg["max_tx_id"]), OPENING_TYPE))[0]["n"])
+        with st.expander(f"↩️ Undo last reset ({lg['created_at']} · {lg['tx_count']} tx · {lg['created_by']})"):
+            if later:
+                st.warning(f"Reset-er por {later} ti notun Issue/Receipt hoyeche, tai auto-undo off. "
+                           "Backup zip theke manually ferot anun.")
+            else:
+                st.caption("Undo korle purano transaction ar purano stock (Physical + ERP) ferot ashbe; "
+                           "reset-er por boshano Opening Balance gulo muche jabe.")
+                pw2 = st.text_input("Store Manager Password", type="password", key="pc_fs_pw2")
+                ok2 = st.checkbox("Ami undo korte chai", key="pc_fs_ok2")
+                if st.button("↩️ Undo", key="pc_fs_undo", disabled=not ok2):
+                    if not verify_manager_password(pw2):
+                        st.error("Manager password thik noy.")
+                    elif guard() and fresh_start_undo(lg["fs_batch"], user):
+                        done("Reset undo hoyeche - ager transaction ar stock ferot esheche.")
+
+    # ---------- Step 3 + 4 : count -> opening ----------
+    st.markdown("---")
+    st.markdown("#### 3️⃣ Count  →  4️⃣ Count-ke Opening boshan")
+    st.caption("Age 'New count' tab-e physical count korun. Count shesh hole ekhane date select kore Opening hishabe boshan. "
+               "Prottek item-er shesh count-er qty Physical stock hobe. ERP stock change hobe na - pore ERP update korben.")
+    cd = st.date_input("Count-er tarikh", value=today, key="pc_fs_cdate")
+    date_s = cd.strftime(DATE_FMT)
+    items = q("""SELECT DISTINCT ON (i.sl_no) i.sl_no, i.prod_id, i.item_name, COALESCE(i.size,'') AS size, i.counted_qty,
+                        i.count_id, c.counted_by
+                 FROM stock_count_items i JOIN stock_counts c ON c.id=i.count_id
+                 WHERE c.factory_name=%s AND c.counted_at LIKE %s
+                 ORDER BY i.sl_no, i.id DESC""", (FAC, date_s + "%"))
+    if not items:
+        st.info("Ei tarikhe ei unit-e kono count paoa jay nai.")
+        return
+    st.dataframe(pd.DataFrame([{"SL No": r["sl_no"], "Item": r["item_name"], "Size": r["size"],
+                                "Opening (counted)": float(r["counted_qty"]), "Count #": r["count_id"]} for r in items]),
+                 hide_index=True, use_container_width=True, height=min(60 + 35 * len(items), 360))
+    other = int(q(f"SELECT COUNT(*) AS n FROM transactions WHERE factory_name=%s AND trans_type<>%s"
+                  f"{period_sql('date', cd, today)[0]}", [FAC, OPENING_TYPE] + period_sql('date', cd, today)[1])[0]["n"])
+    force = True
+    if other:
+        st.warning(f"{date_s} ba tar por ei unit-e {other} ti Issue/Receipt ache. Opening boshale stock count-er "
+                   "number-e overwrite hobe, oi transaction-er effect hariye jabe.")
+        force = st.checkbox("Tobuo opening boshabo", key="pc_fs_force")
+    ok3 = st.checkbox(f"{len(items)} ti item-er Physical stock count-er number-e set hobe", key="pc_fs_ok3")
+    if st.button("✅ Count-ke Opening Balance hishabe boshan", type="primary", key="pc_fs_apply", disabled=not (ok3 and force)):
+        if guard():
+            n = apply_count_as_opening(FAC, user, items, date_s, cd.day)
+            st.session_state.pop("pc_fs_ok3", None)
+            done(f"{n} ti item-er Opening Balance boshano hoyeche. Ekhon ERP balance update korte paren.")
+
+
 def tab_physical_count():
     try:
         _box = st.container(key="pc_mobile")
@@ -7867,7 +8063,7 @@ def _tab_physical_count_body():
     except Exception as e:
         st.error(f"Physical Count tables could not be prepared: {e}")
         return
-    _tab = lazy_tab_select(["➕ New count", "⚖️ Verify & Fix", "🕳 Not counted yet", "⏳ Waiting / Results", "🗑 Delete count"], "lz_pc")
+    _tab = lazy_tab_select(["➕ New count", "⚖️ Verify & Fix", "🕳 Not counted yet", "⏳ Waiting / Results", "🗑 Delete count", "🔄 Fresh Start"], "lz_pc")
     if _tab == 0:
         count_picks_panel()   # NEW: today's 5 items the system recommends counting
         pc_entry()
@@ -7879,6 +8075,8 @@ def _tab_physical_count_body():
         pc_results_view()
     if _tab == 4:
         pc_delete_view()
+    if _tab == 5:
+        pc_fresh_view()
 
 
 # ============================================================
