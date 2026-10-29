@@ -6059,12 +6059,16 @@ def pdf_to_raw(upload):
     Tables are read with pdfplumber when installed; otherwise (or when the PDF has no ruled table) the text lines are split
     on 2+ spaces with pypdf. Returns (DataFrame or None, {'req_no':..., 'date':...}, error text)."""
     data = upload.getvalue()
-    rows, text = [], ""
+    rows, text, ltext = [], "", ""
     try:
         import pdfplumber
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             for pg in pdf.pages:
                 text += (pg.extract_text() or "") + "\n"
+                try:   # layout text keeps the gaps between columns (used when the PDF has no ruled table)
+                    ltext += (pg.extract_text(layout=True) or "") + "\n"
+                except Exception:
+                    pass
                 for tb in pg.extract_tables() or []:
                     rows += [[("" if c is None else str(c).replace("\n", " ").strip()) for c in r] for r in tb if r]
     except ImportError:
@@ -6074,15 +6078,19 @@ def pdf_to_raw(upload):
     if len(rows) < 2:   # no ruled table found: use the text lines
         rows = []
         try:
-            if not text:
+            if not ltext:
                 from pypdf import PdfReader
                 for pg in PdfReader(io.BytesIO(data)).pages:
-                    text += (pg.extract_text() or "") + "\n"
+                    try:   # layout mode keeps the column gaps, so each line can be split into cells
+                        ltext += (pg.extract_text(extraction_mode="layout") or "") + "\n"
+                    except TypeError:
+                        ltext += (pg.extract_text() or "") + "\n"
+                text = text or ltext
         except ImportError:
             return None, {}, "PDF পড়ার লাইব্রেরি নেই — requirements.txt-এ `pdfplumber` (বা `pypdf`) যোগ করে redeploy করুন।"
         except Exception as e:
             return None, {}, f"PDF পড়া যায়নি: {e}"
-        for ln in text.splitlines():
+        for ln in ltext.splitlines():
             parts = [p.strip() for p in re.split(r"\s{2,}|\t", ln) if p.strip()]
             if len(parts) >= 2:
                 rows.append(parts)
@@ -11752,11 +11760,11 @@ def set_hold_erp(kind, ids, date_s):
 
 
 def _hb_blank(n=5):
-    t = local_now().date()
-    return pd.DataFrame({"Received Date": [t] * n, "Challan No": [""] * n, "Invoice No": [""] * n, "Supplier": [""] * n,
-                         "Item Name": [""] * n, "Qty": [0.0] * n, "Rate": [0.0] * n, "Total Value": [0.0] * n,
+    nat = lambda: pd.Series([pd.NaT] * n, dtype="datetime64[ns]")
+    return pd.DataFrame({"Received Date": nat(), "Challan No": [""] * n, "Invoice No": [""] * n, "Supplier": [""] * n,
+                         "Item Name": [""] * n, "Qty": [0.0] * n, "Rate": [0.0] * n,
                          "Problem": [HB_PROBLEMS[0]] * n, "Department": [HB_DEPTS[0]] * n, "Responsible": [""] * n, "Remarks": [""] * n,
-                         "Issued Qty": [0.0] * n, "Issue Date": pd.Series([pd.NaT] * n, dtype="datetime64[ns]"), "Issue Req No": [""] * n, "Issue Dept": [None] * n})
+                         "Issued Qty": [0.0] * n, "Issue Date": nat(), "Issue Req No": [""] * n, "Issue Dept": [None] * n})
 
 
 def _hb_s(v):
@@ -11778,29 +11786,50 @@ _hb_f = _hb_num
 def _hb_entry_form():
     gen = st.session_state.get("hb_gen", 0)
     st.caption("এক বা অনেক বিল/চালান একসাথে লিখুন (Excel থেকে কপি করে সরাসরি Paste-ও করা যায়; নিচে + দিয়ে সারি বাড়ান)। "
-               "Total Value ফাঁকা/০ রাখলে Qty × Rate ধরা হবে। Challan No বা Invoice No — যেকোনো একটা এবং Supplier ও Item Name বাধ্যতামূলক। "
-               "**এই মাল যদি ফ্যাক্টরিতে আগেই Issue হয়ে গিয়ে থাকে**, ডানদিকের Issued Qty / Issue Date / Issue Req No / Issue Dept পূরণ করুন "
+               "Challan No বা Invoice No — যেকোনো একটা এবং Supplier ও Item Name বাধ্যতামূলক। Total Value নিজে থেকে **Qty × Rate** হিসাব হয়। "
+               "**এই মাল যদি ফ্যাক্টরিতে আগেই Issue হয়ে গিয়ে থাকে**, ডানদিকের Issued Qty / Issue Req No / Issue Dept পূরণ করুন "
                "(একাধিকবার Issue হলে পরে ‘🔻 Issue রেকর্ড’ ট্যাব থেকে যোগ করুন)।")
+    # one date for the whole entry: no need to type a date in every row (a row date, when given, wins)
+    dc1, dc2, dc3 = st.columns([1.2, 1.4, 1.2])
+    def_rdate = dc1.date_input("📅 Received Date (সব সারির জন্য)", value=local_now().date(), max_value=local_now().date(), key=f"hb_def_rd_{gen}")
+    same_issue = dc2.checkbox("Issue Date = Received Date (একই তারিখ)", value=True, key=f"hb_same_{gen}",
+                              help="টিক থাকলে আগেই Issue হওয়া মালের Issue তারিখ আলাদা লিখতে হবে না — Received Date-ই বসবে।")
+    def_idate = def_rdate
+    if not same_issue:
+        def_idate = dc3.date_input("Issue Date (সব সারির জন্য)", value=def_rdate, max_value=local_now().date(), key=f"hb_def_id_{gen}")
+    st.caption("নিচের টেবিলে Received Date / Issue Date ঘর **ফাঁকা রাখলে ওপরের তারিখ** বসবে; কোনো সারির তারিখ আলাদা হলে শুধু সেই সারিতে লিখুন।")
     edited = st.data_editor(
         _hb_blank(), num_rows="dynamic", hide_index=True, use_container_width=True, key=f"hb_grid_{gen}",
         column_config={
-            "Received Date": st.column_config.DateColumn("Received Date", format="DD-MMM-YYYY"),
+            "Received Date": st.column_config.DateColumn("Received Date (ফাঁকা = ওপরের তারিখ)", format="DD-MMM-YYYY"),
             "Challan No": st.column_config.TextColumn("Challan No"),
             "Invoice No": st.column_config.TextColumn("Invoice No / Name"),
             "Supplier": st.column_config.TextColumn("Supplier Name"),
             "Item Name": st.column_config.TextColumn("Item Name"),
             "Qty": st.column_config.NumberColumn("Qty", min_value=0.0, format="%g"),
             "Rate": st.column_config.NumberColumn("Rate (৳)", min_value=0.0, format="%.2f"),
-            "Total Value": st.column_config.NumberColumn("Total Value (৳)", min_value=0.0, format="%.2f"),
             "Problem": st.column_config.SelectboxColumn("Problem", options=HB_PROBLEMS),
             "Department": st.column_config.SelectboxColumn("কাকে জানাতে হবে", options=HB_DEPTS),
             "Responsible": st.column_config.TextColumn("দায়িত্বে কে (নাম / পদবি)", help="যার অধীনে/দায়িত্বে এই বিলটি সমাধানের অপেক্ষায় আছে"),
             "Remarks": st.column_config.TextColumn("Remarks", width="large"),
             "Issued Qty": st.column_config.NumberColumn("Issued Qty (আগেই Issue)", min_value=0.0, format="%g"),
-            "Issue Date": st.column_config.DateColumn("Issue Date", format="DD-MMM-YYYY"),
+            "Issue Date": st.column_config.DateColumn("Issue Date (ফাঁকা = ওপরের তারিখ)", format="DD-MMM-YYYY"),
             "Issue Req No": st.column_config.TextColumn("Issue Requisition No"),
             "Issue Dept": st.column_config.SelectboxColumn("কোন Department-এ Issue", options=HB_ISSUE_DEPTS),
         })
+    calc = [{"#": i, "Item": _hb_s(r.get("Item Name")), "Qty": _hb_f(r.get("Qty")), "Rate": _hb_f(r.get("Rate")),
+             "Total (Qty × Rate)": round(_hb_f(r.get("Qty")) * _hb_f(r.get("Rate")), 2)}
+            for i, r in enumerate(edited.to_dict("records"), 1)
+            if _hb_s(r.get("Item Name")) or _hb_s(r.get("Challan No")) or _hb_s(r.get("Invoice No"))]
+    if calc:
+        cm = st.columns(3)
+        cm[0].metric("সারি", f"{len(calc):,}")
+        cm[1].metric("মোট Qty", f"{sum(c['Qty'] for c in calc):g}")
+        cm[2].metric("মোট মূল্য (Qty × Rate)", f"৳{sum(c['Total (Qty × Rate)'] for c in calc):,.2f}")
+        with st.expander("🧮 সারি অনুযায়ী হিসাব দেখুন"):
+            st.dataframe(pd.DataFrame(calc), hide_index=True, use_container_width=True, column_config={
+                "Qty": st.column_config.NumberColumn(format="%g"), "Rate": st.column_config.NumberColumn(format="%.2f"),
+                "Total (Qty × Rate)": st.column_config.NumberColumn(format="%.2f")})
     can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor" and not is_cons_view
     if is_cons_view:
         st.info("ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ এন্ট্রি দেওয়া যায় না)।")
@@ -11816,25 +11845,27 @@ def _hb_entry_form():
                 errs.append(i)
                 continue
             dt = pd.to_datetime(r.get("Received Date"), errors="coerce")
-            qty, rate, tot = _hb_f(r.get("Qty")), _hb_f(r.get("Rate")), _hb_f(r.get("Total Value"))
+            rec_d = dt.date() if pd.notna(dt) else def_rdate   # row date, else the date chosen above
+            qty, rate = _hb_f(r.get("Qty")), _hb_f(r.get("Rate"))
             iq = _hb_f(r.get("Issued Qty"))
             issue = None
             if iq > 0:
                 idt = pd.to_datetime(r.get("Issue Date"), errors="coerce")
-                if pd.isna(idt) or (qty > 0 and iq > qty + 1e-9):
+                iss_d = idt.date() if pd.notna(idt) else (rec_d if same_issue else def_idate)
+                if qty > 0 and iq > qty + 1e-9:
                     ierrs.append(i)
                     continue
-                issue = {"date": idt.date().strftime(DATE_FMT), "req": _hb_s(r.get("Issue Req No")),
+                issue = {"date": iss_d.strftime(DATE_FMT), "req": _hb_s(r.get("Issue Req No")),
                          "dept": _hb_s(r.get("Issue Dept")) or "Other", "qty": iq, "remarks": ""}
-            rows.append({"date": (dt.date() if pd.notna(dt) else local_now().date()).strftime(DATE_FMT), "challan": ch, "invoice": inv,
-                         "supplier": sup, "item": item, "qty": qty, "rate": rate, "total": tot if tot > 0 else round(qty * rate, 2),
+            rows.append({"date": rec_d.strftime(DATE_FMT), "challan": ch, "invoice": inv,
+                         "supplier": sup, "item": item, "qty": qty, "rate": rate, "total": round(qty * rate, 2),
                          "problem": _hb_s(r.get("Problem")) if _hb_s(r.get("Problem")) in HB_PROBLEMS else "Other",
                          "dept": _hb_s(r.get("Department")) if _hb_s(r.get("Department")) in HB_DEPTS else HB_DEPTS[0],
                          "remarks": _hb_s(r.get("Remarks")), "responsible": _hb_s(r.get("Responsible")), "issue": issue})
         if errs:
             st.error("এই সারিগুলোতে Challan/Invoice No, Supplier বা Item Name নেই: " + ", ".join(map(str, errs)) + " — ঠিক করে আবার চাপুন (কিছুই সংরক্ষণ হয়নি)।")
         elif ierrs:
-            st.error("এই সারিগুলোতে Issued Qty আছে কিন্তু Issue Date নেই, অথবা Issued Qty বিলের Qty-র চেয়ে বেশি: "
+            st.error("এই সারিগুলোতে Issued Qty বিলের Qty-র চেয়ে বেশি: "
                      + ", ".join(map(str, ierrs)) + " (কিছুই সংরক্ষণ হয়নি)।")
         elif not rows:
             st.error("কোনো সারি পূরণ করা হয়নি।")
@@ -12095,7 +12126,7 @@ def _hb_list():
             n_item = e2.text_input("Item Name", value=r["item_name"] or "", key=f"hbe_it_{k_}")
             n_qty = e3.number_input("Qty", min_value=0.0, value=float(r["qty"]), format="%g", key=f"hbe_q_{k_}")
             n_rate = e1.number_input("Rate (৳)", min_value=0.0, value=float(r["rate"]), key=f"hbe_r_{k_}")
-            n_tot = e2.number_input("Total Value (৳)", min_value=0.0, value=float(r["total_value"]), key=f"hbe_t_{k_}")
+            n_tot = e2.number_input("Total Value (৳) — Qty × Rate থাকলে নিজে হিসাব হবে", min_value=0.0, value=float(r["total_value"]), key=f"hbe_t_{k_}")
             probs = HB_PROBLEMS if r["problem_type"] in HB_PROBLEMS else HB_PROBLEMS + [r["problem_type"]]
             depts = HB_DEPTS if r["dept_to"] in HB_DEPTS else HB_DEPTS + [r["dept_to"]]
             n_prob = e3.selectbox("Problem", probs, index=probs.index(r["problem_type"]) if r["problem_type"] in probs else 0, key=f"hbe_p_{k_}")
@@ -12111,7 +12142,7 @@ def _hb_list():
                              "Issue ভুল হলে নিচের ‘Issue রেকর্ড’ অংশ থেকে ঠিক করুন।")
                 elif guard() and update_hold_bill(r["id"], {"date": n_date.strftime(DATE_FMT), "challan": n_ch.strip(), "invoice": n_inv.strip(),
                                                              "supplier": n_sup.strip(), "item": n_item.strip(), "qty": n_qty, "rate": n_rate,
-                                                             "total": n_tot if n_tot > 0 else round(n_qty * n_rate, 2), "problem": n_prob,
+                                                             "total": round(n_qty * n_rate, 2) if n_qty * n_rate > 0 else n_tot, "problem": n_prob,
                                                              "dept": n_dept, "remarks": n_rem.strip(), "responsible": n_resp}):
                     done("✅ Hold Bill আপডেট হয়েছে।")
             st.markdown("---")
@@ -12187,7 +12218,9 @@ def _hb_issues():
         return
     st.markdown("**➕ Issue রেকর্ড যোগ করুন**")
     a1, a2, a3, a4 = st.columns([1, 1.1, 1.4, 1])
-    i_date = a1.date_input("Issue তারিখ", value=local_now().date(), max_value=local_now().date(), key=f"hbi_dt_{bid}")
+    _rd = parse_date(r["received_date"])
+    _def_i = min(_rd.date(), local_now().date()) if _rd else local_now().date()   # same date as the bill's Received Date
+    i_date = a1.date_input("Issue তারিখ (ডিফল্ট = Received Date)", value=_def_i, max_value=local_now().date(), key=f"hbi_dt_{bid}")
     i_req = a2.text_input("Requisition No", key=f"hbi_req_{bid}")
     i_dept = a3.selectbox("কোন Department", HB_ISSUE_DEPTS, key=f"hbi_dept_{bid}")
     i_qty = a4.number_input("Qty", min_value=0.0, step=1.0, format="%g", key=f"hbi_qty_{bid}")
