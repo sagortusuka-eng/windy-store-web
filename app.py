@@ -5926,6 +5926,8 @@ def tab_transfer_history():
             reverse = bool(src and dest)
             if not reverse:
                 st.warning("Stock item paoa jay nai - delete korle shudhu record delete hobe, stock change hobe na.")
+            elif st.checkbox("Shudhu record delete korbo - stock change korbo na (Fresh Start-er por eta tick din)", key="tf_reconly"):
+                reverse = False
             conf = confirm_box("tf_conf")
             c1, c2 = st.columns(2)
             if c1.button("🗑 Delete transfer", key="tf_del"):
@@ -7932,6 +7934,23 @@ def apply_count_as_opening(fac, user, rows, date_s, day):
     return len(rows)
 
 
+@tx
+def fresh_start_clear_transfers(fac, user, d1, d2):
+    """Archives then removes transfer RECORDS touching this unit. Stock is not changed."""
+    run("CREATE TABLE IF NOT EXISTS inter_factory_transfers_archive (LIKE inter_factory_transfers)")
+    run("ALTER TABLE inter_factory_transfers_archive ADD COLUMN IF NOT EXISTS fs_at TEXT")
+    cols = ", ".join(f'"{c}"' for c in _fs_common("inter_factory_transfers", "inter_factory_transfers_archive") if c != "fs_at")
+    psql, pp = period_sql("transfer_date", d1, d2)
+    w = f"(source_factory=%s OR dest_factory=%s){psql}"
+    wp = [fac, fac] + pp
+    n = int(q(f"SELECT COUNT(*) AS n FROM inter_factory_transfers WHERE {w}", wp)[0]["n"])
+    run(f"INSERT INTO inter_factory_transfers_archive (fs_at, {cols}) SELECT %s, {cols} FROM inter_factory_transfers WHERE {w}",
+        [local_now().strftime("%d-%b-%Y %I:%M %p")] + wp)
+    run(f"DELETE FROM inter_factory_transfers WHERE {w}", wp)
+    audit("FRESH_START_CLEAR_TRANSFERS", f"{user} removed {n} transfer record(s) touching {fac} (record only, stock unchanged)")
+    return n
+
+
 @_fragment
 def pc_fresh_view():
     st.caption("Notun kore shuru korar jonno: (1) backup, (2) ei unit-er transaction muche sob stock 0, "
@@ -8009,6 +8028,27 @@ def pc_fresh_view():
                         st.error("Manager password thik noy.")
                     elif guard() and fresh_start_undo(lg["fs_batch"], user):
                         done("Reset undo hoyeche - ager transaction ar stock ferot esheche.")
+
+    # ---------- Transfer history (record only) ----------
+    with st.expander("🧾 Transfer History clear (shudhu record - stock change hobe na)"):
+        tscope = st.radio("Kon transfer record", ["Ei mash-er", "Sob"], horizontal=True, key="pc_fs_tscope")
+        t1, t2 = (today.replace(day=1), today) if tscope.startswith("Ei") else (None, None)
+        tps, tpp = period_sql("transfer_date", t1, t2)
+        tn = int(q(f"SELECT COUNT(*) AS n FROM inter_factory_transfers WHERE (source_factory=%s OR dest_factory=%s){tps}",
+                   [FAC, FAC] + tpp)[0]["n"])
+        st.metric("Muchbe (ei unit source ba destination)", tn)
+        st.caption("Shudhu history record muche jay (archive table-e copy thake). Stock kom/besh hobe na. "
+                   "Dui unit-er shob transfer jodi muchte chan, duita unit-e alada kore korun.")
+        tok = st.checkbox("Ami transfer record muchte chai (stock change hobe na)", key="pc_fs_tok")
+        tpw = st.text_input("Store Manager Password", type="password", key="pc_fs_tpw")
+        if st.button("🧾 Transfer records muchun", key="pc_fs_tgo", disabled=not (tok and tn)):
+            if not verify_manager_password(tpw):
+                st.error("Manager password thik noy.")
+            elif guard():
+                n = fresh_start_clear_transfers(FAC, user, t1, t2)
+                st.session_state.pop("pc_fs_tok", None)
+                st.session_state.pop("pc_fs_tpw", None)
+                done(f"{n} ti transfer record muche geche (stock change hoyni).")
 
     # ---------- Step 3 + 4 : count -> opening ----------
     st.markdown("---")
