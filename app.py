@@ -7750,6 +7750,10 @@ def delete_stock_count_items(item_ids, user):
     return True
 
 
+def _pc_del_select_all(all_labels):
+    st.session_state["pc_del_pick"] = list(all_labels)
+
+
 @_fragment
 def pc_delete_view():
     st.caption("Vul unit-e (jemon KC) count entry hoye gele ekhan theke delete korun. "
@@ -7776,9 +7780,7 @@ def pc_delete_view():
     if mode.startswith("Pura"):
         pick = st.multiselect("Count select korun", list(labels), key="pc_del_pick")
         ids = [labels[k] for k in pick]
-        if st.button("Select all shown", key="pc_del_selall"):
-            st.session_state["pc_del_pick"] = list(labels)
-            st.rerun()
+        st.button("Select all shown", key="pc_del_selall", on_click=_pc_del_select_all, args=(list(labels),))
         if ids:
             items = q_c("SELECT count_id, sl_no, item_name, size, counted_qty FROM stock_count_items "
                         "WHERE count_id = ANY(%s) ORDER BY count_id, id", (ids,))
