@@ -7720,6 +7720,95 @@ def pc_uncounted_view():
     export_buttons(df, "not_counted_items", title="Items in software but not physically counted")
 
 
+# ---- Physical Count: delete a wrongly entered count (added; touches only the two count tables) ----
+@tx
+def delete_stock_counts(ids, user):
+    """Deletes whole counts (header + items). Inventory and transactions are NOT touched."""
+    ids = [int(i) for i in ids]
+    hdr = q("SELECT id, factory_name, counted_by, counted_at FROM stock_counts WHERE id = ANY(%s)", (ids,))
+    n_items = q("SELECT COUNT(*) AS n FROM stock_count_items WHERE count_id = ANY(%s)", (ids,))[0]["n"]
+    run("DELETE FROM stock_count_items WHERE count_id = ANY(%s)", (ids,))
+    run("DELETE FROM stock_counts WHERE id = ANY(%s)", (ids,))
+    audit("STOCK_COUNT_DELETED",
+          f"{user} deleted {len(hdr)} count(s) / {n_items} item row(s): "
+          + "; ".join(f"#{h['id']} {h['factory_name']} {h['counted_by']} {h['counted_at']}" for h in hdr))
+    return True
+
+
+@tx
+def delete_stock_count_items(item_ids, user):
+    """Deletes only the chosen item rows of a count; a count left with no items is removed too."""
+    item_ids = [int(i) for i in item_ids]
+    rows = q("SELECT id, count_id, factory_name, item_name, sl_no FROM stock_count_items WHERE id = ANY(%s)", (item_ids,))
+    cids = sorted({r["count_id"] for r in rows})
+    run("DELETE FROM stock_count_items WHERE id = ANY(%s)", (item_ids,))
+    run("""DELETE FROM stock_counts WHERE id = ANY(%s)
+           AND NOT EXISTS (SELECT 1 FROM stock_count_items i WHERE i.count_id = stock_counts.id)""", (cids,))
+    audit("STOCK_COUNT_ITEM_DELETED",
+          f"{user} deleted {len(rows)} count item(s): "
+          + "; ".join(f"count #{r['count_id']} {r['factory_name']} SL {r['sl_no']} {r['item_name']}" for r in rows[:30]))
+    return True
+
+
+@_fragment
+def pc_delete_view():
+    st.caption("Vul unit-e (jemon KC) count entry hoye gele ekhan theke delete korun. "
+               "Delete korle shudhu count record muche jabe - Inventory stock ba Transactions kichu change hobe na.")
+    if st.session_state.get("role") != "Store Manager":
+        st.info("Count delete korar permission shudhu Store Manager-er.")
+        return
+    cf, cp = fw(FAC, "c.")
+    c1, c2 = st.columns([1, 2])
+    all_dates = c1.checkbox("Sob tarikh", value=False, key="pc_del_all")
+    d = c2.date_input("Tarikh", value=local_now().date(), key="pc_del_date", disabled=all_dates)
+    where = "" if all_dates else " AND c.counted_at LIKE %s"
+    params = list(cp) + ([] if all_dates else [d.strftime(DATE_FMT) + "%"])
+    rows = q_c(f"""SELECT c.id, c.factory_name, c.counted_by, c.counted_at, c.status, COUNT(i.id) AS n
+                   FROM stock_counts c LEFT JOIN stock_count_items i ON i.count_id=c.id
+                   WHERE 1=1{cf}{where} GROUP BY c.id ORDER BY c.id DESC LIMIT 200""", params)
+    if not rows:
+        st.info("Ei filter-e kono count nei.")
+        return
+    st.markdown(f"**{len(rows)} count / {sum(int(r['n']) for r in rows)} item** (unit: {FAC})")
+    labels = {f"Count #{r['id']} · {r['factory_name']} · {r['counted_by']} · {r['counted_at']} · {int(r['n'])} item · {r['status']}": r["id"]
+              for r in rows}
+    mode = st.radio("Ki delete korben", ["Pura count (sob item)", "Shudhu kichu item"], horizontal=True, key="pc_del_mode")
+    if mode.startswith("Pura"):
+        pick = st.multiselect("Count select korun", list(labels), key="pc_del_pick")
+        ids = [labels[k] for k in pick]
+        if st.button("Select all shown", key="pc_del_selall"):
+            st.session_state["pc_del_pick"] = list(labels)
+            st.rerun()
+        if ids:
+            items = q_c("SELECT count_id, sl_no, item_name, size, counted_qty FROM stock_count_items "
+                        "WHERE count_id = ANY(%s) ORDER BY count_id, id", (ids,))
+            st.dataframe(pd.DataFrame([{"Count #": r["count_id"], "SL No": r["sl_no"], "Item": r["item_name"],
+                                        "Size": r["size"], "Counted": float(r["counted_qty"])} for r in items]),
+                         hide_index=True, use_container_width=True, height=min(60 + 35 * len(items), 320))
+            ok = st.checkbox(f"Ami {len(ids)} ti count ({len(items)} item) delete korte chai - eta ar ferot ana jabe na",
+                             key="pc_del_ok")
+            if st.button("🗑 Delete selected count(s)", type="primary", key="pc_del_go", disabled=not ok):
+                if guard() and delete_stock_counts(ids, st.session_state["user"]):
+                    st.session_state.pop("pc_del_pick", None)
+                    st.session_state.pop("pc_del_ok", None)
+                    done(f"{len(ids)} ti count delete hoyeche.")
+    else:
+        items = q_c(f"""SELECT i.id, i.count_id, i.sl_no, i.item_name, COALESCE(i.size,'') AS size, i.counted_qty
+                        FROM stock_count_items i JOIN stock_counts c ON c.id=i.count_id
+                        WHERE 1=1{cf}{where} ORDER BY i.count_id DESC, i.id""", params)
+        ilabels = {f"Count #{r['count_id']} · SL {r['sl_no']} · {r['item_name']} [{r['size'] or '-'}] · counted {float(r['counted_qty']):g}": r["id"]
+                   for r in items}
+        pick = st.multiselect("Item select korun", list(ilabels), key="pc_del_ipick")
+        ids = [ilabels[k] for k in pick]
+        if ids:
+            ok = st.checkbox(f"Ami {len(ids)} ti item delete korte chai - eta ar ferot ana jabe na", key="pc_del_iok")
+            if st.button("🗑 Delete selected item(s)", type="primary", key="pc_del_igo", disabled=not ok):
+                if guard() and delete_stock_count_items(ids, st.session_state["user"]):
+                    st.session_state.pop("pc_del_ipick", None)
+                    st.session_state.pop("pc_del_iok", None)
+                    done(f"{len(ids)} ti item delete hoyeche.")
+
+
 def tab_physical_count():
     try:
         _box = st.container(key="pc_mobile")
@@ -7740,7 +7829,7 @@ def _tab_physical_count_body():
     except Exception as e:
         st.error(f"Physical Count tables could not be prepared: {e}")
         return
-    _tab = lazy_tab_select(["➕ New count", "⚖️ Verify & Fix", "🕳 Not counted yet", "⏳ Waiting / Results"], "lz_pc")
+    _tab = lazy_tab_select(["➕ New count", "⚖️ Verify & Fix", "🕳 Not counted yet", "⏳ Waiting / Results", "🗑 Delete count"], "lz_pc")
     if _tab == 0:
         count_picks_panel()   # NEW: today's 5 items the system recommends counting
         pc_entry()
@@ -7750,6 +7839,8 @@ def _tab_physical_count_body():
         pc_uncounted_view()
     if _tab == 3:
         pc_results_view()
+    if _tab == 4:
+        pc_delete_view()
 
 
 # ============================================================
