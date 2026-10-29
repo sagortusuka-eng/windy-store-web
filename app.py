@@ -4378,12 +4378,6 @@ def tab_stock_report():
             m = view_sr[["item_name", "prod_id", "serial_no", "size", "department", "category"]].fillna("").astype(str).apply(
                 lambda c: c.str.lower().str.contains(s_term, regex=False)).any(axis=1)
             view_sr = view_sr[m | (view_sr["sl_no"].astype(str) == s_term)]
-        sr_pc = st.selectbox("📂 Product Category (বাছলে শুধু সেই Category-র আইটেম দেখাবে)",
-                             ["All"] + get_product_categories() + ["(ফাঁকা — Product Category নেই)"], key="sr_pc_filter")
-        if sr_pc.startswith("(ফাঁকা"):
-            view_sr = view_sr[view_sr["product_category"].astype(str).str.strip() == ""]
-        elif sr_pc != "All":
-            view_sr = view_sr[view_sr["product_category"].astype(str).str.strip() == sr_pc]
         st.caption(f"Showing {len(view_sr):,} item(s)")
 
         disp_cols = ["factory_name", "sl_no", "prod_id", "item_name", "size", "unit_name",
@@ -4407,7 +4401,7 @@ def tab_stock_report():
             "Period Issued": st.column_config.NumberColumn(format="%.2f"),
             "Period Issue Value": st.column_config.NumberColumn(format="৳ %,.2f"),
         })
-        export_buttons(view_sr, "stock_report_export")
+        export_buttons(view_sr.drop(columns=["product_category"], errors="ignore"), "stock_report_export")
 
         html_report = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Stock Report</title>
         <style>body {{ font-family: Arial; font-size: 11px; }} table {{ width: 100%; border-collapse: collapse; }}
@@ -4432,11 +4426,18 @@ def tab_stock_report():
             if is_cons_view:
                 st.info("Quick Edit-এর জন্য ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ নয়)।")
             else:
+                sr_pc = st.selectbox("📂 Product Category (বাছলে Quick Edit-এ শুধু সেই Category-র আইটেম আসবে)",
+                                     ["All"] + get_product_categories() + ["(ফাঁকা — Product Category নেই)"], key="sr_pc_filter")
+                qsrc = view_sr
+                if sr_pc.startswith("(ফাঁকা"):
+                    qsrc = view_sr[view_sr["product_category"].astype(str).str.strip() == ""]
+                elif sr_pc != "All":
+                    qsrc = view_sr[view_sr["product_category"].astype(str).str.strip() == sr_pc]
                 QE_MAX = 600 if (sr_pc != "All" or sr_search.strip()) else 200
-                qv = view_sr.head(QE_MAX).reset_index(drop=True)
+                qv = qsrc.head(QE_MAX).reset_index(drop=True)
                 st.caption(f"ERP Stock QTY, UOM ও Rate (Unit Price) ঘরে ক্লিক করে লিখুন, তারপর নিচে Manager password দিয়ে Save করুন। "
                            f"Physical Stock বদলায় না। দ্রুত রাখতে একবারে সর্বোচ্চ {QE_MAX}টি আইটেম দেখানো হয় — বেশি হলে ওপরের Search দিয়ে ছোট করুন"
-                           + (f" (এখন {len(view_sr):,}টির মধ্যে প্রথম {len(qv)}টি)।" if len(view_sr) > len(qv) else "।"))
+                           + (f" (এখন {len(qsrc):,}টির মধ্যে প্রথম {len(qv)}টি)।" if len(qsrc) > len(qv) else "।"))
                 qe_uoms = sorted(set(get_uoms()) | set(qv["unit_name"].astype(str)))
                 qe_in = pd.DataFrame({"SL": qv["sl_no"].astype(int), "ERP Code": qv["prod_id"], "Item": qv["item_name"], "Size": qv["size"], "Product Category": qv["product_category"],
                                       "Physical Stock": qv["current_stock"].astype(float), "UOM": qv["unit_name"].astype(str),
