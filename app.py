@@ -10935,11 +10935,28 @@ def _ri_form():
 
     # ---- add one item
     st.markdown("**➕ আইটেম যোগ করুন**")
-    a1, a2, a3 = st.columns([2.6, 1.6, 1])
-    term = a1.text_input("🔍 খুঁজুন (নাম / ERP code / size / serial)", key=f"ri_search_{gen}").strip()
-    cands = search_items(fac, term)[:30] if len(term) >= 2 else []
+    # Category first: pick one and the item box below lists every item of that category (click the box and the list opens;
+    # type in it to narrow down). "সব Category" keeps the old behaviour: type a name / code in the search box.
+    ALL_CAT = "সব Category"
+    cat_rows = q_c("""SELECT DISTINCT COALESCE(NULLIF(TRIM(category),''),'(Category নেই)') AS c FROM inventory
+                      WHERE factory_name=%s ORDER BY 1""", (fac,))
+    cat_sel = st.selectbox("📂 Category", [ALL_CAT] + [r["c"] for r in cat_rows], key=f"ri_cat_{gen}")
+    a1, a2, a3 = st.columns([2.2, 2.4, 1])
+    term = a1.text_input("🔍 খুঁজুন (নাম / ERP code / size / serial)", key=f"ri_search_{gen}",
+                         help="Category বাছলে নাম না লিখেও ডানের ‘আইটেম’ বক্সে ওই Category-র সব আইটেম দেখা যাবে; লিখলে তালিকা ছোট হবে।").strip()
+    if cat_sel != ALL_CAT:
+        like = f"%{term.lower()}%"
+        cand_rows = q_c(f"""SELECT {INV_COLS} FROM inventory
+                            WHERE factory_name=%s AND COALESCE(NULLIF(TRIM(category),''),'(Category নেই)')=%s
+                              AND (%s='' OR LOWER(item_name) LIKE %s OR LOWER(COALESCE(size,'')) LIKE %s OR LOWER(prod_id) LIKE %s
+                                   OR LOWER(COALESCE(serial_no,'')) LIKE %s OR CAST(sl_no AS TEXT)=%s)
+                            ORDER BY item_name, size LIMIT 400""", (fac, cat_sel, term, like, like, like, like, term))
+        cands = cand_rows
+    else:
+        cands = search_items(fac, term)[:30] if len(term) >= 2 else []
     labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · স্টক {float(r['stock']):g}": r for r in cands}
-    pick = a2.selectbox("আইটেম", list(labels) if labels else ["— আগে খুঁজুন —"], key=f"ri_pick_{gen}")
+    pick = a2.selectbox(f"আইটেম ({len(labels)}টি)" if labels else "আইটেম", list(labels) if labels else ["— আগে Category বা নাম খুঁজুন —"],
+                        key=f"ri_pick_{gen}")
     qty_in = a3.number_input("পরিমাণ", min_value=0.0, step=1.0, format="%g", key=f"ri_qty_{gen}")
 
     def _add():
