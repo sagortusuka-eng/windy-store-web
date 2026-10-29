@@ -4295,6 +4295,24 @@ def opening_check_panel(default_fac):
         export_buttons(df, "opening_check_result")
 
 
+@tx
+def set_erp_uom_rate_bulk(fac, changes):
+    """changes = [(sl_no, new_erp_stock, new_uom, new_rate)]. Only erp_stock, unit_name and unit_price change - Physical stock is never touched."""
+    n = 0
+    for sl, erp, uom, rate in changes:
+        old = q("""SELECT item_name, prod_id, COALESCE(erp_stock,0) AS e, COALESCE(NULLIF(unit_name,''),'Pcs') AS u, COALESCE(unit_price,0) AS p
+                   FROM inventory WHERE sl_no=%s AND factory_name=%s""", (int(sl), fac))
+        if not old:
+            continue
+        o = old[0]
+        run("UPDATE inventory SET erp_stock=%s, unit_name=%s, unit_price=%s WHERE sl_no=%s AND factory_name=%s",
+            (float(erp), uom, float(rate), int(sl), fac))
+        audit("EDIT_ERP_UOM_RATE", f"{fac} SL {sl} [{o['prod_id']}] {o['item_name']}: ERP stock {float(o['e']):g} -> {float(erp):g}; "
+                                   f"UOM {o['u']} -> {uom}; rate {float(o['p']):g} -> {float(rate):g} (Stock Report quick edit)")
+        n += 1
+    return n or None
+
+
 def tab_stock_report():
     st.title("Stock Report & ERP Reconciliation")
     st.caption("ERP Stock QTY, Physical Stock QTY, Stock Balance and values for the selected factory.")
@@ -4313,7 +4331,7 @@ def tab_stock_report():
                 done("All stock balances have been reset to Zero.")
 
     st_items = qdf_c(f"""SELECT factory_name, sl_no, COALESCE(serial_no,'') AS serial_no, prod_id, item_name,
-                       COALESCE(size,'') AS size, department, category,
+                       COALESCE(size,'') AS size, department, category, COALESCE(product_category,'') AS product_category,
                        COALESCE(erp_stock,0) AS erp_stock, COALESCE(current_stock,0) AS current_stock,
                        COALESCE(unit_price,0) AS unit_price, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit_name
                        FROM inventory WHERE 1=1{fsql} ORDER BY factory_name, sl_no""", fp)
@@ -4360,6 +4378,12 @@ def tab_stock_report():
             m = view_sr[["item_name", "prod_id", "serial_no", "size", "department", "category"]].fillna("").astype(str).apply(
                 lambda c: c.str.lower().str.contains(s_term, regex=False)).any(axis=1)
             view_sr = view_sr[m | (view_sr["sl_no"].astype(str) == s_term)]
+        sr_pc = st.selectbox("📂 Product Category (বাছলে শুধু সেই Category-র আইটেম দেখাবে)",
+                             ["All"] + get_product_categories() + ["(ফাঁকা — Product Category নেই)"], key="sr_pc_filter")
+        if sr_pc.startswith("(ফাঁকা"):
+            view_sr = view_sr[view_sr["product_category"].astype(str).str.strip() == ""]
+        elif sr_pc != "All":
+            view_sr = view_sr[view_sr["product_category"].astype(str).str.strip() == sr_pc]
         st.caption(f"Showing {len(view_sr):,} item(s)")
 
         disp_cols = ["factory_name", "sl_no", "prod_id", "item_name", "size", "unit_name",
@@ -4402,6 +4426,48 @@ def tab_stock_report():
         html_report += "</tbody></table></body></html>"
         st.download_button("🖨️ Download Printable Stock Report (HTML)", html_report,
                            "Stock_Report_Printable.html", "text/html")
+
+        st.markdown("---")
+        if st.checkbox("✏️ Quick Edit — table-এ সরাসরি ERP Stock / UOM / Rate বসান", key="sr_qe_on"):
+            if is_cons_view:
+                st.info("Quick Edit-এর জন্য ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ নয়)।")
+            else:
+                QE_MAX = 600 if (sr_pc != "All" or sr_search.strip()) else 200
+                qv = view_sr.head(QE_MAX).reset_index(drop=True)
+                st.caption(f"ERP Stock QTY, UOM ও Rate (Unit Price) ঘরে ক্লিক করে লিখুন, তারপর নিচে Manager password দিয়ে Save করুন। "
+                           f"Physical Stock বদলায় না। দ্রুত রাখতে একবারে সর্বোচ্চ {QE_MAX}টি আইটেম দেখানো হয় — বেশি হলে ওপরের Search দিয়ে ছোট করুন"
+                           + (f" (এখন {len(view_sr):,}টির মধ্যে প্রথম {len(qv)}টি)।" if len(view_sr) > len(qv) else "।"))
+                qe_uoms = sorted(set(get_uoms()) | set(qv["unit_name"].astype(str)))
+                qe_in = pd.DataFrame({"SL": qv["sl_no"].astype(int), "ERP Code": qv["prod_id"], "Item": qv["item_name"], "Size": qv["size"], "Product Category": qv["product_category"],
+                                      "Physical Stock": qv["current_stock"].astype(float), "UOM": qv["unit_name"].astype(str),
+                                      "ERP Stock QTY": qv["erp_stock"].astype(float), "Rate (৳)": qv["unit_price"].astype(float)})
+                qe_gen = st.session_state.get("sr_qe_gen", 0)
+                qe_ed = st.data_editor(qe_in, hide_index=True, use_container_width=True, height=min(80 + 35 * len(qe_in), 480),
+                                       key=f"sr_qe_{qe_gen}_{sr_search.strip().lower()}_{sr_pc}", disabled=["SL", "ERP Code", "Item", "Size", "Product Category", "Physical Stock"],
+                                       column_config={"UOM": st.column_config.SelectboxColumn("UOM", options=qe_uoms, required=True),
+                                                      "ERP Stock QTY": st.column_config.NumberColumn(format="%.2f", step=1.0),
+                                                      "Rate (৳)": st.column_config.NumberColumn(format="%.2f", min_value=0.0, step=1.0),
+                                                      "Physical Stock": st.column_config.NumberColumn(format="%.2f")})
+                qe_changes, qe_bad = [], 0
+                for a, b in zip(qe_in.to_dict("records"), qe_ed.to_dict("records")):
+                    if pd.isna(b["ERP Stock QTY"]) or pd.isna(b["Rate (৳)"]) or not str(b["UOM"] or "").strip():
+                        qe_bad += 1
+                        continue
+                    if (abs(float(b["ERP Stock QTY"]) - a["ERP Stock QTY"]) > 1e-9 or abs(float(b["Rate (৳)"]) - a["Rate (৳)"]) > 1e-9
+                            or str(b["UOM"]) != a["UOM"]):
+                        qe_changes.append((int(a["SL"]), float(b["ERP Stock QTY"]), str(b["UOM"]), float(b["Rate (৳)"])))
+                st.caption(f"পরিবর্তন: {len(qe_changes)}টি আইটেম" + (f" · ⚠️ {qe_bad}টি সারিতে ঘর ফাঁকা — সেগুলো সংরক্ষণ হবে না" if qe_bad else ""))
+                qe_pw = mgr_check("sr_qe_pw")
+                if st.button("💾 Save ERP Stock / UOM / Rate", key="sr_qe_save", type="primary"):
+                    if not guard(write=False):
+                        pass
+                    elif not qe_pw:
+                        st.error("Manager password দিন।")
+                    elif not qe_changes:
+                        st.error("কোনো পরিবর্তন করা হয়নি।")
+                    elif set_erp_uom_rate_bulk(fac, qe_changes):
+                        st.session_state["sr_qe_gen"] = qe_gen + 1
+                        done(f"{len(qe_changes)}টি আইটেমের ERP Stock / UOM / Rate সংরক্ষিত হয়েছে।")
 
         st.markdown("---")
         st.markdown("### 📋 Item-wise Transaction History & Management")
@@ -10982,26 +11048,50 @@ def _dh_product_cat_tool(nopc):
         prev.columns = ["SL", "ERP Code", "Item", "Size", "Budget Category"]
         st.dataframe(prev, hide_index=True, use_container_width=True, height=min(80 + 35 * len(prev), 300))
     NEW_PC = "➕ নতুন Category-র নাম লিখব"
-    tsel = st.selectbox("কোন Product Category বসাবেন", [SEL] + get_product_categories() + [NEW_PC], key="dh_pc_target")
+    bud_names = [r["category_name"] for r in q_c("SELECT DISTINCT category_name FROM category_budgets WHERE factory_name=%s ORDER BY 1", [FAC])]
+    cur_cats = sorted({str(c).strip() for c in sel["category"]}) if not sel.empty else []
+    bad_cats = [c for c in cur_cats if c not in bud_names]
+    # hint: a Budget Category such as "Maintenance." is really the Product Category "Maintenance" -> match it to its real Budget line
+    base = (cur_cats[0] if len(cur_cats) == 1 else "").strip().rstrip(". ").casefold()
+    pcs = get_product_categories()
+    pc_default = next((c for c in pcs if c.casefold() == base), None) if base else None
+    bud_default = [n for n in bud_names if base and n.casefold().startswith(base)] if bad_cats and base else []
+    ksuf = re.sub(r"\W+", "_", f"{mode}_{(cur_cats[0] if len(cur_cats) == 1 else 'x')}")
+    if bad_cats:
+        st.warning("এই আইটেমগুলোর Budget Category (" + ", ".join(f"‘{c or 'ফাঁকা'}’" for c in bad_cats[:4]) + ") কোনো Budget লাইনের সাথে মেলে না। "
+                   "নিচে Product Category ও সঠিক Budget Category একসাথে বসাতে পারবেন — দুটো আলাদা জিনিস।")
+    opts = [SEL] + pcs + [NEW_PC]
+    idx = opts.index(pc_default) if pc_default else (opts.index(NEW_PC) if (base and bad_cats) else 0)
+    tsel = st.selectbox("কোন Product Category বসাবেন", opts, index=idx, key=f"dh_pc_target_{ksuf}")
     if tsel == NEW_PC:
-        target = st.text_input("নতুন Product Category-র নাম", key="dh_pc_new")
+        target = st.text_input("নতুন Product Category-র নাম", value=(cur_cats[0].rstrip(". ") if (base and bad_cats) else ""), key=f"dh_pc_new_{ksuf}")
     else:
         target = "" if tsel == SEL else tsel
+    KEEP = "— Budget Category বদলাবেন না —"
+    bopts = [KEEP] + bud_names
+    bsel = st.selectbox("কোন Budget Category-তে ধরবেন (ঠিক করতে চাইলে বাছুন)", bopts,
+                        index=bopts.index(bud_default[0]) if len(bud_default) == 1 else 0, key=f"dh_pc_bud_{ksuf}")
+    bud_target = "" if bsel == KEEP else bsel
+    if not sel.empty and (target.strip() or bud_target):
+        st.caption(f"{len(sel):,}টি আইটেম → Product Category: ‘{_clean(target) or 'বদলাবে না'}’ · Budget Category: ‘{bud_target or 'বদলাবে না'}’")
     pw = mgr_check("dh_pw_pc")
-    if st.button("💾 Product Category সংরক্ষণ", key="dh_pc_save", type="primary"):
+    if st.button("💾 সংরক্ষণ", key="dh_pc_save", type="primary"):
         if not guard(write=False):
             pass
         elif not pw:
             st.error("Manager password দিন।")
         elif sel.empty:
             st.error("কোনো আইটেম নির্বাচিত নেই।")
-        elif not target.strip():
-            st.error("Product Category বাছুন বা নতুন নাম লিখুন।")
+        elif not target.strip() and not bud_target:
+            st.error("Product Category বাছুন / নতুন নাম লিখুন, অথবা Budget Category বাছুন।")
         else:
-            n = set_product_category_bulk(FAC, [int(x) for x in sel["sl_no"]], target)
-            if n:
-                done(f"{n:,}টি আইটেমে Product Category ‘{_clean(target)}’ বসেছে।")
-    st.caption("শুধু Product Category বদলায় — স্টক, দাম বা Budget Category নয়। যেগুলোতে আগে থেকেই Category আছে সেগুলো ছোঁয়া হয় না।")
+            sl_all = [int(x) for x in sel["sl_no"]]
+            n = set_product_category_bulk(FAC, sl_all, target) if target.strip() else 0
+            nb = (set_items_budget_category(FAC, sl_all, bud_target) or 0) if bud_target else 0
+            if n or nb:
+                done((f"{n:,}টি আইটেমে Product Category ‘{_clean(target)}’ বসেছে। " if n else "")
+                     + (f"{nb:,}টি আইটেম এখন ‘{bud_target}’ Budget লাইনে ধরা পড়বে।" if nb else ""))
+    st.caption("শুধু Product Category ও (বাছলে) Budget Category বদলায় — স্টক বা দাম নয়। Product Category আগে থেকেই আছে এমন আইটেম ছোঁয়া হয় না।")
 
 
 @st.cache_data(ttl=180, show_spinner=False, max_entries=8)
