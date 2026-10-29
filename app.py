@@ -7188,6 +7188,39 @@ def _pc_remove(sl):
     st.session_state.get("pc_list", {}).pop(sl, None)
 
 
+def _pc_item_info(fac, row):
+    """Shows the picked item's live system stock and, if it was counted before, the last count's Short / Excess."""
+    try:
+        sl = row["sl_no"]
+        inv = q("SELECT COALESCE(current_stock,0) AS stock, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit "
+                "FROM inventory WHERE sl_no=%s AND factory_name=%s", (sl, fac))
+        if not inv:
+            return
+        stock, unit = float(inv[0]["stock"]), inv[0]["unit"]
+        last = q("""SELECT i.count_id, i.counted_qty, c.counted_at, c.counted_by FROM stock_count_items i
+                    JOIN stock_counts c ON c.id=i.count_id
+                    WHERE i.sl_no=%s AND i.factory_name=%s ORDER BY i.id DESC LIMIT 1""", (sl, fac))
+        m = st.columns(3)
+        m[0].metric("System stock now", f"{stock:g} {unit}")
+        if not last:
+            m[1].metric("Last count", "Not counted yet")
+            return
+        lc = last[0]
+        counted = float(lc["counted_qty"])
+        diff = counted - stock
+        m[1].metric("Last counted", f"{counted:g} {unit}")
+        if abs(diff) < 1e-9:
+            m[2].metric("Result", "✅ Match")
+        elif diff < 0:
+            m[2].metric("Result", f"🔻 Short {abs(diff):g}")
+        else:
+            m[2].metric("Result", f"🔺 Excess {diff:g}")
+        st.caption(f"Last count #{lc['count_id']} by {lc['counted_by']} on {lc['counted_at']}. "
+                   f"Short / Excess = last counted qty − system stock now.")
+    except Exception:
+        pass
+
+
 @_fragment
 def pc_entry():
     """Phone-friendly entry. A fragment: typing / selecting here does not reload the whole application."""
@@ -7195,8 +7228,8 @@ def pc_entry():
         st.info("🔑 Sign in first to record a count.")
         return
     st.markdown(f"**🏭 Counting in: {FAC}**")
-    st.caption("Counting is blind: the system stock is not shown here, so the count stays honest. "
-               "It appears in the Waiting / Results tab after you submit.")
+    st.caption("Select an item to see its current system stock and any Short / Excess from its last count. "
+               "The count appears in the Waiting / Results tab after you submit.")
     term = st.text_input("🔍 Item name / serial / ERP code", key="pc_term", placeholder="Type and select the item")
     opts = {}
     if term.strip():
@@ -7208,6 +7241,9 @@ def pc_entry():
         st.warning("No item found.")
     if opts:
         st.selectbox("Select item", list(opts), key="pc_pick")
+        _pk = opts.get(st.session_state.get("pc_pick"))
+        if _pk is not None:
+            _pc_item_info(FAC, _pk)
     try:
         st.number_input("Counted quantity", min_value=0.0, step=1.0, value=None, placeholder="How many did you count?",
                         key="pc_qty")
