@@ -7333,6 +7333,393 @@ def _phone_install_meta():
         </script>""", height=0)
 
 
+# ---- Physical Count v2 (additive): verify count against system, trace every movement, fix from this tab ----
+def _pc_dt(d, t):
+    """Date + time text -> datetime (for ordering the history). Unreadable dates sort first."""
+    base = parse_date(d)
+    if not base:
+        return datetime.min
+    try:
+        tt = datetime.strptime(str(t or "").strip(), "%I:%M %p")
+        return base.replace(hour=tt.hour, minute=tt.minute)
+    except Exception:
+        return base
+
+
+@tx
+def pc_edit_tx(tid, new_qty, date_s, notes):
+    """Edit quantity / date / remarks of one transaction from the Physical Count tab. Stock moves by the difference."""
+    rows = q("SELECT * FROM transactions WHERE id=%s FOR UPDATE", (tid,))
+    if not rows:
+        raise ValueError("Transaction paoa jay nai.")
+    t = rows[0]
+    old_qty, ttype = float(t["qty"] or 0), t["trans_type"]
+    delta = float(new_qty) - old_qty
+    if abs(delta) > 1e-9:
+        if ttype == OPENING_TYPE:
+            raise ValueError("Opening Balance-er quantity ekhane change kora jabe na (Stock Adjustment / Opening Balance notun kore din).")
+        if "Auto-transferred" in (t["notes"] or ""):
+            raise ValueError("Ei Issue-te auto-transfer jukto ache - quantity change korle transfer-o mile na. "
+                             "Age niche 'Transfer' theke thik korun ba delete kore notun kore din.")
+        cur = q("SELECT COALESCE(current_stock,0) AS s FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE",
+                (t["sl_no"], t["factory_name"]))
+        if not cur:
+            raise ValueError("Inventory item paoa jay nai.")
+        stock = float(cur[0]["s"])
+        if ttype in RECEIPT_TYPES:
+            eff = delta
+        elif ttype in ISSUE_TYPES + (ADJ_OUT,):
+            eff = -delta
+        else:
+            raise ValueError(f"'{ttype}' type-er quantity ekhane edit kora jay na.")
+        if stock + eff < -1e-9:
+            raise ValueError(f"Ei change-e stock negative ({stock + eff:g}) hoye jabe.")
+        run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s",
+            (eff, t["sl_no"], t["factory_name"]))
+    d = parse_date(date_s)
+    run("UPDATE transactions SET qty=%s, date=%s, day=%s, notes=%s WHERE id=%s",
+        (float(new_qty), date_s, d.day if d else t["day"], notes, tid))
+    audit("EDIT_TRANS_PC", f"Physical Count tab: transaction {tid} {t['factory_name']} {ttype} of {t['prod_id']} ({t['item_name']}) "
+                           f"SL {t['sl_no']}: qty {old_qty:g}->{float(new_qty):g}, date '{t['date']}'->'{date_s}'")
+    return True
+
+
+@tx
+def pc_adjust_to_count(fac, sl, counted, count_id, note):
+    """Sets the software physical stock equal to the counted quantity, recorded as a Stock Adjustment transaction."""
+    r = q("SELECT prod_id, item_name, COALESCE(current_stock,0) AS stock FROM inventory "
+          "WHERE sl_no=%s AND factory_name=%s FOR UPDATE", (sl, fac))
+    if not r:
+        raise ValueError("Inventory item paoa jay nai.")
+    r = r[0]
+    stock, counted = float(r["stock"]), float(counted)
+    delta = counted - stock
+    if abs(delta) < 1e-9:
+        raise ValueError("Stock ager-i counted qty-r soman.")
+    ttype = "Stock Adjustment (+)" if delta > 0 else ADJ_OUT
+    run("UPDATE inventory SET current_stock=%s WHERE sl_no=%s AND factory_name=%s", (counted, sl, fac))
+    now = local_now()
+    insert_tx(fac, st.session_state.get("user", ""), sl, r["prod_id"], r["item_name"], abs(delta), ttype, now.day,
+              f"Physical Count #{count_id}: system {stock:g} -> counted {counted:g}" + (f" | {note}" if note else ""),
+              now.strftime(DATE_FMT), now.strftime("%I:%M %p"), "Physically Verified")
+    audit("PC_ADJUST", f"{fac}: {r['prod_id']} ({r['item_name']}) SL {sl} stock {stock:g}->{counted:g} by count #{count_id}")
+    return True
+
+
+def _pc_timeline(fac, txs, trfs):
+    """Transactions + inter-unit transfers of one item in time order, with a running balance (guide only)."""
+    ev = []
+    for t in txs:
+        ev.append((_pc_dt(t["date"], t["time"]), 1, t["id"], "Transaction", t))
+    for f in trfs:
+        ev.append((_pc_dt(f["transfer_date"], f["transfer_time"]), 0, f["id"], "Transfer", f))
+    ev.sort(key=lambda e: (e[0], e[1], e[2]))
+    bal, out = 0.0, []
+    for _dt, _o, _id, kind, r in ev:
+        if kind == "Transaction":
+            ty, qty = r["trans_type"], float(r["qty"] or 0)
+            if ty == OPENING_TYPE:
+                eff, bal = None, qty
+            elif ty in RECEIPT_TYPES:
+                eff = qty
+            elif ty in ISSUE_TYPES + (ADJ_OUT,):
+                eff = -qty
+            else:
+                eff = 0.0
+            if eff is not None:
+                bal += eff
+            out.append({"Source": "Transaction", "ID": r["id"], "Date": r["date"], "Time": r["time"], "Type": ty,
+                        "Qty": qty, "Effect": (qty if eff is None else eff), "Balance after": bal,
+                        "By": r["officer_name"], "Req/SR": r.get("req_no") or "", "Notes": r["notes"]})
+        else:
+            qty = float(r["qty"] or 0)
+            incoming = (r["dest_factory"] == fac)
+            eff = qty if incoming else -qty
+            bal += eff
+            out.append({"Source": "Transfer", "ID": r["id"], "Date": r["transfer_date"], "Time": r["transfer_time"],
+                        "Type": (f"🔁 Transfer IN from {r['source_factory']}" if incoming else f"🔁 Transfer OUT to {r['dest_factory']}"),
+                        "Qty": qty, "Effect": eff, "Balance after": bal, "By": r["initiated_by"], "Req/SR": "",
+                        "Notes": r["notes"] or ""})
+    out.reverse()   # newest first
+    return out, bal
+
+
+def pc_trace_panel(rec):
+    """Everything that happened to one item, plus the tools to correct it - all inside the Physical Count tab."""
+    fac, sl = rec["factory_name"], rec["sl_no"]
+    inv = q(f"SELECT {INV_COLS} FROM inventory WHERE sl_no=%s AND factory_name=%s", (sl, fac))
+    if not inv:
+        st.warning("Ei item ekhon inventory-te nei.")
+        return
+    inv = inv[0]
+    stock, counted = float(inv["stock"]), float(rec["counted_qty"])
+    diff = counted - stock
+    st.markdown(f"### 🔎 {html_lib.escape(str(inv['item_name']))} [{html_lib.escape(str(inv['size'] or '-'))}] · SL {sl} · {html_lib.escape(str(inv['prod_id']))}")
+    m = st.columns(4)
+    m[0].metric("System stock now", f"{stock:g}")
+    m[1].metric("Counted (physical)", f"{counted:g}")
+    m[2].metric("Difference (Counted − System)", f"{diff:+g}")
+    m[3].metric("System at count time", f"{float(rec['system_qty']):g}")
+    if abs(float(rec["system_qty"]) - stock) > 1e-9:
+        st.info(f"Count-er por system stock {float(rec['system_qty']):g} theke {stock:g} hoyeche (kono entry edit/add/delete hoyeche). "
+                f"Upore Difference ekhon-kar stock-er sathe dekhano hocche.")
+    if abs(diff) < 1e-9:
+        st.success("✅ Ekhon software stock ar physical count mile geche.")
+
+    run_once_per_process("transfer_size_column", ensure_transfer_size_column)
+    txs = q("""SELECT id, date, time, trans_type, qty, officer_name, COALESCE(notes,'') AS notes,
+                      COALESCE(req_no,'') AS req_no, day
+               FROM transactions WHERE factory_name=%s AND sl_no=%s ORDER BY id DESC LIMIT 2000""", (fac, sl))
+    trfs = q("""SELECT * FROM inter_factory_transfers
+                WHERE prod_id=%s AND (source_factory=%s OR dest_factory=%s)
+                  AND (LOWER(item_name)=LOWER(%s) OR COALESCE(notes,'') ILIKE %s)
+                  AND (COALESCE(size,'')='' OR LOWER(size)=LOWER(%s))
+                ORDER BY id DESC LIMIT 500""",
+             (inv["prod_id"], fac, fac, inv["item_name"], f"%{inv['item_name']}%", inv["size"] or ""))
+    tl, calc_bal = _pc_timeline(fac, txs, trfs)
+
+    n_issue = sum(1 for t in txs if t["trans_type"] in ISSUE_TYPES)
+    n_rec = sum(1 for t in txs if t["trans_type"] in RECEIPT_TYPES)
+    n_adj = sum(1 for t in txs if t["trans_type"] in ("Stock Adjustment (+)", ADJ_OUT, OPENING_TYPE))
+    st.markdown(f"**📜 Full history** — {n_issue} Issue · {n_rec} Receive · {n_adj} Adjustment/Opening · {len(trfs)} Inter-unit transfer")
+    if tl:
+        tdf = pd.DataFrame(tl)
+        types = sorted(tdf["Type"].unique())
+        pick = st.multiselect("Filter by type (khali = sob)", types, key=f"pcv_f_{fac}_{sl}")
+        if pick:
+            tdf = tdf[tdf["Type"].isin(pick)]
+        st.dataframe(tdf, hide_index=True, use_container_width=True, height=360,
+                     column_config={"Qty": st.column_config.NumberColumn(format="%.2f"),
+                                    "Effect": st.column_config.NumberColumn("Effect (+/−)", format="%+.2f"),
+                                    "Balance after": st.column_config.NumberColumn(format="%.2f")})
+        st.caption(f"History theke hishab: **{calc_bal:g}** · System stock: **{stock:g}**"
+                   + (" — ✅ mile" if abs(calc_bal - stock) < 1e-9 else
+                      " — ⚠ mile na: history-r baire stock change hoyeche (jemon Inventory-te direct edit) ba kono entry/tarikh vul. "
+                      "Eta shudhu guide; Balance column date/time onujayi hishab kora."))
+    else:
+        st.caption("Ei item-er kono transaction nei.")
+
+    st.markdown("**🛠 Fix from here**")
+    pw_ok = mgr_check("pcv_pw")
+
+    # 1) one-click: make the software stock equal to the count
+    with st.expander("⚖️ Software stock-ke counted qty-te milie din (Stock Adjustment)", expanded=False):
+        if abs(diff) < 1e-9:
+            st.caption("Already mile ache.")
+        else:
+            st.write(f"System **{stock:g}** → Counted **{counted:g}**  (Stock Adjustment {'(+)' if diff > 0 else '(-)'} **{abs(diff):g}** hobe)")
+            adj_note = st.text_input("Karon / remarks", key=f"pcv_an_{fac}_{sl}", placeholder="e.g. entry bhul chhilo")
+            adj_conf = st.checkbox("Ami confirm korchi - ei adjustment transaction-e record hobe", key=f"pcv_ac_{fac}_{sl}")
+            if st.button("⚖️ Adjust stock to counted qty", key=f"pcv_ab_{fac}_{sl}"):
+                if not pw_ok:
+                    st.error("Manager password thik nei.")
+                elif not adj_conf:
+                    st.error("Confirm tick korun.")
+                elif guard() and pc_adjust_to_count(fac, sl, counted, rec["count_id"], adj_note.strip()):
+                    done("Stock adjusted to counted quantity.")
+
+    # 2) edit / delete a transaction
+    with st.expander("✏️ Transaction edit / delete (Issue, Receive, Adjustment)"):
+        if not txs:
+            st.caption("Transaction nei.")
+        else:
+            rows = {int(t["id"]): t for t in txs[:300]}
+            tid = int(st.selectbox("Transaction", list(rows), key=f"pcv_t_{fac}_{sl}",
+                                   format_func=lambda i: f"ID {i} | {rows[i]['date']} | {rows[i]['trans_type']} | qty {float(rows[i]['qty'] or 0):g} | {rows[i]['officer_name']}"))
+            t = rows[tid]
+            c1, c2 = st.columns(2)
+            nq = c1.number_input("Quantity", min_value=0.0, value=float(t["qty"] or 0), step=1.0, key=f"pcv_q_{tid}")
+            pd_ = parse_date(t["date"])
+            nd = c2.date_input("Date", value=pd_.date() if pd_ else local_now().date(), key=f"pcv_d_{tid}")
+            nn = st.text_input("Remarks", value=t["notes"] or "", key=f"pcv_n_{tid}")
+            b1, b2 = st.columns(2)
+            if b1.button("💾 Save edit", key=f"pcv_save_{tid}"):
+                if not pw_ok:
+                    st.error("Manager password thik nei.")
+                elif guard() and pc_edit_tx(tid, nq, nd.strftime(DATE_FMT), nn.strip()):
+                    done("Transaction updated, stock adjusted.")
+            dconf = st.checkbox("⚠️ Delete confirm - stock revert hobe", key=f"pcv_dc_{tid}")
+            if b2.button("🗑 Delete & revert stock", key=f"pcv_del_{tid}"):
+                if not pw_ok:
+                    st.error("Manager password thik nei.")
+                elif not dconf:
+                    st.error("Delete confirm tick korun.")
+                elif guard() and delete_transaction(tid):
+                    done("Transaction deleted, stock reverted.")
+            if t["trans_type"] == OPENING_TYPE:
+                st.caption("Note: Opening Balance delete korle shudhu record jay, stock change hoy na.")
+
+    # 3) edit / delete an inter-unit transfer
+    with st.expander("🔁 Inter-unit transfer edit / delete"):
+        if not trfs:
+            st.caption("Ei item-er kono transfer nei.")
+        else:
+            trows = {int(f["id"]): f for f in trfs}
+            fid = int(st.selectbox("Transfer", list(trows), key=f"pcv_tf_{fac}_{sl}",
+                                   format_func=lambda i: f"{trows[i]['transfer_ref']} | {trows[i]['transfer_date']} | {trows[i]['source_factory']} → {trows[i]['dest_factory']} | qty {float(trows[i]['qty'] or 0):g}"))
+            f = trows[fid]
+            c1, c2 = st.columns(2)
+            fq = c1.number_input("Transfer quantity", min_value=0.0, value=float(f["qty"] or 0), step=1.0, key=f"pcv_fq_{fid}")
+            fpd = parse_date(f["transfer_date"])
+            fd = c2.date_input("Transfer date", value=fpd.date() if fpd else local_now().date(), key=f"pcv_fd_{fid}")
+            fn = st.text_input("Notes", value=f["notes"] or "", key=f"pcv_fn_{fid}")
+            _s, _d = transfer_items(f)
+            reverse = bool(_s and _d)
+            if not reverse:
+                st.warning("Dui factory-r item paoa jay nai - delete korle shudhu record jabe, stock change hobe na.")
+            g1, g2 = st.columns(2)
+            if g1.button("💾 Save transfer edit", key=f"pcv_fsave_{fid}"):
+                if not pw_ok:
+                    st.error("Manager password thik nei.")
+                elif guard() and edit_transfer(f, fq, fd.strftime(DATE_FMT), f["transfer_time"], fn.strip()):
+                    done("Transfer updated.")
+            fconf = st.checkbox("⚠️ Transfer delete confirm", key=f"pcv_fdc_{fid}")
+            if g2.button("🗑 Delete transfer", key=f"pcv_fdel_{fid}"):
+                if not pw_ok:
+                    st.error("Manager password thik nei.")
+                elif not fconf:
+                    st.error("Delete confirm tick korun.")
+                elif guard() and delete_transfer(f, reverse):
+                    done("Transfer deleted" + (" and balances reversed." if reverse else "."))
+
+    # 4) add a missing entry
+    with st.expander("➕ Missing entry add korun (Issue / Receive / Adjustment)"):
+        add_types = ["Supplier. Rec", "Issued", "Internal Rec", "Internal Issue", "Stock Adjustment (+)", ADJ_OUT]
+        a1, a2, a3 = st.columns([2, 1, 1])
+        a_type = a1.selectbox("Type", add_types, format_func=lambda k: TRANS_LABELS.get(k, k), key=f"pcv_at_{fac}_{sl}")
+        a_qty = a2.number_input("Quantity", min_value=0.0, value=0.0, step=1.0, key=f"pcv_aq_{fac}_{sl}")
+        a_date = a3.date_input("Date", value=local_now().date(), key=f"pcv_ad_{fac}_{sl}")
+        a_note = st.text_input("Remarks", key=f"pcv_anote_{fac}_{sl}")
+        if st.button("➕ Save entry", key=f"pcv_asave_{fac}_{sl}"):
+            if a_qty <= 0:
+                st.error("Quantity 0-r beshi hote hobe.")
+            elif guard():
+                item = dict(inv)
+                if save_transaction(fac, item, float(a_qty), a_type, datetime.combine(a_date, datetime.min.time()),
+                                    (a_note.strip() + " | Added from Physical Count").strip(" |"), True, False):
+                    done("Entry saved.")
+
+
+@_fragment
+def pc_verify_view():
+    st.caption("Count-er por software-er closing balance-er sathe physical balance milano hoy. Je item mile ni segulo khule "
+               "tar Issue / Receive / Transfer / Adjustment sob dekhe ekhan thekei thik korun.")
+    c1, c2 = st.columns(2)
+    d = c1.date_input("Count-er tarikh", value=local_now().date(), key="pc_vdate")
+    only_diff = c2.checkbox("Shudhu jegulo mile nai", value=True, key="pc_vonly")
+    cf, cp = fw(FAC, "c.")
+    rows = q(f"""SELECT i.count_id, i.factory_name, i.sl_no, i.prod_id, i.item_name, COALESCE(i.size,'') AS size,
+                        COALESCE(i.serial_no,'') AS serial_no, i.unit, i.system_qty, i.counted_qty, i.remarks,
+                        c.counted_by, c.counted_at
+                 FROM stock_count_items i JOIN stock_counts c ON c.id=i.count_id
+                 WHERE c.counted_at LIKE %s{cf} ORDER BY i.id""", [d.strftime(DATE_FMT) + "%"] + cp)
+    if not rows:
+        st.info(f"{d.strftime(DATE_FMT)} tarikhe kono count nei. Age '➕ New count' theke count submit korun.")
+        return
+    latest = {}
+    for r in rows:
+        latest[(r["factory_name"], r["sl_no"])] = r   # same item counted twice: the last count wins
+    inf, ip = fw(FAC)
+    live = {(x["factory_name"], x["sl_no"]): float(x["stock"]) for x in q(
+        f"SELECT sl_no, factory_name, COALESCE(current_stock,0) AS stock FROM inventory WHERE sl_no = ANY(%s){inf}",
+        [sorted({k[1] for k in latest})] + ip)}
+    recs, table = [], []
+    for k, r in latest.items():
+        if k not in live:
+            continue
+        now_s = live[k]
+        diff = float(r["counted_qty"]) - now_s
+        r = dict(r, stock_now=now_s, diff=diff)
+        recs.append(r)
+        table.append({"SL No": r["sl_no"], "Item": r["item_name"], "Size": r["size"], "UOM": r["unit"],
+                      "System now": now_s, "Counted": float(r["counted_qty"]), "Difference": diff,
+                      "Result": "✅ Match" if abs(diff) < 1e-9 else ("🔻 Short" if diff < 0 else "🔺 Excess"),
+                      "Count #": r["count_id"], "Counted by": r["counted_by"], "Remarks": r["remarks"] or ""})
+    df = pd.DataFrame(table)
+    n_ok = int((df["Difference"].abs() < 1e-9).sum())
+    n_short = int((df["Difference"] < -1e-9).sum())
+    n_exc = int((df["Difference"] > 1e-9).sum())
+    m = st.columns(4)
+    m[0].metric("Items counted", len(df))
+    m[1].metric("✅ Match", n_ok)
+    m[2].metric("🔻 Short", n_short)
+    m[3].metric("🔺 Excess", n_exc)
+    view = df[df["Difference"].abs() >= 1e-9] if only_diff else df
+    if view.empty:
+        st.success("🎉 Sob counted item software-er sathe mile geche.")
+        return
+    st.dataframe(view, hide_index=True, use_container_width=True, height=min(60 + 35 * len(view), 340),
+                 column_config={"System now": st.column_config.NumberColumn(format="%.2f"),
+                                "Counted": st.column_config.NumberColumn(format="%.2f"),
+                                "Difference": st.column_config.NumberColumn(format="%+.2f")})
+    pool = [r for r in recs if (not only_diff or abs(r["diff"]) >= 1e-9)]
+    pool.sort(key=lambda r: (-abs(r["diff"]), str(r["item_name"])))
+    labels = {f"SL {r['sl_no']} | {r['item_name']} [{r['size'] or '-'}] | System {r['stock_now']:g} vs Counted {float(r['counted_qty']):g} ({r['diff']:+g})": r
+              for r in pool}
+    st.markdown("---")
+    sel = st.selectbox("🔎 Kon item-er history check korben", list(labels), key="pc_vsel")
+    pc_trace_panel(labels[sel])
+
+
+@_fragment
+def pc_uncounted_view():
+    st.caption("Software-e stock ache kintu physical count hoyni emon item. Je item-er stock software-e ache ar store-e nei, "
+               "segulo ekhane dhora porbe.")
+    c1, c2 = st.columns([2, 1])
+    days = c1.slider("Koto din dhore count hoyni  (0 = kokhono-i count hoyni)", 0, 365, 30, key="pc_unc_days")
+    inc_idle = c2.checkbox("Kokhono Issue/Receive hoyni segulo-o dekhao", value=False, key="pc_unc_idle")
+    term = st.text_input("🔍 Item / serial / code", key="pc_unc_term").strip().lower()
+    fsql, fp = fw(FAC)
+    inv = q_c(f"""SELECT factory_name, sl_no, prod_id, item_name, COALESCE(size,'') AS size, COALESCE(serial_no,'') AS serial,
+                         COALESCE(NULLIF(unit_name,''),'Pcs') AS unit, COALESCE(current_stock,0) AS stock,
+                         COALESCE(unit_price,0) AS price
+                  FROM inventory WHERE COALESCE(current_stock,0)<>0{fsql}""", fp)
+    cf, cp = fw(FAC, "c.")
+    cnts = q_c(f"""SELECT i.factory_name, i.sl_no, MAX(c.id) AS last_id
+                   FROM stock_count_items i JOIN stock_counts c ON c.id=i.count_id WHERE 1=1{cf} GROUP BY 1,2""", cp)
+    last_ids = {(r["factory_name"], r["sl_no"]): r["last_id"] for r in cnts}
+    when = {}
+    if last_ids:
+        for r in q_c("SELECT id, counted_at FROM stock_counts WHERE id = ANY(%s)", (sorted(set(last_ids.values())),)):
+            when[r["id"]] = parse_date(str(r["counted_at"] or "")[:11])
+    moves = {(r["factory_name"], r["sl_no"]): int(r["n"]) for r in q_c(
+        f"""SELECT factory_name, sl_no, COUNT(*) AS n FROM transactions WHERE trans_type<>%s{fsql} GROUP BY 1,2""",
+        [OPENING_TYPE] + fp)}
+    today = local_now().date()
+    out = []
+    for r in inv:
+        key = (r["factory_name"], r["sl_no"])
+        n_mv = moves.get(key, 0)
+        if n_mv == 0 and not inc_idle:
+            continue
+        lc = when.get(last_ids.get(key))
+        age = (today - lc.date()).days if lc else None
+        if days == 0 and key in last_ids:
+            continue
+        if days > 0 and age is not None and age <= days:
+            continue
+        if term and term not in f"{r['item_name']} {r['size']} {r['prod_id']} {r['serial']} {r['sl_no']}".lower():
+            continue
+        out.append({"Factory": r["factory_name"], "SL No": r["sl_no"], "Serial No": r["serial"], "ERP Code": r["prod_id"],
+                    "Item": r["item_name"], "Size": r["size"], "UOM": r["unit"], "System stock": float(r["stock"]),
+                    "Value (৳)": float(r["stock"]) * float(r["price"]),
+                    "Last counted": lc.strftime(DATE_FMT) if lc else "Never", "Days ago": age, "Issue/Receive entries": n_mv})
+    if not out:
+        st.success("✅ Kono item baki nei - sob stock-ed item count hoye geche (ba filter-e kichu mile ni).")
+        return
+    df = pd.DataFrame(out).sort_values("Value (৳)", ascending=False).reset_index(drop=True)
+    if not FAC or "CONSOLIDATED" not in FAC:
+        df = df.drop(columns=["Factory"])
+    m = st.columns(3)
+    m[0].metric("Count baki item", len(df))
+    m[1].metric("Never counted", int((df["Last counted"] == "Never").sum()))
+    m[2].metric("Stock value (৳)", f"{df['Value (৳)'].sum():,.0f}")
+    st.dataframe(df, hide_index=True, use_container_width=True, height=440,
+                 column_config={"System stock": st.column_config.NumberColumn(format="%.2f"),
+                                "Value (৳)": st.column_config.NumberColumn(format="৳ %,.0f")})
+    export_buttons(df, "not_counted_items", title="Items in software but not physically counted")
+
+
 def tab_physical_count():
     try:
         _box = st.container(key="pc_mobile")
@@ -7353,11 +7740,15 @@ def _tab_physical_count_body():
     except Exception as e:
         st.error(f"Physical Count tables could not be prepared: {e}")
         return
-    _tab = lazy_tab_select(["➕ New count", "⏳ Waiting / Results"], "lz_pc")
+    _tab = lazy_tab_select(["➕ New count", "⚖️ Verify & Fix", "🕳 Not counted yet", "⏳ Waiting / Results"], "lz_pc")
     if _tab == 0:
         count_picks_panel()   # NEW: today's 5 items the system recommends counting
         pc_entry()
     if _tab == 1:
+        pc_verify_view()
+    if _tab == 2:
+        pc_uncounted_view()
+    if _tab == 3:
         pc_results_view()
 
 
