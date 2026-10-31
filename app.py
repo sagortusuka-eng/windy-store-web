@@ -7918,6 +7918,9 @@ def pc_delete_view():
 
 # ---- Physical Count: Fresh Start (reset month data -> count -> apply count as opening). Added; reversible via archive tables ----
 def _fs_ensure():
+    if st.session_state.get("_fs_tables_ready") or _once_flags().get("fs_tables"):
+        st.session_state["_fs_tables_ready"] = True
+        return
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -7931,6 +7934,8 @@ def _fs_ensure():
                         "created_at TEXT, created_by TEXT, scope TEXT, tx_count INTEGER, max_tx_id INTEGER, "
                         "status TEXT DEFAULT 'Done')")
         conn.commit()
+        st.session_state["_fs_tables_ready"] = True
+        _once_flags()["fs_tables"] = True
     except Exception:
         conn.rollback()
         raise
@@ -7995,8 +8000,11 @@ def apply_count_as_opening(fac, user, rows, date_s, day):
     ERP stock is left as it is (update it later from the ERP update screen)."""
     for r in rows:
         run("UPDATE inventory SET current_stock=%s WHERE sl_no=%s AND factory_name=%s", (float(r["counted_qty"]), r["sl_no"], fac))
-        insert_tx(fac, user, r["sl_no"], r["prod_id"], r["item_name"], float(r["counted_qty"]), OPENING_TYPE, day,
-                  f"Opening from Physical Count #{r['count_id']}", date_s, local_now().strftime("%I:%M %p"), "Verified")
+        r_date = r.get("count_date") or date_s          # the item's own count date
+        _pd = parse_date(r_date)
+        r_day = _pd.day if _pd else day
+        insert_tx(fac, user, r["sl_no"], r["prod_id"], r["item_name"], float(r["counted_qty"]), OPENING_TYPE, r_day,
+                  f"Opening from Physical Count #{r['count_id']}", r_date, local_now().strftime("%I:%M %p"), "Verified")
     audit("OPENING_FROM_COUNT", f"{user} applied {len(rows)} counted item(s) as opening for {fac} ({date_s})")
     return len(rows)
 
@@ -8120,32 +8128,64 @@ def pc_fresh_view():
     # ---------- Step 3 + 4 : count -> opening ----------
     st.markdown("---")
     st.markdown("#### 3️⃣ Count  →  4️⃣ Count-ke Opening boshan")
-    st.caption("Age 'New count' tab-e physical count korun. Count shesh hole ekhane date select kore Opening hishabe boshan. "
-               "Prottek item-er shesh count-er qty Physical stock hobe. ERP stock change hobe na - pore ERP update korben.")
-    cd = st.date_input("Count-er tarikh", value=today, key="pc_fs_cdate")
-    date_s = cd.strftime(DATE_FMT)
-    items = q("""SELECT DISTINCT ON (i.sl_no) i.sl_no, i.prod_id, i.item_name, COALESCE(i.size,'') AS size, i.counted_qty,
-                        i.count_id, c.counted_by
-                 FROM stock_count_items i JOIN stock_counts c ON c.id=i.count_id
-                 WHERE c.factory_name=%s AND c.counted_at LIKE %s
-                 ORDER BY i.sl_no, i.id DESC""", (FAC, date_s + "%"))
+    st.caption("Age 'New count' tab-e physical count korun. Je item gulo count korben sob ekhane chole asbe (date lagbe na). "
+               "Opening boshale oi item ekhan theke soriye jabe. Prottek item-er shesh count-er qty Physical stock hobe. ERP stock change hobe na.")
+    # Every counted item that is NOT yet set as opening shows here - no date needed. Once it is set as opening it leaves this list.
+    rows_all = q("""SELECT x.* FROM (
+                      SELECT DISTINCT ON (i.sl_no) i.sl_no, i.prod_id, i.item_name, COALESCE(i.size,'') AS size, i.counted_qty,
+                             i.count_id, c.counted_by, c.counted_at
+                      FROM stock_count_items i JOIN stock_counts c ON c.id=i.count_id
+                      WHERE c.factory_name=%s AND i.sl_no IS NOT NULL
+                      ORDER BY i.sl_no, i.id DESC) x
+                    WHERE NOT EXISTS (SELECT 1 FROM transactions t
+                                      WHERE t.factory_name=%s AND t.sl_no=x.sl_no AND t.trans_type=%s
+                                        AND t.notes = 'Opening from Physical Count #' || x.count_id)
+                    ORDER BY x.count_id, x.sl_no""", (FAC, FAC, OPENING_TYPE))
+    # counts made before the last Reset belong to the old data - hide them unless asked
+    items = rows_all
+    cut = None
+    if last:
+        try:
+            cut = datetime.strptime(str(last[0]["created_at"]), "%d-%b-%Y %I:%M %p")
+        except Exception:
+            cut = None
+    if cut and rows_all:
+        def _after(r):
+            try:
+                return datetime.strptime(str(r["counted_at"]), "%d-%b-%Y %I:%M %p") >= cut
+            except Exception:
+                return True
+        newer = [r for r in rows_all if _after(r)]
+        older = len(rows_all) - len(newer)
+        if older and st.checkbox(f"Reset-er age-er {older} ti purano count-o dekhao", key="pc_fs_old"):
+            items = rows_all
+        else:
+            items = newer
     if not items:
-        st.info("Ei tarikhe ei unit-e kono count paoa jay nai.")
+        st.success("Opening boshanor moto kono count baki nei. Notun item physical count korle ekhane chole asbe.")
         return
+    for r in items:
+        r["count_date"] = str(r["counted_at"] or "")[:11]
     st.dataframe(pd.DataFrame([{"SL No": r["sl_no"], "Item": r["item_name"], "Size": r["size"],
-                                "Opening (counted)": float(r["counted_qty"]), "Count #": r["count_id"]} for r in items]),
+                                "Opening (counted)": float(r["counted_qty"]), "Count #": r["count_id"],
+                                "Counted at": r["counted_at"]} for r in items]),
                  hide_index=True, use_container_width=True, height=min(60 + 35 * len(items), 360))
-    other = int(q(f"SELECT COUNT(*) AS n FROM transactions WHERE factory_name=%s AND trans_type<>%s"
-                  f"{period_sql('date', cd, today)[0]}", [FAC, OPENING_TYPE] + period_sql('date', cd, today)[1])[0]["n"])
+    pend_sl = [r["sl_no"] for r in items]
+    mind = min((parse_date(r["count_date"]) for r in items if parse_date(r["count_date"])), default=None)
+    other = 0
+    if mind:
+        d_from = mind.date() if hasattr(mind, "date") else mind
+        other = int(q(f"SELECT COUNT(*) AS n FROM transactions WHERE factory_name=%s AND trans_type<>%s AND sl_no = ANY(%s)"
+                      f"{period_sql('date', d_from, today)[0]}", [FAC, OPENING_TYPE, pend_sl] + period_sql('date', d_from, today)[1])[0]["n"])
     force = True
     if other:
-        st.warning(f"{date_s} ba tar por ei unit-e {other} ti Issue/Receipt ache. Opening boshale stock count-er "
+        st.warning(f"Ei item gulor count-er tarikh ba tar por {other} ti Issue/Receipt ache. Opening boshale stock count-er "
                    "number-e overwrite hobe, oi transaction-er effect hariye jabe.")
         force = st.checkbox("Tobuo opening boshabo", key="pc_fs_force")
     ok3 = st.checkbox(f"{len(items)} ti item-er Physical stock count-er number-e set hobe", key="pc_fs_ok3")
     if st.button("✅ Count-ke Opening Balance hishabe boshan", type="primary", key="pc_fs_apply", disabled=not (ok3 and force)):
         if guard():
-            n = apply_count_as_opening(FAC, user, items, date_s, cd.day)
+            n = apply_count_as_opening(FAC, user, items, today.strftime(DATE_FMT), today.day)
             st.session_state.pop("pc_fs_ok3", None)
             done(f"{n} ti item-er Opening Balance boshano hoyeche. Ekhon ERP balance update korte paren.")
 
@@ -11589,7 +11629,7 @@ def tab_high_value():
     total_val = float(stocked["value"].sum())
     nop = int(((stocked["price"] <= 0)).sum())
     v = df[(df["value"] >= float(min_val)) & (df["stock"] > 0)].copy()
-    v["flag"] = v.apply(_hv_flag, axis=1)
+    v["flag"] = pd.Series([_hv_flag(r) for _, r in v.iterrows()], index=v.index, dtype="object")   # safe even when no row matches
     if min_days > 0:
         v = v[(v["days_issue"].isna()) | (v["days_issue"] >= min_days)]
     if term:
