@@ -2740,6 +2740,49 @@ def _dash_extras(period):
         out["inv_items"], out["inv_value"] = int(r["n"] or 0), float(r["v"] or 0)
     except Exception:
         pass
+    # ERP vs Physical mismatch (live) + correction work by the team
+    try:
+        e = qdf_c(f"""SELECT factory_name, sl_no, COALESCE(prod_id,'') AS prod_id, COALESCE(item_name,'') AS item_name,
+                             COALESCE(size,'') AS size, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit,
+                             COALESCE(erp_stock,0) AS erp, COALESCE(current_stock,0) AS phys, COALESCE(unit_price,0) AS price
+                      FROM inventory WHERE 1=1{FSQL}""", FP)
+        if not e.empty:
+            for c in ("erp", "phys", "price"):
+                e[c] = pd.to_numeric(e[c], errors="coerce").fillna(0.0)
+            e["var"] = e["phys"] - e["erp"]
+            e["val"] = e["var"] * e["price"]
+            e = e[e["var"].abs() > 1e-9]
+        out["mis"] = e
+    except Exception:
+        out["mis"] = pd.DataFrame()
+    try:
+        t = qdf_c(f"""SELECT factory_name, COALESCE(item_name,'') AS item_name, COALESCE(variance_type,'') AS variance_type,
+                             COALESCE(variance_qty,0) AS vq, COALESCE(variance_value,0) AS vv,
+                             COALESCE(NULLIF(assigned_officer,''),'(not assigned)') AS officer, COALESCE(status,'Open') AS status
+                      FROM audit_correction_tasks WHERE 1=1{FSQL}""", FP)
+        if not t.empty:
+            t["vq"] = pd.to_numeric(t["vq"], errors="coerce").fillna(0.0).abs()
+            t["vv"] = pd.to_numeric(t["vv"], errors="coerce").fillna(0.0).abs()
+            t["closed"] = t["status"].astype(str).str.lower() == "closed"
+        out["tasks"] = t
+    except Exception:
+        out["tasks"] = pd.DataFrame()
+    try:
+        asql, ap = fw(FAC, "t.")
+        a = qdf_c(f"""SELECT t.factory_name, t.date, COALESCE(t.item_name,'') AS item_name, t.trans_type, COALESCE(t.qty,0) AS qty,
+                             COALESCE(t.officer_name,'') AS officer, COALESCE(i.unit_price,0) AS price
+                      FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                      WHERE t.notes LIKE %s{asql} ORDER BY t.id DESC""", ["ERP variance adjustment%"] + list(ap))
+        if not a.empty:
+            a["qty"] = pd.to_numeric(a["qty"], errors="coerce").fillna(0.0).abs()
+            a["price"] = pd.to_numeric(a["price"], errors="coerce").fillna(0.0)
+            a["value"] = a["qty"] * a["price"]
+            a["month"] = a["date"].apply(lambda v: (parse_date(v).strftime("%b-%Y") if parse_date(v) else ""))
+            if period != "All time":
+                a = a[a["month"] == period]
+        out["adj"] = a
+    except Exception:
+        out["adj"] = pd.DataFrame()
     out["cons"] = cons
     return out
 
@@ -2848,8 +2891,39 @@ def tab_dashboard():
                 + _dbx_card("📦", "Stock value", _dbx_tk(ex["inv_value"]), f"{ex['inv_items']:,} inventory item(s)", "slate", f"৳ {ex['inv_value']:,.2f}")
                 + '</div>', unsafe_allow_html=True)
 
-    d_low, d_hold, d_gate, d_trend, d_recent = st.tabs(
-        ["🔻 Low stock · buy list", "🗂 Hold bills", "🚪 Gate pass", "📈 Trend & budget", "🧾 Recent activity"])
+    # ---- Row 3: Physical stock vs ERP, and the correction work done by the team ----
+    mis, tasks, adj = ex["mis"], ex["tasks"], ex["adj"]
+    sh = mis[mis["var"] < 0] if not mis.empty else mis
+    xs = mis[mis["var"] > 0] if not mis.empty else mis
+    sh_n, xs_n = int(len(sh)), int(len(xs))
+    sh_q = float(sh["var"].abs().sum()) if sh_n else 0.0
+    xs_q = float(xs["var"].sum()) if xs_n else 0.0
+    sh_v = float(sh["val"].abs().sum()) if sh_n else 0.0
+    xs_v = float(xs["val"].sum()) if xs_n else 0.0
+    adj_q = float(adj["qty"].sum()) if not adj.empty else 0.0
+    adj_v = float(adj["value"].sum()) if not adj.empty else 0.0
+    adj_n = int(len(adj))
+    t_all = int(len(tasks)) if not tasks.empty else 0
+    t_closed = int(tasks["closed"].sum()) if t_all else 0
+    tc = tasks[tasks["closed"]] if t_all else tasks
+    tp = tasks[~tasks["closed"]] if t_all else tasks
+    tc_q, tc_v = (float(tc["vq"].sum()), float(tc["vv"].sum())) if t_all else (0.0, 0.0)
+    tp_q, tp_v = (float(tp["vq"].sum()), float(tp["vv"].sum())) if t_all else (0.0, 0.0)
+    st.markdown('<div class="dbx-sec">⚖️ Physical stock vs ERP</div>', unsafe_allow_html=True)
+    st.markdown('<div class="dbx-grid">'
+                + _dbx_card("🔻", "Short vs ERP", _dbx_tk(sh_v), f"{sh_n:,} item(s) · short qty {sh_q:,.0f}", "red" if sh_n else "green", f"৳ {sh_v:,.2f}")
+                + _dbx_card("🔺", "Excess vs ERP", _dbx_tk(xs_v), f"{xs_n:,} item(s) · excess qty {xs_q:,.0f}", "amber" if xs_n else "green", f"৳ {xs_v:,.2f}")
+                + _dbx_card("🛠", "Corrected to ERP", _dbx_tk(adj_v), f"Qty {adj_q:,.0f} · {adj_n:,} adjustment(s) · {html_lib.escape(str(period))}", "teal", f"৳ {adj_v:,.2f}")
+                + _dbx_card("📋", "Correction tasks", f"{t_closed:,} / {t_all:,} closed",
+                            f"Done: qty {tc_q:,.0f} · {_dbx_tk(tc_v)}<br>Pending: qty {tp_q:,.0f} · {_dbx_tk(tp_v)}",
+                            "green" if (t_all and t_closed == t_all) else ("blue" if t_all else "slate"))
+                + '</div>', unsafe_allow_html=True)
+    if sh_n or xs_n:
+        st.caption(f"Net (Physical − ERP): {_dbx_tk(xs_v - sh_v)} · Short = Physical is less than ERP, Excess = Physical is more than ERP. "
+                   "Correction task numbers are all-time (closing date is not stored); Corrected to ERP follows the selected period.")
+
+    d_low, d_erp, d_hold, d_gate, d_trend, d_recent = st.tabs(
+        ["🔻 Low stock · buy list", "⚖️ ERP vs Physical", "🗂 Hold bills", "🚪 Gate pass", "📈 Trend & budget", "🧾 Recent activity"])
 
     with d_low:
         if low.empty:
@@ -2870,6 +2944,55 @@ def tab_dashboard():
                                         "Suggested buy": st.column_config.NumberColumn(format="%.2f"),
                                         "Rate (৳)": st.column_config.NumberColumn(format="%.2f"),
                                         "Est. cost (৳)": st.column_config.NumberColumn(format="৳ %,.0f")})
+
+    with d_erp:
+        if mis.empty:
+            st.success("Physical stock matches ERP for every item.")
+        else:
+            def _mis_table(df, title, top=30):
+                st.markdown(f'<div class="dbx-sec">{title}</div>', unsafe_allow_html=True)
+                v = df.assign(_a=df["val"].abs()).sort_values("_a", ascending=False).head(top)
+                cols = {"item_name": "Item", "size": "Size", "unit": "UOM", "erp": "ERP", "phys": "Physical", "var": "Difference",
+                        "price": "Rate (৳)", "val": "Value (৳)"}
+                if ex["cons"]:
+                    cols = {"factory_name": "Unit", **cols}
+                st.dataframe(v[list(cols)].rename(columns=cols), hide_index=True, use_container_width=True,
+                             height=min(80 + 35 * len(v), 420),
+                             column_config={"ERP": st.column_config.NumberColumn(format="%.2f"),
+                                            "Physical": st.column_config.NumberColumn(format="%.2f"),
+                                            "Difference": st.column_config.NumberColumn(format="%+.2f"),
+                                            "Rate (৳)": st.column_config.NumberColumn(format="%.2f"),
+                                            "Value (৳)": st.column_config.NumberColumn(format="৳ %,.0f")})
+            if sh_n:
+                _mis_table(sh, f"🔻 Short items · biggest value first ({sh_n:,} total)")
+            if xs_n:
+                _mis_table(xs, f"🔺 Excess items · biggest value first ({xs_n:,} total)")
+        st.markdown('<div class="dbx-sec">👥 Correction work by officer</div>', unsafe_allow_html=True)
+        if tasks.empty:
+            st.info("No correction task has been assigned yet (ERP Audit → Assign Correction Task).")
+        else:
+            ob = (tasks.assign(closed_q=tasks["vq"].where(tasks["closed"], 0.0), closed_v=tasks["vv"].where(tasks["closed"], 0.0),
+                               open_q=tasks["vq"].where(~tasks["closed"], 0.0), open_v=tasks["vv"].where(~tasks["closed"], 0.0))
+                       .groupby("officer", as_index=False)
+                       .agg(tasks=("status", "count"), closed=("closed", "sum"), closed_q=("closed_q", "sum"), closed_v=("closed_v", "sum"),
+                            open_q=("open_q", "sum"), open_v=("open_v", "sum")))
+            ob["closed"] = ob["closed"].astype(int)
+            ob = ob.sort_values("closed_v", ascending=False)
+            ob.columns = ["Officer", "Tasks", "Closed", "Corrected qty", "Corrected value (৳)", "Pending qty", "Pending value (৳)"]
+            st.dataframe(ob, hide_index=True, use_container_width=True, height=min(80 + 35 * len(ob), 320),
+                         column_config={"Corrected qty": st.column_config.NumberColumn(format="%.2f"),
+                                        "Pending qty": st.column_config.NumberColumn(format="%.2f"),
+                                        "Corrected value (৳)": st.column_config.NumberColumn(format="৳ %,.0f"),
+                                        "Pending value (৳)": st.column_config.NumberColumn(format="৳ %,.0f")})
+        if not adj.empty:
+            st.markdown(f'<div class="dbx-sec">🛠 Adjustments made to match ERP · {html_lib.escape(str(period))}</div>', unsafe_allow_html=True)
+            av = adj.head(25).copy()
+            av["Kind"] = av["trans_type"].map(lambda x: "Short fixed (+)" if "(+)" in str(x) else "Excess fixed (−)")
+            av = av[["date", "item_name", "Kind", "qty", "value", "officer"]]
+            av.columns = ["Date", "Item", "Kind", "Qty", "Value (৳)", "Officer"]
+            st.dataframe(av, hide_index=True, use_container_width=True, height=min(80 + 35 * len(av), 420),
+                         column_config={"Qty": st.column_config.NumberColumn(format="%.2f"),
+                                        "Value (৳)": st.column_config.NumberColumn(format="৳ %,.0f")})
 
     with d_hold:
         if hold.empty:
