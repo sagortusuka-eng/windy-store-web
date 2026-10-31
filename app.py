@@ -2621,6 +2621,129 @@ def load_budget_data():
     return cons, bud
 
 
+def _dbx_tk(x):
+    """Taka in a short, readable form (Lakh / Crore) for the dashboard cards."""
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        x = 0.0
+    a, sign = abs(x), ("-" if x < 0 else "")
+    if a >= 1e7:
+        return f"{sign}৳ {a / 1e7:,.2f} Cr"
+    if a >= 1e5:
+        return f"{sign}৳ {a / 1e5:,.2f} Lakh"
+    return f"{sign}৳ {a:,.0f}"
+
+
+_DBX_CSS = """<style>
+.dbx-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:12px;margin:6px 0 14px 0}
+.dbx-card{background:#fff;border:1px solid #e2e8f0;border-left:5px solid var(--c);border-radius:12px;padding:13px 15px;
+  box-shadow:0 1px 3px rgba(15,23,42,.06)}
+.dbx-top{display:flex;align-items:center;gap:8px;color:#475569;font-size:.78rem;font-weight:700;letter-spacing:.02em;text-transform:uppercase}
+.dbx-ico{font-size:1.05rem}
+.dbx-val{font-size:1.75rem;font-weight:800;color:#0f172a;line-height:1.25;margin-top:4px}
+.dbx-sub{font-size:.80rem;color:#64748b;margin-top:2px;line-height:1.35}
+.dbx-teal{--c:#0f766e}.dbx-blue{--c:#2563eb}.dbx-amber{--c:#f59e0b}.dbx-red{--c:#dc2626}.dbx-green{--c:#16a34a}
+.dbx-slate{--c:#64748b}.dbx-violet{--c:#7c3aed}
+.dbx-sec{font-weight:800;color:#0f172a;font-size:.95rem;margin:10px 0 2px 0;padding-left:8px;border-left:4px solid #0f766e}
+.dbx-bud{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:13px 16px;margin:0 0 14px 0;box-shadow:0 1px 3px rgba(15,23,42,.06)}
+.dbx-bud-head{display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;font-size:.85rem;color:#334155;font-weight:700}
+.dbx-bar{height:16px;background:#e2e8f0;border-radius:99px;overflow:hidden;margin:8px 0 6px 0}
+.dbx-bar>div{height:100%;border-radius:99px}
+.dbx-bud-foot{display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;font-size:.80rem;color:#64748b}
+</style>"""
+
+
+def _dbx_card(icon, label, value, sub="", tone="teal", title=""):
+    return (f'<div class="dbx-card dbx-{tone}" title="{html_lib.escape(title)}">'
+            f'<div class="dbx-top"><span class="dbx-ico">{icon}</span><span>{html_lib.escape(label)}</span></div>'
+            f'<div class="dbx-val">{html_lib.escape(value)}</div><div class="dbx-sub">{sub}</div></div>')
+
+
+def _dbx_budget_bar(allocated, used, pct):
+    if allocated <= 0:
+        return ('<div class="dbx-bud"><div class="dbx-bud-head"><span>💰 Budget</span></div>'
+                '<div class="dbx-sub">No budget is set for this unit yet.</div></div>')
+    color = "#16a34a" if pct < 75 else ("#f59e0b" if pct <= 100 else "#dc2626")
+    state = "On track" if pct < 75 else ("Near the limit" if pct <= 100 else "Over budget")
+    remaining = allocated - used
+    return (f'<div class="dbx-bud"><div class="dbx-bud-head"><span>💰 Budget used · {pct:.1f}% · {state}</span>'
+            f'<span>{_dbx_tk(used)} of {_dbx_tk(allocated)}</span></div>'
+            f'<div class="dbx-bar"><div style="width:{min(pct, 100):.1f}%;background:{color}"></div></div>'
+            f'<div class="dbx-bud-foot"><span>Spent (issued value): {_dbx_tk(used)}</span>'
+            f'<span>{"Remaining" if remaining >= 0 else "Over by"}: {_dbx_tk(abs(remaining))}</span></div></div>')
+
+
+def _dash_extras(period):
+    """Gate pass / hold bills / low stock / stock value for the dashboard. Every part is isolated: a problem in one
+    leaves that card empty instead of breaking the page. Read-only."""
+    out = {"gate": pd.DataFrame(), "hold": pd.DataFrame(), "low": pd.DataFrame(), "inv_value": 0.0, "inv_items": 0}
+    today_d = local_now().date()
+    cons = (not FAC) or ("CONSOLIDATED" in FAC)
+    try:
+        run_once_per_process("gate_pass_table", ensure_gate_pass_table)
+        gsql, gp = fw(FAC, "g.")
+        g = qdf_c(f"""SELECT g.factory_name, g.gate_pass_no, COALESCE(g.source_place,'') AS source_place, g.rec_date,
+                             COALESCE(g.item_name,'') AS item_name, COALESCE(g.qty,0) AS qty, COALESCE(i.unit_price,0) AS price
+                      FROM gate_pass_receipts g LEFT JOIN inventory i ON i.sl_no=g.sl_no AND i.factory_name=g.factory_name
+                      WHERE 1=1{gsql} ORDER BY g.id DESC""", gp)
+        if not g.empty:
+            g["qty"] = pd.to_numeric(g["qty"], errors="coerce").fillna(0.0)
+            g["price"] = pd.to_numeric(g["price"], errors="coerce").fillna(0.0)
+            g["value"] = g["qty"] * g["price"]
+            g["month"] = g["rec_date"].apply(lambda v: (parse_date(v).strftime("%b-%Y") if parse_date(v) else ""))
+            if period != "All time":
+                g = g[g["month"] == period]
+        out["gate"] = g
+    except Exception:
+        pass
+    try:
+        run_once_per_process("hold_bill_table", ensure_hold_bill_table)
+        h = qdf_c(f"""SELECT factory_name, received_date, COALESCE(challan_no,'') AS challan_no, COALESCE(invoice_no,'') AS invoice_no,
+                             COALESCE(supplier_name,'') AS supplier_name, COALESCE(item_name,'') AS item_name, COALESCE(qty,0) AS qty,
+                             COALESCE(rate,0) AS rate, COALESCE(total_value,0) AS total_value, COALESCE(problem_type,'') AS problem_type,
+                             COALESCE(dept_to,'') AS dept_to
+                      FROM hold_bills WHERE COALESCE(status,'Open')='Open'{FSQL} ORDER BY id""", FP)
+        if not h.empty:
+            for c in ("qty", "rate", "total_value"):
+                h[c] = pd.to_numeric(h[c], errors="coerce").fillna(0.0)
+            h["value"] = h.apply(lambda r: r["total_value"] if r["total_value"] > 0 else r["qty"] * r["rate"], axis=1)
+
+            def _days(v):
+                d = parse_date(v)
+                return max((today_d - d.date()).days, 0) if d else None
+            h["days"] = h["received_date"].apply(_days)
+        out["hold"] = h
+    except Exception:
+        pass
+    try:
+        low = qdf_c(f"""SELECT factory_name, sl_no, COALESCE(prod_id,'') AS prod_id, COALESCE(item_name,'') AS item_name,
+                               COALESCE(size,'') AS size, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit,
+                               COALESCE(current_stock,0) AS stock, COALESCE(min_stock,0) AS min_stock, COALESCE(moq,0) AS moq,
+                               COALESCE(unit_price,0) AS price, COALESCE(preferred_supplier,'') AS supplier
+                        FROM inventory
+                        WHERE ((COALESCE(min_stock,0)>0 AND COALESCE(current_stock,0)<=COALESCE(min_stock,0))
+                               OR (COALESCE(min_stock,0)<=0 AND COALESCE(current_stock,0)<=0)){FSQL}""", FP)
+        if not low.empty:
+            for c in ("stock", "min_stock", "moq", "price"):
+                low[c] = pd.to_numeric(low[c], errors="coerce").fillna(0.0)
+            low["buy"] = low.apply(lambda r: max(r["min_stock"] - r["stock"], r["moq"]) if r["min_stock"] > 0 else float("nan"), axis=1)
+            low["cost"] = low["buy"] * low["price"]
+            low["out"] = low["stock"] <= 0
+            low = low.sort_values(["out", "cost"], ascending=[False, False], na_position="last")
+        out["low"] = low
+    except Exception:
+        pass
+    try:
+        r = q_c(f"""SELECT COUNT(*) AS n, COALESCE(SUM(GREATEST(COALESCE(current_stock,0),0)*COALESCE(unit_price,0)),0) AS v
+                    FROM inventory WHERE 1=1{FSQL}""", FP)[0]
+        out["inv_items"], out["inv_value"] = int(r["n"] or 0), float(r["v"] or 0)
+    except Exception:
+        pass
+    out["cons"] = cons
+    return out
+
+
 def tab_dashboard():
     """Management dashboard: purchase, issue, inventory and budget using live database records."""
     st.title("Management Dashboard")
@@ -2690,96 +2813,180 @@ def tab_dashboard():
     remaining = allocated - issue_value
     used_pct = (issue_value / allocated * 100.0) if allocated > 0 else 0.0
 
-    kpis = st.columns(4, gap="medium")
-    kpis[0].metric("Inventory items", f"{inventory_total:,}", help="Current item count in the selected factory view")
-    kpis[1].metric("Purchases · Qty / Value", f"{purchase_qty:,.0f} / ৳{purchase_value:,.0f}")
-    kpis[2].metric("Issues · Qty / Value", f"{issue_qty:,.0f} / ৳{issue_value:,.0f}")
-    kpis[3].metric("Budget remaining", f"৳{remaining:,.0f}", f"{used_pct:.1f}% used")
-    st.caption(f"Low / negative stock items (≤ 5): {low_stock_total:,} · Period: {period}")
+    ex = _dash_extras(period)
+    gate, hold, low = ex["gate"], ex["hold"], ex["low"]
+    st.markdown(_DBX_CSS, unsafe_allow_html=True)
 
-    chart_col, budget_col = st.columns([1.15, 1], gap="large")
-    with chart_col:
-        st.markdown('<div class="section-title">Purchase vs issue trend · value</div>', unsafe_allow_html=True)
-        dated = transaction_rows[transaction_rows["month"].astype(str).str.len() > 0].copy()
-        month_sequence = sorted(
-            set(dated["month"].tolist()), key=lambda value: datetime.strptime(value, "%b-%Y")
-        )[-6:]
-        if month_sequence:
-            trend_source = dated[
-                dated["month"].isin(month_sequence)
-                & dated["trans_type"].isin(["Supplier. Rec", "Issued", "Internal Issue"])
-            ].copy()
-            trend_source["Flow"] = trend_source["trans_type"].apply(
-                lambda value: "Purchases" if value == "Supplier. Rec" else "Issues"
-            )
-            trend = trend_source.pivot_table(
-                index="month", columns="Flow", values="amount", aggfunc="sum", fill_value=0
-            ).reindex(month_sequence, fill_value=0)
-            for column in ("Purchases", "Issues"):
-                if column not in trend.columns:
-                    trend[column] = 0.0
-            st.bar_chart(trend[["Purchases", "Issues"]], use_container_width=True)
-        else:
-            st.info("There are no dated purchase or issue transactions to chart yet.")
+    # ---- Row 1: money flow in the selected period ----
+    n_pur = int(len(purchases))
+    n_iss = int(len(issues))
+    st.markdown(f'<div class="dbx-sec">💹 Money flow · {html_lib.escape(str(period))}</div>', unsafe_allow_html=True)
+    st.markdown('<div class="dbx-grid">'
+                + _dbx_card("🛒", "Purchase value", _dbx_tk(purchase_value), f"Qty {purchase_qty:,.0f} · {n_pur:,} receipt line(s)", "blue", f"৳ {purchase_value:,.2f}")
+                + _dbx_card("📤", "Issue value", _dbx_tk(issue_value), f"Qty {issue_qty:,.0f} · {n_iss:,} issue line(s)", "violet", f"৳ {issue_value:,.2f}")
+                + _dbx_card("💰", "Budget (allocated)", _dbx_tk(allocated), f"Remaining {_dbx_tk(remaining)}", "teal", f"৳ {allocated:,.2f}")
+                + _dbx_card("📊", "Budget used", f"{used_pct:.1f}%", f"{_dbx_tk(issue_value)} spent", "green" if used_pct < 75 else ("amber" if used_pct <= 100 else "red"))
+                + '</div>', unsafe_allow_html=True)
+    st.markdown(_dbx_budget_bar(allocated, issue_value, used_pct), unsafe_allow_html=True)
 
-    with budget_col:
-        st.markdown('<div class="section-title">Budget by category</div>', unsafe_allow_html=True)
-        if budget_df.empty:
-            st.info("No budget lines are configured for this factory.")
+    # ---- Row 2: store position right now ----
+    gate_val = float(gate["value"].sum()) if not gate.empty else 0.0
+    gate_n = int(gate["gate_pass_no"].nunique()) if not gate.empty else 0
+    gate_lines = int(len(gate))
+    hold_val = float(hold["value"].sum()) if not hold.empty else 0.0
+    hold_n = int(hold[["supplier_name", "challan_no", "invoice_no"]].drop_duplicates().shape[0]) if not hold.empty else 0
+    hold_old = int(hold["days"].dropna().max()) if (not hold.empty and hold["days"].notna().any()) else 0
+    low_n = int(len(low))
+    low_out = int(low["out"].sum()) if not low.empty else 0
+    low_cost = float(low["cost"].sum(skipna=True)) if not low.empty else 0.0
+    low_nomin = int((low["min_stock"] <= 0).sum()) if not low.empty else 0
+    st.markdown('<div class="dbx-sec">🏭 Store position</div>', unsafe_allow_html=True)
+    st.markdown('<div class="dbx-grid">'
+                + _dbx_card("🚪", "Gate pass received", _dbx_tk(gate_val), f"{gate_n:,} gate pass · {gate_lines:,} item line(s) · {html_lib.escape(str(period))}", "teal", f"৳ {gate_val:,.2f}")
+                + _dbx_card("🗂", "Bills on hold in store", _dbx_tk(hold_val), f"{hold_n:,} bill(s)" + (f" · oldest {hold_old} day(s)" if hold_n else " · nothing on hold"), "amber" if hold_n else "green", f"৳ {hold_val:,.2f}")
+                + _dbx_card("🔻", "Low stock · to buy", f"{low_n:,} item(s)", f"{low_out:,} out / negative · est. buy {_dbx_tk(low_cost)}" + (f" · {low_nomin:,} have no minimum set" if low_nomin else ""), "red" if low_out else ("amber" if low_n else "green"), f"৳ {low_cost:,.2f}")
+                + _dbx_card("📦", "Stock value", _dbx_tk(ex["inv_value"]), f"{ex['inv_items']:,} inventory item(s)", "slate", f"৳ {ex['inv_value']:,.2f}")
+                + '</div>', unsafe_allow_html=True)
+
+    d_low, d_hold, d_gate, d_trend, d_recent = st.tabs(
+        ["🔻 Low stock · buy list", "🗂 Hold bills", "🚪 Gate pass", "📈 Trend & budget", "🧾 Recent activity"])
+
+    with d_low:
+        if low.empty:
+            st.success("No item is at or below its minimum stock. Nothing to buy right now.")
         else:
-            if issues.empty:
-                spend_by_category = pd.DataFrame(columns=["factory_name", "category", "amount"])
+            st.caption("Items at or below the minimum stock (or at zero / negative when no minimum is set). "
+                       "Suggested buy = minimum − stock, or the MOQ if that is larger. Set a minimum in Global Inventory to get a buy quantity.")
+            lv = low.copy()
+            lv["Status"] = lv["out"].map(lambda x: "🔴 Out / negative" if x else "🟠 Below minimum")
+            show_cols = {"Status": "Status", "item_name": "Item", "size": "Size", "unit": "UOM", "stock": "Stock", "min_stock": "Minimum",
+                         "buy": "Suggested buy", "price": "Rate (৳)", "cost": "Est. cost (৳)", "supplier": "Preferred supplier"}
+            if ex["cons"]:
+                show_cols = {"factory_name": "Unit", **show_cols}
+            lv = lv[list(show_cols)].rename(columns=show_cols)
+            st.dataframe(lv, hide_index=True, use_container_width=True, height=min(80 + 35 * len(lv), 520),
+                         column_config={"Stock": st.column_config.NumberColumn(format="%.2f"),
+                                        "Minimum": st.column_config.NumberColumn(format="%.2f"),
+                                        "Suggested buy": st.column_config.NumberColumn(format="%.2f"),
+                                        "Rate (৳)": st.column_config.NumberColumn(format="%.2f"),
+                                        "Est. cost (৳)": st.column_config.NumberColumn(format="৳ %,.0f")})
+
+    with d_hold:
+        if hold.empty:
+            st.success("No bill or challan is being held in the store.")
+        else:
+            hv = hold.sort_values("days", ascending=False, na_position="last").copy()
+            hv["days"] = hv["days"].fillna(0).astype(int)
+            h_cols = {"received_date": "Received", "days": "Days held", "supplier_name": "Supplier", "challan_no": "Challan",
+                      "invoice_no": "Invoice", "item_name": "Item", "qty": "Qty", "value": "Value (৳)",
+                      "problem_type": "Problem", "dept_to": "Dept"}
+            if ex["cons"]:
+                h_cols = {"factory_name": "Unit", **h_cols}
+            st.dataframe(hv[list(h_cols)].rename(columns=h_cols), hide_index=True, use_container_width=True,
+                         height=min(80 + 35 * len(hv), 420),
+                         column_config={"Qty": st.column_config.NumberColumn(format="%.2f"),
+                                        "Value (৳)": st.column_config.NumberColumn(format="৳ %,.0f")})
+            st.caption("Full list, issue records and PDF report: Hold Bill in Store page.")
+
+    with d_gate:
+        if gate.empty:
+            st.info(f"No gate pass received in {period}.")
+        else:
+            gs = (gate.groupby(["gate_pass_no", "source_place", "rec_date"], as_index=False)
+                      .agg(items=("item_name", "count"), qty=("qty", "sum"), value=("value", "sum")))
+            gs["_d"] = gs["rec_date"].apply(lambda v: parse_date(v) or datetime.min)
+            gs = gs.sort_values("_d", ascending=False).drop(columns="_d")
+            gs.columns = ["Gate pass no", "From", "Date", "Item lines", "Qty", "Value (৳)"]
+            st.dataframe(gs, hide_index=True, use_container_width=True, height=min(80 + 35 * len(gs), 420),
+                         column_config={"Qty": st.column_config.NumberColumn(format="%.2f"),
+                                        "Value (৳)": st.column_config.NumberColumn(format="৳ %,.0f")})
+            st.caption("Value = quantity × the item's stock rate. Items with no rate recorded show ৳ 0.")
+
+    with d_trend:
+        chart_col, budget_col = st.columns([1.15, 1], gap="large")
+        with chart_col:
+            st.markdown('<div class="section-title">Purchase vs issue trend · value</div>', unsafe_allow_html=True)
+            dated = transaction_rows[transaction_rows["month"].astype(str).str.len() > 0].copy()
+            month_sequence = sorted(
+                set(dated["month"].tolist()), key=lambda value: datetime.strptime(value, "%b-%Y")
+            )[-6:]
+            if month_sequence:
+                trend_source = dated[
+                    dated["month"].isin(month_sequence)
+                    & dated["trans_type"].isin(["Supplier. Rec", "Issued", "Internal Issue"])
+                ].copy()
+                trend_source["Flow"] = trend_source["trans_type"].apply(
+                    lambda value: "Purchases" if value == "Supplier. Rec" else "Issues"
+                )
+                trend = trend_source.pivot_table(
+                    index="month", columns="Flow", values="amount", aggfunc="sum", fill_value=0
+                ).reindex(month_sequence, fill_value=0)
+                for column in ("Purchases", "Issues"):
+                    if column not in trend.columns:
+                        trend[column] = 0.0
+                st.bar_chart(trend[["Purchases", "Issues"]], use_container_width=True)
             else:
-                spend_by_category = issues.groupby(
-                    ["factory_name", "category"], as_index=False
-                )["amount"].sum()
-            budget_view = budget_df.merge(
-                spend_by_category,
-                left_on=["factory_name", "category_name"],
-                right_on=["factory_name", "category"],
-                how="left",
-            )
-            budget_view["amount"] = pd.to_numeric(budget_view["amount"], errors="coerce").fillna(0.0)
-            budget_view["remaining"] = budget_view["allocated_budget"] - budget_view["amount"]
-            budget_view["used_pct"] = budget_view.apply(
-                lambda row: (row["amount"] / row["allocated_budget"] * 100)
-                if row["allocated_budget"] > 0 else 0.0, axis=1
-            )
-            budget_show = budget_view[[
-                "department_name", "category_name", "allocated_budget", "amount", "remaining", "used_pct"
-            ]].copy()
-            budget_show.columns = ["Department", "Category", "Allocated (৳)", "Used (৳)", "Remaining (৳)", "Used %"]
-            st.dataframe(
-                budget_show, hide_index=True, use_container_width=True, height=320,
-                column_config={
-                    "Allocated (৳)": st.column_config.NumberColumn(format="৳ %,.0f"),
-                    "Used (৳)": st.column_config.NumberColumn(format="৳ %,.0f"),
-                    "Remaining (৳)": st.column_config.NumberColumn(format="৳ %,.0f"),
-                    "Used %": st.column_config.NumberColumn(format="%.1f%%"),
-                },
-            )
+                st.info("There are no dated purchase or issue transactions to chart yet.")
 
-    purchase_col, issue_col = st.columns(2, gap="large")
-    with purchase_col:
-        st.markdown('<div class="section-title">Recent purchases</div>', unsafe_allow_html=True)
-        if purchases.empty:
-            st.info("No supplier receipts in this period.")
-        else:
-            purchase_show = purchases.head(8)[
-                ["date", "item_name", "qty", "unit_price", "amount", "supplier_name", "officer_name"]
-            ].copy()
-            purchase_show.columns = ["Date", "Item", "Qty", "Unit price (৳)", "Value (৳)", "Supplier", "Officer"]
-            st.dataframe(purchase_show, hide_index=True, use_container_width=True, height=300)
-    with issue_col:
-        st.markdown('<div class="section-title">Recent issues</div>', unsafe_allow_html=True)
-        if issues.empty:
-            st.info("No issue transactions in this period.")
-        else:
-            issue_show = issues.head(8)[
-                ["date", "item_name", "qty", "unit_price", "amount", "officer_name", "trans_type"]
-            ].copy()
-            issue_show.columns = ["Date", "Item", "Qty", "Unit price (৳)", "Value (৳)", "Officer", "Type"]
-            st.dataframe(issue_show, hide_index=True, use_container_width=True, height=300)
+        with budget_col:
+            st.markdown('<div class="section-title">Budget by category</div>', unsafe_allow_html=True)
+            if budget_df.empty:
+                st.info("No budget lines are configured for this factory.")
+            else:
+                if issues.empty:
+                    spend_by_category = pd.DataFrame(columns=["factory_name", "category", "amount"])
+                else:
+                    spend_by_category = issues.groupby(
+                        ["factory_name", "category"], as_index=False
+                    )["amount"].sum()
+                budget_view = budget_df.merge(
+                    spend_by_category,
+                    left_on=["factory_name", "category_name"],
+                    right_on=["factory_name", "category"],
+                    how="left",
+                )
+                budget_view["amount"] = pd.to_numeric(budget_view["amount"], errors="coerce").fillna(0.0)
+                budget_view["remaining"] = budget_view["allocated_budget"] - budget_view["amount"]
+                budget_view["used_pct"] = budget_view.apply(
+                    lambda row: (row["amount"] / row["allocated_budget"] * 100)
+                    if row["allocated_budget"] > 0 else 0.0, axis=1
+                )
+                budget_show = budget_view[[
+                    "department_name", "category_name", "allocated_budget", "amount", "remaining", "used_pct"
+                ]].copy()
+                budget_show.columns = ["Department", "Category", "Allocated (৳)", "Used (৳)", "Remaining (৳)", "Used %"]
+                st.dataframe(
+                    budget_show, hide_index=True, use_container_width=True, height=320,
+                    column_config={
+                        "Allocated (৳)": st.column_config.NumberColumn(format="৳ %,.0f"),
+                        "Used (৳)": st.column_config.NumberColumn(format="৳ %,.0f"),
+                        "Remaining (৳)": st.column_config.NumberColumn(format="৳ %,.0f"),
+                        "Used %": st.column_config.NumberColumn(format="%.1f%%"),
+                    },
+                )
+
+    with d_recent:
+        purchase_col, issue_col = st.columns(2, gap="large")
+        with purchase_col:
+            st.markdown('<div class="section-title">Recent purchases</div>', unsafe_allow_html=True)
+            if purchases.empty:
+                st.info("No supplier receipts in this period.")
+            else:
+                purchase_show = purchases.head(8)[
+                    ["date", "item_name", "qty", "unit_price", "amount", "supplier_name", "officer_name"]
+                ].copy()
+                purchase_show.columns = ["Date", "Item", "Qty", "Unit price (৳)", "Value (৳)", "Supplier", "Officer"]
+                st.dataframe(purchase_show, hide_index=True, use_container_width=True, height=300)
+        with issue_col:
+            st.markdown('<div class="section-title">Recent issues</div>', unsafe_allow_html=True)
+            if issues.empty:
+                st.info("No issue transactions in this period.")
+            else:
+                issue_show = issues.head(8)[
+                    ["date", "item_name", "qty", "unit_price", "amount", "officer_name", "trans_type"]
+                ].copy()
+                issue_show.columns = ["Date", "Item", "Qty", "Unit price (৳)", "Value (৳)", "Officer", "Type"]
+                st.dataframe(issue_show, hide_index=True, use_container_width=True, height=300)
 # ============================================================
 #  TAB 1 - TRANSACTIONS (daily entry, top priority)
 # ============================================================
