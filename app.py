@@ -868,12 +868,15 @@ DS_KG_KEYWORDS = ("super enamel wire", "enamel paint", "anamel paint", "weather 
                   "gear oil", "lube oil", "compressor fluid", "poly bag", "jeet powder", "copper busbar", "varnish",
                   "blizing rod", "thermocol ball")
 REQ_FIELDS = [("req_no", "Requisition No"), ("item", "Item Description"), ("code", "ERP Code (optional)"),
-              ("qty", "Req Qty"), ("dept", "Department (optional)"), ("date", "Req Date (optional)")]
+              ("qty", "Req Qty"), ("size", "Size (optional)"), ("uom", "UOM / Unit (optional)"),
+              ("dept", "Department (optional)"), ("date", "Req Date (optional)")]
 REQ_KEYS = {
     "req_no": ["reqno", "requisitionno", "requisitionnumber", "reqnumber", "indentno", "rqsnno", "requisition"],
     "item": ["itemname", "itemdescription", "productname", "materialdescription", "description", "item", "product"],
     "code": ["erpcode", "itemcode", "productcode", "materialcode", "partno", "code"],
     "qty": ["reqqty", "requisitionqty", "requestedqty", "requiredqty", "quantity", "qty"],
+    "size": ["size", "itemsize", "specification", "spec", "dimension"],
+    "uom": ["uom", "unit", "unitname", "unitofmeasure", "measure", "um"],
     "dept": ["department", "dept"],
     "date": ["reqdate", "requisitiondate", "date"],
 }
@@ -1251,6 +1254,20 @@ def ensure_req_no_column():
     try:
         with conn.cursor() as cur:
             cur.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS req_no TEXT")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def ensure_req_link_table():
+    """Remembers which requisition line got how much of which Supplier Receipt, so deleting / editing that receipt can undo it."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS req_receipt_links (
+                           id SERIAL PRIMARY KEY, tx_id INTEGER, req_id INTEGER, qty REAL)""")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_req_receipt_links_tx ON req_receipt_links (tx_id)")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -3194,6 +3211,10 @@ def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, sup
                   unit_price_at_tx=tx_price if ttype == "Supplier. Rec" else None)
         if price_note:
             audit("PURCHASE_RATE", f"{fac}: {pid} ({name}){price_note}")
+        if ttype == "Supplier. Rec":
+            _got = req_auto_receive(fac, sl, pid, qty, date_s)
+            if _got:
+                st.session_state["_req_auto_note"] = "Requisition Received qty auto-update: " + ", ".join(f"{n} +{v:g}" for n, v in _got)
     else:
         if qty > stock:
             st.error(f"Available stock ({stock:g}) kom ache requested qty ({qty:g}) theke.")
@@ -3213,6 +3234,8 @@ def delete_transaction(tid):
         run("UPDATE inventory SET current_stock=current_stock-%s WHERE sl_no=%s AND factory_name=%s", (t["qty"], t["sl_no"], t["factory_name"]))
     elif t["trans_type"] in ISSUE_TYPES + (ADJ_OUT,):
         run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (t["qty"], t["sl_no"], t["factory_name"]))
+    if t["trans_type"] == "Supplier. Rec":
+        req_undo_receipt(tid)
     run("DELETE FROM transactions WHERE id=%s", (tid,))
     audit("DELETE_TRANS", f"Deleted transaction ID {tid}: {t['factory_name']} {t['trans_type']} {float(t['qty'] or 0):g} of "
                           f"{t['prod_id']} ({t['item_name']}) SL {t['sl_no']} by {t['officer_name']} on {t['date']} {t['time']}, stock reverted")
@@ -3506,7 +3529,9 @@ def tab_transactions():
                                 st.session_state["last_req_no"] = req_no.strip()
                             st.session_state["tx_saved_gen"] = g
                             st.session_state["tx_gen"] = g + 1
-                            done("✅ Transaction saved, stock updated. Form reset hoyeche - porer transaction-er jonno ready.")
+                            _rn = st.session_state.pop("_req_auto_note", "")
+                            done("✅ Transaction saved, stock updated. Form reset hoyeche - porer transaction-er jonno ready."
+                                 + (f" {_rn}" if _rn else ""))
 
     with left:
         _tx_entry_form()
@@ -6382,23 +6407,86 @@ def load_requisitions():
 
 
 @tx
-def create_req_item(fac, code, name, dept):
+def create_req_item(fac, code, name, dept, size="", uom=""):
     mx = q("SELECT COALESCE(MAX(sl_no),0) AS m FROM inventory WHERE factory_name=%s", (fac,))[0]["m"]
     if is_blank_code(code):
         code = next_free_temp(fac)
     run("""INSERT INTO inventory (sl_no, prod_id, factory_name, item_name, department, category, erp_stock,
-           current_stock, unit_price, erp_status, size) VALUES (%s,%s,%s,%s,%s,%s,0,0,0,'ERP Pending','')""",
-        (int(mx) + 1, code, fac, name, dept, "Uncategorized (Edit Later)"))
+           current_stock, unit_price, erp_status, size, unit_name) VALUES (%s,%s,%s,%s,%s,%s,0,0,0,'ERP Pending',%s,%s)""",
+        (int(mx) + 1, code, fac, name, dept, "Uncategorized (Edit Later)", (size or "").strip(), (uom or "").strip() or "Pcs"))
     return code
 
 
-def find_inv_for_req(fac, code, name):
+def req_auto_receive(fac, sl, pid, qty, date_s):
+    """Called inside save_transaction right after a Supplier Receipt is stored: the received qty is added to the
+    OPEN requisition line(s) of the same item (oldest requisition first), never above what is still pending.
+    Returns [(req_no, qty added)]. Writes req_receipt_links so a delete / qty edit of the receipt can undo it."""
+    if is_blank_code(pid) or float(qty or 0) <= 0:
+        return []
+    last = q("SELECT id FROM transactions WHERE factory_name=%s AND sl_no=%s AND trans_type='Supplier. Rec' ORDER BY id DESC LIMIT 1",
+             (fac, sl))
+    if not last:
+        return []
+    return _req_alloc(fac, pid, float(qty), date_s, int(last[0]["id"]))
+
+
+def _req_alloc(fac, pid, qty, date_s, tx_id):
+    rows = q("""SELECT id, req_no, req_date, req_qty, COALESCE(audit_approved_qty,0) AS aud, COALESCE(actual_received_qty,0) AS rec
+                FROM requisition_tracking WHERE factory_name=%s AND prod_id=%s""", (fac, pid))
+    cand = []
+    for r in rows:
+        aud, req, rec = float(r["aud"] or 0), float(r["req_qty"] or 0), float(r["rec"] or 0)
+        pend = (aud if aud > 0 else req) - rec     # same rule as the Requisition tab's pending quantity
+        if pend > 1e-9:
+            cand.append((parse_date(r["req_date"]) or datetime.max, int(r["id"]), pend, r["req_no"]))
+    cand.sort(key=lambda x: (x[0], x[1]))
+    left, out = float(qty), []
+    for _, rid, pend, req_no in cand:
+        if left <= 1e-9:
+            break
+        take = min(left, pend)
+        run("UPDATE requisition_tracking SET actual_received_qty=COALESCE(actual_received_qty,0)+%s, received_date=%s WHERE id=%s",
+            (take, date_s, rid))
+        run("INSERT INTO req_receipt_links (tx_id, req_id, qty) VALUES (%s,%s,%s)", (tx_id, rid, take))
+        left -= take
+        out.append((req_no, take))
+    if out:
+        audit("REQ_AUTO_RECEIVE", f"{fac}: receipt tx {tx_id} of {pid} qty {qty:g} -> " + ", ".join(f"{n} +{v:g}" for n, v in out))
+    return out
+
+
+def req_undo_receipt(tx_id, take_back=None):
+    """Takes quantity back from the requisition lines a receipt had filled (newest line first). take_back=None -> all of it."""
+    links = q("SELECT id, req_id, qty FROM req_receipt_links WHERE tx_id=%s ORDER BY id DESC", (tx_id,))
+    left = None if take_back is None else float(take_back)
+    for l in links:
+        if left is not None and left <= 1e-9:
+            break
+        cut = float(l["qty"]) if left is None else min(float(l["qty"]), left)
+        run("UPDATE requisition_tracking SET actual_received_qty=GREATEST(COALESCE(actual_received_qty,0)-%s,0) WHERE id=%s",
+            (cut, l["req_id"]))
+        if cut >= float(l["qty"]) - 1e-9:
+            run("DELETE FROM req_receipt_links WHERE id=%s", (l["id"],))
+        else:
+            run("UPDATE req_receipt_links SET qty=qty-%s WHERE id=%s", (cut, l["id"]))
+        if left is not None:
+            left -= cut
+
+
+def find_inv_for_req(fac, code, name, size=""):
+    """ERP code first; then the exact name (a given size must agree, a blank inventory size is accepted); then learned aliases."""
     if not is_blank_code(code):
         r = q("SELECT sl_no, prod_id, item_name FROM inventory WHERE factory_name=%s AND prod_id=%s", (fac, code))
         if r:
             return r[0]
     if name:
-        r = q("SELECT sl_no, prod_id, item_name FROM inventory WHERE factory_name=%s AND LOWER(item_name)=LOWER(%s)", (fac, name))
+        r = q("SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size FROM inventory "
+              "WHERE factory_name=%s AND LOWER(item_name)=LOWER(%s)", (fac, name))
+        if r and (size or "").strip():
+            want = norm_size(size)
+            exact = [x for x in r if norm_size(x["size"]) == want]
+            blank = [x for x in r if not str(x["size"] or "").strip()]
+            r = exact or blank
         if r:
             return r[0]
         nn = norm_name(name)
@@ -6414,11 +6502,22 @@ def find_inv_for_req(fac, code, name):
 def import_requisition(fac, rows, create_items):
     new_items = 0
     for p in rows:
-        inv = find_inv_for_req(fac, p["code"], p["item"])
+        inv = None
+        if p.get("use_sl"):   # the person chose an existing (similar) item for this line -> no new item; remember the name
+            r = q("SELECT sl_no, prod_id, item_name FROM inventory WHERE factory_name=%s AND sl_no=%s", (fac, int(p["use_sl"])))
+            if r:
+                inv = r[0]
+                if norm_name(p["item"]) and norm_name(p["item"]) != norm_name(inv["item_name"]):
+                    run("""INSERT INTO item_aliases (factory_name, alias_name, alias_norm, sl_no, created_by, created_at)
+                           VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (factory_name, alias_norm, sl_no) DO NOTHING""",
+                        (fac, p["item"].strip(), norm_name(p["item"]), int(inv["sl_no"]), st.session_state.get("user", ""),
+                         local_now().strftime("%d-%b-%Y %I:%M %p")))
+        if inv is None:
+            inv = find_inv_for_req(fac, p["code"], p["item"], p.get("size", ""))
         if inv:
             code = inv["prod_id"]
         elif create_items:
-            code = create_req_item(fac, p["code"], p["item"], p["dept"])
+            code = create_req_item(fac, p["code"], p["item"], p["dept"], p.get("size", ""), p.get("uom", ""))
             new_items += 1
         else:
             code = p["code"]
@@ -6562,6 +6661,7 @@ def req_import_view():
     for ridx in range(hi + 1, len(raw)):
         row = raw.iloc[ridx]
         item, code, qty_t = cell(row, "item"), cell(row, "code"), cell(row, "qty")
+        size_t, uom_t = cell(row, "size"), cell(row, "uom")
         if code.upper() in ("N/A", "NA", "NONE", "-"):
             code = ""
         vals = {}
@@ -6575,6 +6675,7 @@ def req_import_view():
         qty = float(m.group()) if m else 0.0
         d = parse_date(vals["date"]) or datetime.combine(fx_date, datetime.min.time())
         p = {"line": ridx + 1, "req_no": vals["req_no"] or fx_no, "item": item, "code": code, "qty": qty,
+             "size": size_t, "uom": uom_t,
              "dept": vals["dept"] or fx_dept, "date": d.strftime(DATE_FMT), "ok": False, "result": ""}
         if not item:
             p["result"] = "Skipped: item description nei"
@@ -6588,9 +6689,33 @@ def req_import_view():
             p["result"] = "OK"
         parsed.append(p)
     ok_rows = [p for p in parsed if p["ok"]]
+    # ---- Similar-name check: a line that is NOT found in inventory but looks like an existing item ----
+    sim_lines, sim_ack = [], True
+    if create and ok_rows and "CONSOLIDATED" not in str(FAC):
+        for p in ok_rows:
+            try:
+                if find_inv_for_req(FAC, p["code"], p["item"], p.get("size", "")) is None:
+                    hits = similar_items(FAC, p["item"], p.get("size", ""), limit=4, threshold=0.75)
+                    if hits:
+                        sim_lines.append((p, hits))
+            except Exception:
+                pass
+    if sim_lines:
+        st.warning(f"⚠️ {len(sim_lines)} ti line-er nam inventory-r kono item-er proray hubohu mile gese. "
+                   "Notun item toiri korar age niche dekhe nin - eta ki ager-i item? Ager item hole oita select korun "
+                   "(notun duplicate item hobe na, ar ei nam pore auto-chinbe).")
+        for p, hits in sim_lines:
+            opts = {"➕ Notun item create korun": None}
+            for sc, h in hits:
+                opts[f"Use: {h['item_name']} [{h['size'] or '-'}] · {h['prod_id']} · stock {float(h['stock']):g} · mil {int(round(sc * 100))}%"] = int(h["sl_no"])
+            pick = st.selectbox(f"Line {p['line']}: {p['item']}" + (f" [{p['size']}]" if p.get("size") else ""), list(opts),
+                                key=f"req_sim_{hi}_{p['line']}")
+            p["use_sl"] = opts[pick]
+            p["result"] = "OK (existing item chosen)" if opts[pick] else "OK (new item)"
+        sim_ack = st.checkbox("Kachakachi item gulo dekhe nilam - jegulo notun, shegulo sotti-i alada item.", key=f"req_sim_ack_{hi}")
     st.caption(f"Lines to import: {len(ok_rows)} | Skipped/already: {len(parsed) - len(ok_rows)}")
     st.dataframe(pd.DataFrame(parsed), hide_index=True, use_container_width=True)
-    if st.button("✅ Import requisition", type="primary", disabled=not ok_rows, key="req_import_btn"):
+    if st.button("✅ Import requisition", type="primary", disabled=not (ok_rows and sim_ack), key="req_import_btn"):
         n = import_requisition(FAC, ok_rows, create)
         if n is not None:
             done(f"Requisition import done: {len(ok_rows)} line(s), new inventory items {n}. "
@@ -7833,6 +7958,11 @@ def pc_edit_tx(tid, new_qty, date_s, notes):
             raise ValueError(f"Ei change-e stock negative ({stock + eff:g}) hoye jabe.")
         run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s",
             (eff, t["sl_no"], t["factory_name"]))
+        if ttype == "Supplier. Rec":
+            if delta < 0:
+                req_undo_receipt(tid, -delta)
+            else:
+                _req_alloc(t["factory_name"], t["prod_id"], delta, date_s, tid)
     d = parse_date(date_s)
     run("UPDATE transactions SET qty=%s, date=%s, day=%s, notes=%s WHERE id=%s",
         (float(new_qty), date_s, d.day if d else t["day"], notes, tid))
@@ -15675,6 +15805,9 @@ try:
     if not st.session_state.get("_req_no_column_ready"):
         run_once_per_process("req_no_column", ensure_req_no_column)
         st.session_state["_req_no_column_ready"] = True
+    if not st.session_state.get("_req_link_table_ready"):
+        run_once_per_process("req_link_table", ensure_req_link_table)
+        st.session_state["_req_link_table_ready"] = True
 except Exception as e:
     st.error(f"Database setup/migration failed: {e}")
     st.stop()
