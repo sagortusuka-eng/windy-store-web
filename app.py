@@ -7235,22 +7235,33 @@ def review_stock_count(cid, user, review_note):
     return True
 
 
+def _pck(name):
+    """Entry-box keys carry a counter. After every successful add the counter goes up, so the browser gets brand-new
+    empty boxes (old item / quantity / remark can never stay behind and be added twice by mistake)."""
+    return f"{name}_{st.session_state.get('pc_gen', 0)}"
+
+
 def _pc_add():
     """Button callback: put the picked item + counted quantity on the list, then clear the entry boxes."""
     ss = st.session_state
-    row = ss.get("pc_opts", {}).get(ss.get("pc_pick"))
-    qty = ss.get("pc_qty")
+    row = ss.get("pc_opts", {}).get(ss.get(_pck("pc_pick")))
+    qty = ss.get(_pck("pc_qty"))
     if row is None:
         ss["pc_msg"] = ("error", "Search and select an item first.")
     elif qty is None:
         ss["pc_msg"] = ("error", "Enter the counted quantity (type 0 if nothing is found).")
+    elif row["sl_no"] in ss.get("pc_list", {}):
+        old = ss["pc_list"][row["sl_no"]]
+        ss["pc_msg"] = ("error", f"{row['item_name']} is already in the count list (counted {old['qty']:g}). "
+                                 "Tap ✖ Remove on it first if you want to enter it again.")
     else:
         ss.setdefault("pc_list", {})[row["sl_no"]] = {
             "sl_no": row["sl_no"], "label": f"{row['item_name']} [{row['size'] or '-'}]",
-            "code": row["prod_id"], "qty": float(qty), "remark": str(ss.get("pc_rem") or "").strip()}
+            "code": row["prod_id"], "qty": float(qty), "remark": str(ss.get(_pck("pc_rem")) or "").strip()}
         ss["pc_msg"] = ("ok", f"Added: {row['item_name']} = {float(qty):g}")
         for k in ("pc_qty", "pc_rem", "pc_term", "pc_pick"):
-            ss.pop(k, None)
+            ss.pop(_pck(k), None)
+        ss["pc_gen"] = ss.get("pc_gen", 0) + 1   # fresh empty boxes
 
 
 def _pc_remove(sl):
@@ -7299,7 +7310,7 @@ def pc_entry():
     st.markdown(f"**🏭 Counting in: {FAC}**")
     st.caption("Select an item to see its current system stock and any Short / Excess from its last count. "
                "The count appears in the Waiting / Results tab after you submit.")
-    term = st.text_input("🔍 Item name / serial / ERP code", key="pc_term", placeholder="Type and select the item")
+    term = st.text_input("🔍 Item name / serial / ERP code", key=_pck("pc_term"), placeholder="Type and select the item")
     opts = {}
     if term.strip():
         for r in search_items(FAC, term.strip())[:30]:
@@ -7309,16 +7320,27 @@ def pc_entry():
     if term.strip() and not opts:
         st.warning("No item found.")
     if opts:
-        st.selectbox("Select item", list(opts), key="pc_pick")
-        _pk = opts.get(st.session_state.get("pc_pick"))
+        st.selectbox("Select item", list(opts), key=_pck("pc_pick"))
+        _pk = opts.get(st.session_state.get(_pck("pc_pick")))
         if _pk is not None:
+            if _pk["sl_no"] in st.session_state.get("pc_list", {}):
+                st.error("⛔ Ei item already count list-e ache. Abar add kora jabe na - age list theke ✖ Remove korun.")
+            else:
+                try:
+                    _today_n = q("""SELECT COUNT(*) AS n FROM stock_count_items i JOIN stock_counts c ON c.id=i.count_id
+                                    WHERE i.sl_no=%s AND i.factory_name=%s AND c.counted_at LIKE %s""",
+                                 (_pk["sl_no"], FAC, f"{local_now():%d-%b-%Y}%"))[0]["n"]
+                except Exception:
+                    _today_n = 0
+                if int(_today_n):
+                    st.warning("⚠️ Ei item ajke already count kora hoyeche. Abar count korle notun entry hoye jabe - sure hole add korun.")
             _pc_item_info(FAC, _pk)
     try:
         st.number_input("Counted quantity", min_value=0.0, step=1.0, value=None, placeholder="How many did you count?",
-                        key="pc_qty")
+                        key=_pck("pc_qty"))
     except TypeError:   # very old Streamlit without an empty number box
-        st.number_input("Counted quantity", min_value=0.0, step=1.0, key="pc_qty")
-    st.text_input("Remarks (optional)", key="pc_rem", placeholder="e.g. 2 damaged, kept in rack B")
+        st.number_input("Counted quantity", min_value=0.0, step=1.0, key=_pck("pc_qty"))
+    st.text_input("Remarks (optional)", key=_pck("pc_rem"), placeholder="e.g. 2 damaged, kept in rack B")
     st.button("➕ Add to count list", key="pc_add_btn", on_click=_pc_add, use_container_width=True)
     msg = st.session_state.pop("pc_msg", None)
     if msg:
@@ -8948,8 +8970,8 @@ def get_today_picks(fac):
 
 
 def _pick_to_search(term):
-    st.session_state["pc_term"] = term
-    st.session_state.pop("pc_pick", None)
+    st.session_state[_pck("pc_term")] = term
+    st.session_state.pop(_pck("pc_pick"), None)
 
 
 def count_picks_panel():
