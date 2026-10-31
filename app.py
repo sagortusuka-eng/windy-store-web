@@ -6790,6 +6790,68 @@ def delete_requisition(rid, req_no, name):
     return True
 
 
+def _req_item_summary(rows):
+    """Item-wise view: for every item, how much was requested, approved, received and what is still pending."""
+    cons = "CONSOLIDATED" in str(FAC)
+    groups = {}
+    for r in rows:
+        code = str(r["prod_id"] or "").strip()
+        key = (r["factory_name"] if cons else "", code or ("name:" + str(r["item_name"]).strip().lower()))
+        g = groups.setdefault(key, {"Unit": r["factory_name"], "Item": r["item_name"], "ERP Code": code, "Requisitions": 0,
+                                    "Req Qty": 0.0, "Approved": 0.0, "Received": 0.0, "Pending": 0.0, "base": 0.0, "age": 0})
+        g["Requisitions"] += 1
+        g["Req Qty"] += r["req_qty"]
+        g["Approved"] += r["aud_qty"]
+        g["Received"] += r["rec_qty"]
+        g["Pending"] += r["pending"]
+        g["base"] += r["base"]
+        if r["pending"] > 0:
+            g["age"] = max(g["age"], r["age"])
+    items = list(groups.values())
+    for g in items:
+        g["Received %"] = min(g["Received"] / g["base"] * 100.0, 100.0) if g["base"] > 0 else 0.0
+        g["Oldest pending (days)"] = g["age"] if g["Pending"] > 0 else 0
+        g["Status"] = ("✅ Fully received" if g["Pending"] <= 0 and g["Received"] > 0
+                       else "🟠 Partly received" if g["Received"] > 0 else "🔴 Nothing received yet")
+    show = st.radio("Show", ["Pending ache emon item", "Shob item", "Fully received"], horizontal=True, key="req_item_filter")
+    if show.startswith("Pending"):
+        items = [g for g in items if g["Pending"] > 0]
+    elif show.startswith("Fully"):
+        items = [g for g in items if g["Pending"] <= 0]
+    if not items:
+        st.info("Ei filter-e kono item nei.")
+        return
+    items.sort(key=lambda g: (-g["Pending"], g["Item"]))
+    st.caption(f"Items: {len(items):,} | Requested: {sum(g['Req Qty'] for g in items):,.0f} | "
+               f"Approved: {sum(g['Approved'] for g in items):,.0f} | Received: {sum(g['Received'] for g in items):,.0f} | "
+               f"Pending: {sum(g['Pending'] for g in items):,.0f}")
+    cols = ["Item", "ERP Code", "Requisitions", "Req Qty", "Approved", "Received", "Pending", "Received %", "Oldest pending (days)", "Status"]
+    if cons:
+        cols = ["Unit"] + cols
+    df = pd.DataFrame(items)[cols]
+    st.dataframe(df, hide_index=True, use_container_width=True, height=min(80 + 35 * len(df), 460),
+                 column_config={"Received %": st.column_config.ProgressColumn("Received %", min_value=0, max_value=100, format="%.0f%%"),
+                                "Req Qty": st.column_config.NumberColumn(format="%.2f"),
+                                "Approved": st.column_config.NumberColumn(format="%.2f"),
+                                "Received": st.column_config.NumberColumn(format="%.2f"),
+                                "Pending": st.column_config.NumberColumn(format="%.2f")})
+    export_buttons(df, "requisition_item_summary")
+    names = [f"{g['Item']} · {g['ERP Code'] or 'no code'}" + (f" · {g['Unit']}" if cons else "") for g in items]
+    pick = st.selectbox("🔎 Kon item-er requisition gulo dekhben?", names, key="req_item_pick")
+    g = items[names.index(pick)]
+    detail = [r for r in rows
+              if (not cons or r["factory_name"] == g["Unit"])
+              and ((str(r["prod_id"] or "").strip() == g["ERP Code"] and g["ERP Code"])
+                   or (not g["ERP Code"] and str(r["item_name"]).strip().lower() == str(g["Item"]).strip().lower()))]
+    detail.sort(key=lambda r: parse_date(r["req_date"]) or datetime.max)
+    st.dataframe(pd.DataFrame([{"Req No": r["req_no"], "Req Date": r["req_date"], "Department": r["department"],
+                                "Req Qty": r["req_qty"], "Approved": r["aud_qty"], "Received": r["rec_qty"], "Pending": r["pending"],
+                                "PO Date": r["po_date"] or "Pending PO", "Last received": r["received_date"] or "",
+                                "Status": r["calc_status"]} for r in detail]),
+                 hide_index=True, use_container_width=True, height=min(80 + 35 * len(detail), 320))
+    st.caption("Approve / PO date / Edit korte upore '🧾 Requisition-wise' view-e jan.")
+
+
 def tab_requisition():
     _top = lazy_tab_select(["📋 Requisition list", "🧾 Audit Reconciliation (item search)"], "lz_reqtop")
     if _top == 1:
@@ -6814,6 +6876,11 @@ def tab_requisition():
                f"Awaiting PO: {sum(not r['has_po'] and r['aud_qty'] > 0 for r in rows)} | Pending Qty: {total_pending:,.2f}")
     if not rows:
         st.info("Requisition nei.")
+        return
+    _view = st.radio("View", ["🧾 Requisition-wise", "📦 Item-wise summary"], horizontal=True, key="req_view",
+                     label_visibility="collapsed")
+    if _view.startswith("📦"):
+        _req_item_summary(rows)
         return
     df = pd.DataFrame([{"ID": r["id"], "Factory": r["factory_name"], "Req No": r["req_no"], "Department": r["department"],
                         "Req Date": r["req_date"], "Item": r["item_name"], "ERP Code": r["prod_id"], "Req Qty": r["req_qty"],
