@@ -12835,8 +12835,6 @@ def _ri_requests_panel():
         hist = q("SELECT * FROM ri_correction_requests WHERE factory_name=%s AND status<>'Pending' ORDER BY id DESC LIMIT 15", (fac,))
     except Exception:
         return
-    if not pend and not hist:
-        return
     if pend and is_mgr:
         st.warning(f"📥 {len(pend)} ti correction request apnar approve-er opekkhay ache.")
     with st.expander(f"📥 Correction request ({len(pend)} pending)", expanded=bool(pend and is_mgr)):
@@ -12877,6 +12875,8 @@ def _ri_requests_panel():
                                 done(f"Request #{r['id']} reject kora hoyeche.")
                     else:
                         st.caption("⏳ Manager approve-er opekkhay.")
+        if not pend and not hist:
+            st.caption("Ekhono kono correction request nei. Officer niche '✏️ Save kora slip-e vul thik korun' theke request pathale ekhane ashbe.")
         if hist:
             st.markdown("**Shomproti shiddhanto howa request**")
             hv = pd.DataFrame([{"#": r["id"], "SR": r["req_no"], "Item": r["item_name"], "Change": _desc(r), "Status": r["status"],
@@ -12893,6 +12893,9 @@ def render_ri_request_notice():
     if n:
         st.warning(f"📥 Requisition Issue-e {n} ti correction request approve-er opekkhay ache.")
         st.button("Requisition Issue khulun →", key="ri_req_go", on_click=go_page, args=(NAV_REQ_ISSUE, None))
+    else:
+        st.caption("📥 Requisition Issue correction request: ekhon kono request pending nei. "
+                   "Officer request pathale ekhane holud box-e dekhabe.")
 
 
 def can_write_ri():
