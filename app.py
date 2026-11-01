@@ -1274,6 +1274,23 @@ def ensure_req_link_table():
         raise
 
 
+def ensure_ri_request_table():
+    """Correction requests for saved Requisition Issue slips: an officer asks, the Store Manager approves / rejects."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS ri_correction_requests (
+                           id SERIAL PRIMARY KEY, factory_name TEXT, req_no TEXT, action TEXT, tx_id INTEGER, sl_no INTEGER,
+                           prod_id TEXT, item_name TEXT, old_qty REAL, new_qty REAL, reason TEXT, slip_date TEXT, slip_type TEXT,
+                           requested_by TEXT, requested_at TEXT, status TEXT DEFAULT 'Pending', decided_by TEXT, decided_at TEXT,
+                           decision_note TEXT)""")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_ri_req_fac_status ON ri_correction_requests (factory_name, status)")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def ensure_global_inventory_schema():
     """Idempotently add columns used by Global Inventory, even if a cached DB initializer skips DDL."""
     conn = get_conn()
@@ -2124,15 +2141,24 @@ def _name_match_score(a, b):
 
 
 def find_same_in_other(prod_id, name, other_fac, size, need=None):
-    """Same product (NAME + SIZE) in other factory: exact -> similar name (>= 80%) -> same ERP code.
-    `need` (optional) = shortage qty: among equally good name matches, one that has enough stock is preferred."""
+    """Same product in the other factory. Order: exact NAME + SIZE -> same ERP code (any size) -> similar name (>= 80%, same size)
+    -> exact name when one side has no size / the size only repeats the item name (only if it is unambiguous).
+    `need` (optional) = shortage qty: among equally good matches, one that has enough stock is preferred."""
     ns, nn = norm_size(size), norm_name(name)
-    rows = [r for r in q(f"SELECT {INV_COLS} FROM inventory WHERE factory_name=%s", (other_fac,))
-            if norm_size(r["size"]) == ns]
+    all_rows = q(f"SELECT {INV_COLS} FROM inventory WHERE factory_name=%s", (other_fac,))
+    rows = [r for r in all_rows if norm_size(r["size"]) == ns]
     exact = [r for r in rows if nn and norm_name(r["item_name"]) == nn]
     if exact:
         same = [r for r in exact if r["prod_id"] == prod_id]
         return {**max(same or exact, key=lambda r: r["stock"] or 0), "level": "exact", "score": 1.0}
+    # the ERP code is the strongest sign of the same item - size spelling must not hide it (e.g. size blank in one unit)
+    has_code = bool(prod_id) and not is_blank_code(prod_id) and not str(prod_id).upper().startswith("TEMP-")
+    if has_code:
+        bc = [r for r in all_rows if r["prod_id"] == prod_id]
+        if bc:
+            if need is not None:
+                bc = [r for r in bc if float(r["stock"] or 0) >= need] or bc
+            return {**max(bc, key=lambda r: float(r["stock"] or 0)), "level": "code", "score": 1.0}
     scored = [(_name_match_score(name, r["item_name"]), r) for r in rows]
     scored = [(s, r) for s, r in scored if s >= XFER_NAME_MATCH]
     if scored:
@@ -2143,10 +2169,13 @@ def find_same_in_other(prod_id, name, other_fac, size, need=None):
             close = enough or close
         s, r = max(close, key=lambda x: (x[0], float(x[1]["stock"] or 0)))
         return {**r, "level": "exact" if s >= 0.999 else "fuzzy", "score": s}
-    if prod_id and not is_blank_code(prod_id):
-        bc = [r for r in rows if r["prod_id"] == prod_id]
-        if bc:
-            return {**bc[0], "level": "code", "score": 1.0}
+
+    def _size_free(r):          # no size at all, or the size is just the item name typed again
+        rs = norm_size(r["size"])
+        return (not rs) or rs == norm_name(r["item_name"])
+    loose = [r for r in all_rows if nn and norm_name(r["item_name"]) == nn and _size_free(r)]
+    if len(loose) == 1:
+        return {**loose[0], "level": "fuzzy", "score": 0.9}
     return None
 
 
@@ -9630,6 +9659,10 @@ def render_dashboard_addons():
     except Exception as e:
         st.caption(f"আজকের কাজ কার্ড লোড হয়নি: {e}")
     try:
+        render_ri_request_notice()
+    except Exception:
+        pass
+    try:
         render_dash_note_board()
     except Exception as e:
         st.caption(f"নোট বোর্ড লোড হয়নি: {e}")
@@ -12350,7 +12383,10 @@ def tab_req_issue():
     except Exception as e:
         st.error(f"req_no column setup failed: {e}")
         return
+    _ri_saved_banner()
+    _ri_requests_panel()
     _ri_form()
+    _ri_fix_panel()
 
 
 @_frag   # typing / adding rows re-runs ONLY this block - the rest of the app is not touched
@@ -12519,10 +12555,348 @@ def _ri_form():
             n = save_requisition_issue(fac, [(ln["sl"], q_, xfer_flags.get(ln["sl"], False)) for ln, q_ in zip(lines, qtys)],
                                        tx_date, sr_no, ttype, notes.strip(), verified, po_pending)
             if n:
+                _who = st.session_state.get("user", "")
                 st.session_state["last_req_no"] = sr_no
+                st.session_state["ri_saved"] = {"user": _who, "sr": sr_no, "n": int(n), "qty": float(sum(qtys)),
+                                                "time": local_now().strftime("%d-%b-%Y %I:%M %p"), "kind": "save"}
                 st.session_state["ri_lines"] = []
                 st.session_state["ri_gen"] = gen + 1
-                done(f"✅ SR {sr_no}: {n}টি আইটেম ইস্যু হয়েছে, স্টক কমেছে।")
+                done(f"✅ {_who}, apnar data sofolbhabe save hoyeche - SR {sr_no}: {n}টি আইটেম ইস্যু হয়েছে, স্টক কমেছে।")
+
+
+def _ri_saved_banner():
+    """Stays at the top of the page after a save / fix: who saved it, which SR, how many items."""
+    info = st.session_state.get("ri_saved")
+    if not info or info.get("user") != st.session_state.get("user"):
+        return
+    c1, c2 = st.columns([8, 1])
+    if info.get("kind") == "req":
+        c1.success(f"📨 **{info['user']}**, apnar correction request manager-er kache pathano hoyeche — SR **{info['sr']}** · "
+                   f"{info['detail']} · {info['time']}. Manager approve korle correction hobe.")
+    elif info.get("kind") == "fix":
+        c1.success(f"✅ **{info['user']}**, apnar correction sofolbhabe save hoyeche — SR **{info['sr']}** · {info['detail']} · {info['time']}")
+    else:
+        c1.success(f"✅ **{info['user']}**, apnar data sofolbhabe save hoyeche — SR **{info['sr']}** · {info['n']} ti item · "
+                   f"mot qty {info['qty']:g} · {info['time']}")
+    if c2.button("✖ Bondho", key="ri_saved_close"):
+        st.session_state.pop("ri_saved", None)
+        st.rerun()
+
+
+def _ri_use_sr(sr):
+    st.session_state[f"ri_sr_{st.session_state.get('ri_gen', 0)}"] = sr
+
+
+@_frag
+def _ri_fix_panel():
+    """Fix a slip that was already saved: change a quantity, remove a wrongly added item, or add a forgotten item to the same SR.
+    Uses the same stock-safe functions as Transactions / Physical Count; needs the Store Manager password like every delete / edit."""
+    fac = FAC
+    with st.expander("✏️ Save kora slip-e vul thik korun (qty bodlano · vul item bad deya · aro item jog kora)"):
+        recent = q("""SELECT req_no, COUNT(*) AS n, MAX(date) AS d, MAX(officer_name) AS u, MAX(id) AS last_id
+                      FROM transactions WHERE factory_name=%s AND COALESCE(req_no,'')<>'' AND trans_type = ANY(%s)
+                      GROUP BY req_no ORDER BY MAX(id) DESC LIMIT 40""", (fac, list(ISSUE_TYPES)))
+        look = st.text_input("SR number likhe khujun (ager SR hole)", key="rifix_look").strip()
+        if look:
+            hit = q("""SELECT req_no, COUNT(*) AS n, MAX(date) AS d, MAX(officer_name) AS u, MAX(id) AS last_id
+                       FROM transactions WHERE factory_name=%s AND req_no=%s AND trans_type = ANY(%s) GROUP BY req_no""",
+                    (fac, look, list(ISSUE_TYPES)))
+            recent = hit
+            if not hit:
+                st.warning(f"SR {look} ei unit-e paoa jayni.")
+        if not recent:
+            st.caption("Ei unit-e kono saved slip nei.")
+            return
+        names = {f"SR {r['req_no']} · {r['n']} item · {r['d']} · {r['u']}": r["req_no"] for r in recent}
+        labels = list(names)
+        default = 0
+        lr = st.session_state.get("last_req_no")
+        for i, lb in enumerate(labels):
+            if names[lb] == lr:
+                default = i
+                break
+        sr = names[st.selectbox("Kon slip thik korben?", labels, index=default, key="rifix_sel")]
+        lines = q("""SELECT id, sl_no, prod_id, item_name, qty, trans_type, date, notes, officer_name FROM transactions
+                     WHERE factory_name=%s AND req_no=%s AND trans_type = ANY(%s) ORDER BY id""", (fac, sr, list(ISSUE_TYPES)))
+        if not lines:
+            st.info("Ei SR-e kono issue line nei.")
+            return
+        h = st.columns([3.2, 1.3, 1.1, 1.4, 1.1])
+        for col, t in zip(h, ["Item", "ERP Code", "Ager qty", "Notun qty", "Bad den"]):
+            col.caption(t)
+        edits, dels = {}, []
+        for ln in lines:
+            tid = int(ln["id"])
+            old = float(ln["qty"] or 0)
+            c = st.columns([3.2, 1.3, 1.1, 1.4, 1.1])
+            c[0].write(ln["item_name"])
+            c[1].write(ln["prod_id"])
+            c[2].write(f"{old:g}")
+            if "Auto-transferred" in str(ln["notes"] or ""):
+                c[3].write("🔒 auto-transfer jukto")
+                c[4].write("—")
+                continue
+            nq = c[3].number_input("q", min_value=0.0, step=1.0, value=old, format="%g", key=f"rifix_q_{tid}_{old:g}",
+                                   label_visibility="collapsed")
+            rm = c[4].checkbox("✖", key=f"rifix_d_{tid}")
+            if rm:
+                dels.append(ln)
+            elif abs(nq - old) > 1e-9:
+                edits[tid] = (ln, float(nq))
+        if any("Auto-transferred" in str(l["notes"] or "") for l in lines):
+            st.caption("🔒 Je line-e onno unit theke auto-transfer hoyechilo, shei line ekhane bodlano jay na - Transfer History ar Issue Ledger theke thik korun.")
+        if st.button("➕ Ei SR-e aro item add korun", key="rifix_add", on_click=_ri_use_sr, args=(sr,),
+                     help="Upore form-e ei SR number boshe jabe. Item jog kore Save korun ar 'SR ager-i use hoyeche' tick din."):
+            st.rerun()   # whole page, so the SR box in the form above shows the number
+        if st.session_state.get(f"ri_sr_{st.session_state.get('ri_gen', 0)}") == sr:
+            st.caption(f"✔ Upore form-e SR {sr} boshano ache - sekhane notun item jog kore Save korun.")
+        is_mgr = st.session_state.get("role") == "Store Manager"
+        slip_date, slip_type = str(lines[0]["date"] or ""), str(lines[0]["trans_type"] or "Issued")
+        n_pend = _ri_pending_n(fac, sr)
+        if n_pend:
+            st.caption(f"⏳ Ei SR-er jonno {n_pend} ti correction request ager-i pending ache (upore '📥 Correction request' e dekhun).")
+
+        # ---- a forgotten item: ask for it to be added to this SR ----
+        with st.container(border=True):
+            st.markdown("**📨 Slip-e ekta item bhule gele: add-er request pathan** (manager approve korle oi SR-e jog hobe)")
+            t_ = st.text_input("Item khujun (nam / ERP code / size)", key="rifix_addterm").strip()
+            cands = search_items(fac, t_)[:30] if len(t_) >= 2 else []
+            lab = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · stock {float(r['stock']):g}": r for r in cands}
+            pk = st.selectbox("Item", list(lab) if lab else ["— age item khujun —"], key="rifix_addpick")
+            a1, a2 = st.columns([1, 3])
+            aq = a1.number_input("Qty", min_value=0.0, step=1.0, format="%g", key="rifix_addqty")
+            ar = a2.text_input("Karon (keno bad poreche) *", key="rifix_addreason").strip()
+            if st.button("📨 Add-item request pathan", key="rifix_addbtn", disabled=not can_write_ri()):
+                if pk not in lab:
+                    st.error("Age item khuje select korun.")
+                elif aq <= 0:
+                    st.error("Qty 0-r beshi din.")
+                elif len(ar) < 5:
+                    st.error("Karon likhun (kom-pokkhe 5 akkhor).")
+                elif guard():
+                    r_ = lab[pk]
+                    res_ = ri_create_requests(fac, sr, [{"action": "Add item", "tx_id": None, "sl_no": int(r_["sl_no"]),
+                                                         "prod_id": r_["prod_id"], "item_name": r_["item_name"],
+                                                         "old_qty": 0.0, "new_qty": float(aq)}], ar, slip_date, slip_type)
+                    if res_ is None:
+                        return
+                    made, skipped = res_
+                    if not made:
+                        st.warning("Ei item-er add request ager-i pending ache.")
+                    else:
+                        who = st.session_state.get("user", "")
+                        st.session_state["ri_saved"] = {"user": who, "sr": sr, "kind": "req", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
+                                                        "detail": f"add item: {r_['item_name']} × {aq:g}"}
+                        done(f"📨 {who}, apnar request pathano hoyeche - manager approve korle SR {sr}-e {r_['item_name']} jog hobe.")
+
+        if not (edits or dels):
+            st.caption("Qty bodlan ba bad deyar jonno ✖ tick din, tarpor niche kivabe thik korben bachun.")
+            return
+        zero = [l for l, nq in edits.values() if nq <= 0]
+        if zero:
+            st.error("Qty 0 kora jabe na - oi item bad dite hole ✖ tick din.")
+            return
+        st.info(f"Change: {len(edits)} ti qty bodlabe, {len(dels)} ti line delete hobe.")
+        mode = st.radio("Kivabe thik korben?", ["📨 Request pathan (Manager approve korbe)", "🔐 Ekhoni thik korun (Manager password)"],
+                        index=1 if is_mgr else 0, horizontal=True, key="rifix_mode")
+        if mode.startswith("📨"):
+            reason = st.text_input("Karon likhun - ki bhul hoyechilo? *", key="rifix_reason").strip()
+            if st.button("📨 Correction request pathan", type="primary", key="rifix_req_btn", disabled=not can_write_ri()):
+                if len(reason) < 5:
+                    st.error("Karon likhun (kom-pokkhe 5 akkhor), jate manager bujhte pare.")
+                elif guard():
+                    items = []
+                    for tid, (ln, nq) in edits.items():
+                        items.append({"action": "Change qty", "tx_id": tid, "sl_no": int(ln["sl_no"]), "prod_id": ln["prod_id"],
+                                      "item_name": ln["item_name"], "old_qty": float(ln["qty"] or 0), "new_qty": float(nq)})
+                    for ln in dels:
+                        items.append({"action": "Remove line", "tx_id": int(ln["id"]), "sl_no": int(ln["sl_no"]), "prod_id": ln["prod_id"],
+                                      "item_name": ln["item_name"], "old_qty": float(ln["qty"] or 0), "new_qty": 0.0})
+                    res_ = ri_create_requests(fac, sr, items, reason, slip_date, slip_type)
+                    if res_ is None:
+                        return
+                    made, skipped = res_
+                    if not made:
+                        st.warning("Ei line-gulor request ager-i pending ache - manager-er jonno opekkha korun.")
+                    else:
+                        who = st.session_state.get("user", "")
+                        st.session_state["ri_saved"] = {"user": who, "sr": sr, "kind": "req", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
+                                                        "detail": f"{made} ti request" + (f" ({skipped} ti ager-i pending chilo)" if skipped else "")}
+                        st.session_state.pop("rifix_reason", None)
+                        done(f"📨 {who}, apnar correction request pathano hoyeche ({made} ti). Manager approve korle correction hobe.")
+            return
+
+        pw_ok = mgr_check("rifix_pw")
+        conf = confirm_box("rifix_conf", "⚠️ Ami confirm korchi - ei change gulo stock-shoho save hobe.")
+        if st.button("💾 Correction save korun", type="primary", key="rifix_save", disabled=not can_write_ri()):
+            if not pw_ok:
+                st.error("Store Manager password din.")
+            elif not conf:
+                st.error("Confirm tick din.")
+            elif guard():
+                n_edit = n_del = 0
+                try:
+                    for tid, (ln, nq) in edits.items():
+                        if not pc_edit_tx(tid, nq, ln["date"], ln["notes"]):
+                            raise ValueError("ekta line-er correction hoyni (upore error dekhun)")
+                        n_edit += 1
+                    for ln in dels:
+                        if not delete_transaction(int(ln["id"])):
+                            raise ValueError("ekta line delete hoyni (upore error dekhun)")
+                        n_del += 1
+                except ValueError as e:
+                    st.error(f"{e}  (ei porjonto save hoyeche: {n_edit} qty change, {n_del} delete)")
+                    if n_edit or n_del:
+                        st.rerun()
+                    return
+                who = st.session_state.get("user", "")
+                audit("REQUISITION_ISSUE_FIX", f"{fac}: SR {sr} corrected by {who}: {n_edit} qty change(s), {n_del} line(s) removed")
+                st.session_state["ri_saved"] = {"user": who, "sr": sr, "kind": "fix", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
+                                                "detail": f"{n_edit} qty bodlano, {n_del} line bad"}
+                st.session_state.pop("rifix_pw", None)
+                st.session_state.pop("rifix_conf", None)
+                done(f"✅ {who}, SR {sr}-er correction sofolbhabe save hoyeche ({n_edit} qty bodlano, {n_del} line bad).")
+
+
+@tx
+def ri_create_requests(fac, sr, items, reason, slip_date, slip_type):
+    """Stores correction requests (nothing in stock changes yet). Returns (created, skipped-because-already-pending)."""
+    who = st.session_state.get("user", "")
+    now = local_now().strftime("%d-%b-%Y %I:%M %p")
+    made = skipped = 0
+    for it in items:
+        if it["action"] == "Add item":
+            dup = q("""SELECT 1 FROM ri_correction_requests WHERE factory_name=%s AND req_no=%s AND action='Add item' AND sl_no=%s
+                       AND status='Pending'""", (fac, sr, it["sl_no"]))
+        else:
+            dup = q("SELECT 1 FROM ri_correction_requests WHERE tx_id=%s AND status='Pending'", (it["tx_id"],))
+        if dup:
+            skipped += 1
+            continue
+        run("""INSERT INTO ri_correction_requests (factory_name, req_no, action, tx_id, sl_no, prod_id, item_name, old_qty, new_qty,
+               reason, slip_date, slip_type, requested_by, requested_at, status) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'Pending')""",
+            (fac, sr, it["action"], it["tx_id"], it["sl_no"], it["prod_id"], it["item_name"], it["old_qty"], it["new_qty"],
+             reason, slip_date, slip_type, who, now))
+        made += 1
+    if made:
+        audit("RI_CORRECTION_REQUEST", f"{fac}: SR {sr}: {made} correction request(s) by {who} - {reason}")
+    return made, skipped
+
+
+@tx
+def ri_mark_request(rid, status, who, note):
+    run("""UPDATE ri_correction_requests SET status=%s, decided_by=%s, decided_at=%s, decision_note=%s
+           WHERE id=%s AND status='Pending'""", (status, who, local_now().strftime("%d-%b-%Y %I:%M %p"), note, rid))
+    audit(f"RI_CORRECTION_{status.upper()}", f"Request #{rid} {status.lower()} by {who}" + (f" - {note}" if note else ""))
+    return True
+
+
+def _ri_pending_n(fac, sr=None):
+    try:
+        if sr is None:
+            return int(q("SELECT COUNT(*) AS n FROM ri_correction_requests WHERE factory_name=%s AND status='Pending'", (fac,))[0]["n"])
+        return int(q("SELECT COUNT(*) AS n FROM ri_correction_requests WHERE factory_name=%s AND req_no=%s AND status='Pending'",
+                     (fac, sr))[0]["n"])
+    except Exception:
+        return 0
+
+
+def _ri_apply_request(r, who):
+    """Does what the request asks (stock-safe functions). Returns (ok, message). Nothing is changed when ok is False."""
+    try:
+        if r["action"] in ("Change qty", "Remove line"):
+            cur = q("SELECT id, qty, notes, date FROM transactions WHERE id=%s", (r["tx_id"],))
+            if not cur:
+                return False, "Oi line ar nei (ager-i delete hoyeche). Request ta Reject korun."
+            c = cur[0]
+            if abs(float(c["qty"] or 0) - float(r["old_qty"] or 0)) > 1e-9:
+                return False, (f"Request-er por line-er qty bodle gese (ekhon {float(c['qty']):g}, request-e chilo {float(r['old_qty']):g}). "
+                               "Reject kore notun request nite bolun.")
+            done_ = (pc_edit_tx(int(r["tx_id"]), float(r["new_qty"]), c["date"], c["notes"]) if r["action"] == "Change qty"
+                     else delete_transaction(int(r["tx_id"])))
+            if not done_:
+                return False, "Correction apply hoyni - upore database/stock error dekhun. Request pending-i ache."
+            return True, "Correction apply hoyeche."
+        d = parse_date(r["slip_date"])
+        n = save_requisition_issue(r["factory_name"], [(int(r["sl_no"]), float(r["new_qty"]), False)], (d.date() if d else date.today()),
+                                   r["req_no"], r["slip_type"] or "Issued",
+                                   f"[Correction request #{r['id']} by {r['requested_by']}, approved by {who}]", False)
+        return (True, "Item slip-e jog hoyeche.") if n else (False, "Item jog kora jayni - upore karon dekhun (stock kom / physical verification lagbe hote pare). Manual-e form theke korun.")
+    except ValueError as e:
+        return False, str(e)
+
+
+@_frag
+def _ri_requests_panel():
+    fac = FAC
+    is_mgr = st.session_state.get("role") == "Store Manager"
+    try:
+        pend = q("SELECT * FROM ri_correction_requests WHERE factory_name=%s AND status='Pending' ORDER BY id", (fac,))
+        hist = q("SELECT * FROM ri_correction_requests WHERE factory_name=%s AND status<>'Pending' ORDER BY id DESC LIMIT 15", (fac,))
+    except Exception:
+        return
+    if not pend and not hist:
+        return
+    if pend and is_mgr:
+        st.warning(f"📥 {len(pend)} ti correction request apnar approve-er opekkhay ache.")
+    with st.expander(f"📥 Correction request ({len(pend)} pending)", expanded=bool(pend and is_mgr)):
+        def _desc(r):
+            if r["action"] == "Change qty":
+                return f"qty {float(r['old_qty']):g} → {float(r['new_qty']):g}"
+            if r["action"] == "Remove line":
+                return f"line bad ({float(r['old_qty']):g} pcs)"
+            return f"aro item jog: {float(r['new_qty']):g} pcs"
+        if pend:
+            pw_ok = mgr_check("rireq_pw") if is_mgr else False
+            for r in pend:
+                with st.container(border=True):
+                    st.markdown(f"**#{r['id']} · SR {r['req_no']}** · {r['item_name']} · {_desc(r)}")
+                    st.caption(f"Karon: {r['reason']} · pathiyeche: {r['requested_by']} · {r['requested_at']}")
+                    if is_mgr:
+                        note = st.text_input("Manager-er note (reject korle karon likhun)", key=f"rireq_note_{r['id']}").strip()
+                        b1, b2, _ = st.columns([1, 1, 4])
+                        if b1.button("✅ Approve", key=f"rireq_ok_{r['id']}", type="primary"):
+                            if not pw_ok:
+                                st.error("Store Manager password din.")
+                            elif guard():
+                                who = st.session_state.get("user", "")
+                                ok, msg = _ri_apply_request(r, who)
+                                if ok:
+                                    ri_mark_request(int(r["id"]), "Approved", who, note)
+                                    st.session_state["ri_saved"] = {"user": who, "sr": r["req_no"], "kind": "fix",
+                                                                    "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
+                                                                    "detail": f"request #{r['id']} approve ({_desc(r)})"}
+                                    done(f"✅ Request #{r['id']} approve hoyeche - SR {r['req_no']}: {_desc(r)}.")
+                                else:
+                                    st.error(msg)
+                        if b2.button("❌ Reject", key=f"rireq_no_{r['id']}"):
+                            if len(note) < 3:
+                                st.error("Reject-er karon note-e likhun.")
+                            elif guard():
+                                ri_mark_request(int(r["id"]), "Rejected", st.session_state.get("user", ""), note)
+                                done(f"Request #{r['id']} reject kora hoyeche.")
+                    else:
+                        st.caption("⏳ Manager approve-er opekkhay.")
+        if hist:
+            st.markdown("**Shomproti shiddhanto howa request**")
+            hv = pd.DataFrame([{"#": r["id"], "SR": r["req_no"], "Item": r["item_name"], "Change": _desc(r), "Status": r["status"],
+                                "Requested by": r["requested_by"], "Decided by": r["decided_by"], "Note": r["decision_note"] or "",
+                                "Date": r["decided_at"]} for r in hist])
+            st.dataframe(hv, hide_index=True, use_container_width=True, height=min(80 + 35 * len(hv), 360))
+
+
+def render_ri_request_notice():
+    """Dashboard: tells the Store Manager when correction requests are waiting."""
+    if st.session_state.get("role") != "Store Manager" or "CONSOLIDATED" in str(FAC):
+        return
+    n = _ri_pending_n(FAC)
+    if n:
+        st.warning(f"📥 Requisition Issue-e {n} ti correction request approve-er opekkhay ache.")
+        st.button("Requisition Issue khulun →", key="ri_req_go", on_click=go_page, args=(NAV_REQ_ISSUE, None))
+
+
+def can_write_ri():
+    return bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
 
 
 # ============================================================
@@ -15875,6 +16249,9 @@ try:
     if not st.session_state.get("_req_link_table_ready"):
         run_once_per_process("req_link_table", ensure_req_link_table)
         st.session_state["_req_link_table_ready"] = True
+    if not st.session_state.get("_ri_request_table_ready"):
+        run_once_per_process("ri_request_table", ensure_ri_request_table)
+        st.session_state["_ri_request_table_ready"] = True
 except Exception as e:
     st.error(f"Database setup/migration failed: {e}")
     st.stop()
