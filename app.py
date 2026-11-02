@@ -12506,9 +12506,11 @@ def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_
     sls = [int(a[0]) for a in lines]
     qtys = [float(a[1]) for a in lines]
     xfer = {int(a[0]): bool(a[2]) if len(a) > 2 else False for a in lines}
-    rows = run("""SELECT sl_no, COALESCE(prod_id,''), COALESCE(item_name,''), COALESCE(current_stock,0), COALESCE(size,'')
+    rates = {int(a[0]): (float(a[3]) if len(a) > 3 and a[3] else 0.0) for a in lines}
+    rows = run("""SELECT sl_no, COALESCE(prod_id,''), COALESCE(item_name,''), COALESCE(current_stock,0), COALESCE(size,''), COALESCE(unit_price,0)
                   FROM inventory WHERE factory_name=%s AND sl_no = ANY(%s) FOR UPDATE""", (fac, sls))
     info = {int(r[0]): (str(r[1]), str(r[2]), float(r[3] or 0), str(r[4])) for r in (rows or [])}
+    price0 = {int(r[0]): float(r[5] or 0) for r in (rows or [])}
     if len(info) != len(set(sls)):
         st.error("কিছু আইটেম আর পাওয়া যাচ্ছে না। পেজ রিফ্রেশ করে আবার চেষ্টা করুন।")
         return False
@@ -12531,6 +12533,10 @@ def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_
         bad_short.append(f"{pid_} (স্টক {stk_:g}, দিচ্ছেন {q_:g})")
     if bad_short:
         st.error("স্টক কম / ট্রান্সফার সম্ভব নয় বা নিশ্চিত করা হয়নি — কিছুই সংরক্ষণ হয়নি: " + "; ".join(bad_short))
+        return False
+    no_rate = [info[sl][0] for sl in sls if price0.get(sl, 0) <= 0 and rates.get(sl, 0) <= 0]
+    if no_rate:
+        st.error("এই আইটেমগুলোর Rate নেই — Rate দিয়ে আবার সংরক্ষণ করুন: " + ", ".join(no_rate))
         return False
     vm = _ri_verif_many(fac, sls, tx_dt)
     need = [info[sl][1] for sl in sls if vm.get(sl, (False, 0))[0]]
@@ -12561,6 +12567,13 @@ def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_
     run("""UPDATE inventory SET current_stock = current_stock - v.q
            FROM (SELECT unnest(%s::int[]) AS sl, unnest(%s::float8[]) AS q) v
            WHERE inventory.factory_name=%s AND inventory.sl_no=v.sl""", (sls, qtys, fac))
+    new_price = [(sl, rates[sl]) for sl in sls if price0.get(sl, 0) <= 0 and rates.get(sl, 0) > 0]
+    if new_price:   # item had no rate: the rate given now becomes the item's rate (reports / budget pick it up)
+        run("""UPDATE inventory SET unit_price = v.p
+               FROM (SELECT unnest(%s::int[]) AS sl, unnest(%s::float8[]) AS p) v
+               WHERE inventory.factory_name=%s AND inventory.sl_no=v.sl""", ([a for a, _ in new_price], [b for _, b in new_price], fac))
+        for sl_, p_ in new_price:
+            audit("SET_PRICE", f"{fac}: {info[sl_][1]} unit price 0 -> {p_:g} (Requisition Issue SR {sr_no})")
     run("""INSERT INTO transactions (factory_name, officer_name, sl_no, prod_id, item_name, qty, trans_type, day, notes, date, time,
                   verification_status, erp_grn_status, supplier_name, challan_no, po_pending_flag, po_pending_date,
                   unit_price_at_tx, req_no, section)
@@ -12694,7 +12707,7 @@ def ri_set_section(fac, sr, section):
 
 
 def tab_req_issue():
-    st.title("🧾 Requisition Issue & Supplier Receipt")
+    st.markdown("#### 🧾 Requisition Issue & Supplier Receipt")
     if is_cons_view:
         st.info("ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ ইস্যু/রিসিভ করা যায় না)।")
         return
@@ -12708,6 +12721,7 @@ def tab_req_issue():
     except Exception as e:
         st.error(f"req_no column setup failed: {e}")
         return
+    is_mgr = st.session_state.get("role") == "Store Manager"
     mode = st.radio("Ki korben?", ["📤 Issue (SR slip)", "📥 Supplier Receipt (Challan)"], horizontal=True, key="ri_mode",
                     label_visibility="collapsed")
     if not mode.startswith("📥"):
@@ -12715,21 +12729,27 @@ def tab_req_issue():
             render_count_gate_banner()
         except Exception:
             pass
-    if not mode.startswith("📥"):
-        _ri_section_manager()
     _ri_saved_banner()
-    _ri_requests_panel()
     if mode.startswith("📥"):
-        st.caption(f"📍 Ei receipt **{FAC}**-e save hobe. Ek challan-er shob item (sorbocho {RR_MAX_LINES} ti) ek sathe receive korun. "
-                   "Supplier ar Challan No. bad-dhomulok. Receive korle stock bare, ar item-er requisition thakle tar Received qty auto jog hoy. "
-                   "Dekhben: 🔍 ERP Audit → 📥 Product Received.")
+        st.caption(f"📍 Ei receipt **{FAC}**-e save hobe · Ek challan-er shob item (sorbocho {RR_MAX_LINES} ti) ek sathe · "
+                   "Supplier ar Challan No. bad-dhomulok · Dekhben: 🔍 ERP Audit → 📥 Product Received.")
         _rr_form()
         _rr_fix_panel()
-        return
-    st.caption(f"একটা রিকুইজিশন স্লিপের সব আইটেম (সর্বোচ্চ {RI_MAX_LINES}টি) এক SR নম্বরে একসাথে ইস্যু করুন। "
-               "SR নম্বর বাধ্যতামূলক। স্টক কম হলে অন্য Unit থেকে অটো-ট্রান্সফার (নিশ্চিত করলে) হবে; না হলে কিছুই সংরক্ষণ হয় না।")
-    _ri_form()
-    _ri_fix_panel()
+    else:
+        _ri_form()
+        _ri_fix_panel()
+        st.caption(f"ℹ️ এক SR-এ সর্বোচ্চ {RI_MAX_LINES}টি আইটেম · SR নম্বর ও Section বাধ্যতামূলক · স্টক কম হলে অন্য Unit থেকে অটো-ট্রান্সফার (নিশ্চিত করলে); না হলে কিছুই সংরক্ষণ হয় না।")
+    if is_mgr:                      # Store Manager only - officers never see these two
+        if not mode.startswith("📥"):
+            _ri_section_manager()
+        _ri_requests_panel()
+
+
+def _ri_box(h):
+    try:
+        return st.container(height=int(h))
+    except TypeError:
+        return st.container()
 
 
 @_frag   # typing / adding rows re-runs ONLY this block - the rest of the app is not touched
@@ -12737,14 +12757,13 @@ def _ri_form():
     fac = FAC
     gen = st.session_state.get("ri_gen", 0)
     lines = st.session_state.setdefault("ri_lines", [])
-    c1, c2, c3 = st.columns([1.1, 1, 1.2])
+    c1, c2, c3, c4 = st.columns([1, 1, 1.1, 1.3])
     sr_no = c1.text_input("Requisition No. (SR No.) *", key=f"ri_sr_{gen}", placeholder="e.g. 1745").strip()
     tx_date = c2.date_input("তারিখ", value=date.today(), max_value=date.today(), key="ri_date")
     ttype = c3.selectbox("ধরন", list(ISSUE_TYPES), format_func=lambda c: TRANS_LABELS.get(c, c), key="ri_type")
-    n1, n2 = st.columns([1.4, 1])
-    notes = n1.text_input("Remarks (ঐচ্ছিক — কে চেয়েছে ইত্যাদি)", key=f"ri_notes_{gen}")
-    with n2:
+    with c4:
         section = _ri_section_pick(f"ri_sec_{gen}", fac)
+    notes = ""
     confirm_existing = True
     if sr_no:
         used = q_c("SELECT COUNT(*) AS n FROM transactions WHERE factory_name=%s AND req_no=%s", (fac, sr_no))
@@ -12754,15 +12773,14 @@ def _ri_form():
             confirm_existing = st.checkbox(f"হ্যাঁ, SR {sr_no}-তে আরও আইটেম যোগ করছি", key=f"ri_conf_{gen}")
 
     # ---- add one item
-    st.markdown("**➕ আইটেম যোগ করুন**")
     # Category first: pick one and the item box below lists every item of that category (click the box and the list opens;
     # type in it to narrow down). "সব Category" keeps the old behaviour: type a name / code in the search box.
     ALL_CAT = "সব Category"
     cat_rows = q_c("""SELECT DISTINCT COALESCE(NULLIF(TRIM(category),''),'(Category নেই)') AS c FROM inventory
                       WHERE factory_name=%s ORDER BY 1""", (fac,))
-    cat_sel = st.selectbox("📂 Category", [ALL_CAT] + [r["c"] for r in cat_rows], key=f"ri_cat_{gen}")
-    a1, a2, a3 = st.columns([2.2, 2.4, 1])
-    term = a1.text_input("🔍 খুঁজুন (নাম / ERP code / size / serial)", key=f"ri_search_{gen}",
+    a0, a1, a2, a3, a4 = st.columns([1.2, 1.5, 2.6, 0.8, 0.9])
+    cat_sel = a0.selectbox("📂 Category", [ALL_CAT] + [r["c"] for r in cat_rows], key=f"ri_cat_{gen}")
+    term = a1.text_input("🔍 খুঁজুন (নাম / code / size)", key=f"ri_search_{gen}",
                          help="Category বাছলে নাম না লিখেও ডানের ‘আইটেম’ বক্সে ওই Category-র সব আইটেম দেখা যাবে; লিখলে তালিকা ছোট হবে।").strip()
     if cat_sel != ALL_CAT:
         like = f"%{term.lower()}%"
@@ -12806,14 +12824,16 @@ def _ri_form():
             except Exception:
                 unit_v = "Pcs"
             cur.append({"sl": int(r["sl_no"]), "pid": r["prod_id"], "name": r["item_name"], "size": r["size"], "unit": unit_v,
-                        "stock": float(r["stock"]), "need": bool(need), "days": int(days), "vdate": date_v})
+                        "stock": float(r["stock"]), "price": float(r.get("price") or 0), "need": bool(need), "days": int(days), "vdate": date_v})
+            st.session_state[f"ri_r_{gen}_{int(r['sl_no'])}"] = 0.0
             st.session_state[f"ri_u_{gen}_{int(r['sl_no'])}"] = unit_v
             st.session_state[f"ri_q_{gen}_{int(r['sl_no'])}"] = qty_v
             st.session_state["ri_lines"] = cur
             st.session_state[f"ri_search_{gen}"] = ""
             st.session_state[f"ri_qty_{gen}"] = 0.0
             st.session_state["ri_msg"] = ("ok", f"যোগ হয়েছে: {r['item_name']}")
-    st.button("➕ তালিকায় যোগ করুন", key=f"ri_add_{gen}", on_click=_add)
+    a4.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
+    a4.button("➕ যোগ করুন", key=f"ri_add_{gen}", on_click=_add, use_container_width=True)
     msg = st.session_state.pop("ri_msg", None)
     if msg:
         (st.error if msg[0] == "error" else st.caption)(msg[1])
@@ -12821,73 +12841,85 @@ def _ri_form():
     # ---- the list
     st.markdown(f"**📋 এই স্লিপের আইটেম ({len(lines)}/{RI_MAX_LINES})**")
     if not lines:
-        st.info("এখনো কোনো আইটেম যোগ হয়নি।")
+        st.caption("এখনো কোনো আইটেম যোগ হয়নি।")
         return
-    h = st.columns([0.4, 2.9, 1.2, 0.9, 1.1, 1.3, 1.5, 0.7])
-    for col, t in zip(h, ["#", "আইটেম", "ERP Code", "স্টক", "Unit (বদলানো যায়)", "ইস্যু পরিমাণ", "অবস্থা", ""]):
-        col.caption(t)
-    if any(ln.get("vdate") != tx_date for ln in lines):   # date changed after the item was added -> re-check the 3-day rule (1 query)
-        try:
-            vm_ = _ri_verif_many(fac, [ln["sl"] for ln in lines], tx_date)
-            for ln in lines:
-                ln["need"], ln["days"] = vm_.get(int(ln["sl"]), (False, 0))
-                ln["vdate"] = tx_date
-        except Exception:
-            pass
-    remove = None
-    qtys, bad = [], False
-    xfer_flags = {}
-    xcache = st.session_state.setdefault("ri_other_cache", {})
-    uoms = get_uoms()
-    can_write_ui = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
-    for i, ln in enumerate(lines):
-        r = st.columns([0.4, 2.9, 1.2, 0.9, 1.1, 1.3, 1.5, 0.7])
-        r[0].write(i + 1)
-        r[1].write(f"{ln['name']} [{ln['size'] or '-'}]")
-        r[2].write(ln["pid"])
-        r[3].write(f"{ln['stock']:g}")
-        _cu = ln.get("unit") or "Pcs"
-        _uk = f"ri_u_{gen}_{ln['sl']}"
-        if _uk not in st.session_state:
-            st.session_state[_uk] = _cu
-        r[4].selectbox("unit", uoms if _cu in uoms else uoms + [_cu], key=_uk, label_visibility="collapsed",
-                       disabled=not can_write_ui, on_change=_ri_uom_changed, args=(fac, ln["sl"], _uk, ln["name"]),
-                       help="UOM ভুল থাকলে এখানেই বদলান — সঙ্গে সঙ্গে item-এ চূড়ান্তভাবে সেভ হয়ে যায়।")
-        q_ = r[5].number_input("q", min_value=0.0, step=1.0, format="%g", key=f"ri_q_{gen}_{ln['sl']}", label_visibility="collapsed")
-        qtys.append(float(q_))
-        if q_ <= 0:
-            r[6].write("⚠️ পরিমাণ দিন")
-            bad = True
-        elif q_ > ln["stock"] + 1e-9:
-            shortage = q_ - ln["stock"]
-            ck = (gen, ln["sl"], round(shortage, 6))
-            if ck not in xcache:
-                try:
-                    xcache[ck] = find_same_in_other(ln["pid"], ln["name"], other_factory(fac), ln["size"], need=shortage)
-                except Exception:
-                    xcache[ck] = None
-            other = xcache[ck]
-            if other and float(other["stock"] or 0) >= shortage:
-                ok_x = r[6].checkbox("🔁 ট্রান্সফার নিশ্চিত", key=f"ri_x_{gen}_{ln['sl']}")
-                xfer_flags[ln["sl"]] = ok_x
-                if not ok_x:
-                    bad = True
-                note_x = (f"⚠️ {ln['name']}: স্টক কম {shortage:g}। {other['factory_name']} থেকে অটো-ট্রান্সফার হবে "
-                          f"({other['item_name']} [{other['prod_id']}], size {other['size'] or '-'}, স্টক {float(other['stock']):g}, "
-                          f"মিল: {other['level']} {int(round(float(other.get('score', 1.0)) * 100))}%)।")
-                if other["level"] == "fuzzy":
-                    note_x += " নাম হুবহু এক নয় — দুটো একই আইটেম কিনা দেখে নিশ্চিত করুন।"
-                st.caption(note_x)
+    with _ri_box(min(70 + 52 * len(lines), 280)):
+        h = st.columns([0.35, 2.5, 1.1, 0.8, 1.0, 1.0, 1.0, 1.4, 0.6])
+        for col, t in zip(h, ["#", "আইটেম", "ERP Code", "স্টক", "Unit", "Rate (৳)", "ইস্যু পরিমাণ", "অবস্থা", ""]):
+            col.caption(t)
+        if any(ln.get("vdate") != tx_date for ln in lines):   # date changed after the item was added -> re-check the 3-day rule (1 query)
+            try:
+                vm_ = _ri_verif_many(fac, [ln["sl"] for ln in lines], tx_date)
+                for ln in lines:
+                    ln["need"], ln["days"] = vm_.get(int(ln["sl"]), (False, 0))
+                    ln["vdate"] = tx_date
+            except Exception:
+                pass
+        remove = None
+        qtys, rates, bad = [], [], False
+        xfer_flags = {}
+        xcache = st.session_state.setdefault("ri_other_cache", {})
+        uoms = get_uoms()
+        can_write_ui = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
+        for i, ln in enumerate(lines):
+            r = st.columns([0.35, 2.5, 1.1, 0.8, 1.0, 1.0, 1.0, 1.4, 0.6])
+            r[0].write(i + 1)
+            r[1].write(f"{ln['name']} [{ln['size'] or '-'}]")
+            r[2].write(ln["pid"])
+            r[3].write(f"{ln['stock']:g}")
+            _cu = ln.get("unit") or "Pcs"
+            _uk = f"ri_u_{gen}_{ln['sl']}"
+            if _uk not in st.session_state:
+                st.session_state[_uk] = _cu
+            r[4].selectbox("unit", uoms if _cu in uoms else uoms + [_cu], key=_uk, label_visibility="collapsed",
+                           disabled=not can_write_ui, on_change=_ri_uom_changed, args=(fac, ln["sl"], _uk, ln["name"]),
+                           help="UOM ভুল থাকলে এখানেই বদলান — সঙ্গে সঙ্গে item-এ চূড়ান্তভাবে সেভ হয়ে যায়।")
+            _pr = float(ln.get("price") or 0)
+            if _pr > 0:
+                r[5].write(f"৳{_pr:g}")
+                rt_ = _pr
             else:
-                r[6].write("⛔ স্টক কম")
-                st.caption(f"⛔ {ln['name']}: শর্টেজ {shortage:g} — অন্য Unit-এ যথেষ্ট স্টক / একই আইটেম নেই।")
+                rt_ = float(r[5].number_input("rate", min_value=0.0, step=1.0, format="%g", key=f"ri_r_{gen}_{ln['sl']}",
+                                              label_visibility="collapsed", help="এই আইটেমের Rate আগে দেওয়া হয়নি — Rate দিন, এটাই আইটেমের Rate হিসেবে সেভ হবে।"))
+            rates.append(rt_)
+            miss_rate = rt_ <= 0
+            if miss_rate:
                 bad = True
-        elif ln["need"]:
-            r[6].write(f"🔎 যাচাই লাগবে ({ln['days']} দিন)")
-        else:
-            r[6].write("✅")
-        if r[7].button("✖", key=f"ri_rm_{gen}_{ln['sl']}", help="সারি মুছুন"):
-            remove = i
+            q_ = r[6].number_input("q", min_value=0.0, step=1.0, format="%g", key=f"ri_q_{gen}_{ln['sl']}", label_visibility="collapsed")
+            qtys.append(float(q_))
+            if q_ <= 0:
+                r[7].write("⚠️ পরিমাণ দিন")
+                bad = True
+            elif q_ > ln["stock"] + 1e-9:
+                shortage = q_ - ln["stock"]
+                ck = (gen, ln["sl"], round(shortage, 6))
+                if ck not in xcache:
+                    try:
+                        xcache[ck] = find_same_in_other(ln["pid"], ln["name"], other_factory(fac), ln["size"], need=shortage)
+                    except Exception:
+                        xcache[ck] = None
+                other = xcache[ck]
+                if other and float(other["stock"] or 0) >= shortage:
+                    ok_x = r[7].checkbox("🔁 ট্রান্সফার নিশ্চিত", key=f"ri_x_{gen}_{ln['sl']}")
+                    xfer_flags[ln["sl"]] = ok_x
+                    if not ok_x:
+                        bad = True
+                    note_x = (f"⚠️ {ln['name']}: স্টক কম {shortage:g}। {other['factory_name']} থেকে অটো-ট্রান্সফার হবে "
+                              f"({other['item_name']} [{other['prod_id']}], size {other['size'] or '-'}, স্টক {float(other['stock']):g}, "
+                              f"মিল: {other['level']} {int(round(float(other.get('score', 1.0)) * 100))}%)।")
+                    if other["level"] == "fuzzy":
+                        note_x += " নাম হুবহু এক নয় — দুটো একই আইটেম কিনা দেখে নিশ্চিত করুন।"
+                    st.caption(note_x)
+                else:
+                    r[7].write("⛔ স্টক কম")
+                    st.caption(f"⛔ {ln['name']}: শর্টেজ {shortage:g} — অন্য Unit-এ যথেষ্ট স্টক / একই আইটেম নেই।")
+                    bad = True
+            elif ln["need"]:
+                r[7].write(f"🔎 যাচাই লাগবে ({ln['days']} দিন)")
+            else:
+                r[7].write("⚠️ Rate দিন" if miss_rate else "✅")
+            if r[8].button("✖", key=f"ri_rm_{gen}_{ln['sl']}", help="সারি মুছুন"):
+                remove = i
     if remove is not None:
         lines.pop(remove)
         st.session_state["ri_lines"] = lines
@@ -12895,18 +12927,17 @@ def _ri_form():
             st.rerun(scope="fragment")
         except TypeError:
             st.rerun()
-    st.caption(f"মোট আইটেম-লাইন: {len(lines)} · মোট পরিমাণ: {sum(qtys):g}")
     need_names = [ln["name"] for ln in lines if ln["need"]]
     verified = False
     if need_names:
         verified = st.checkbox("Physically verified — এই আইটেমগুলো ফিজিক্যালি গুনে দেখা হয়েছে: " + ", ".join(need_names),
                                key=f"ri_ver_{gen}")
-    po_pending = st.checkbox("ERP PO pending", key=f"ri_po_{gen}",
-                             help="এই স্লিপের সব লাইন ERP Audit → ERP PO Pending-এ ট্র্যাক হবে।")
     can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
-    if not can_write:
-        st.caption("সংরক্ষণ করতে login লাগবে (Auditor role শুধু দেখতে পারে)।")
-    if st.button("💾 সব সংরক্ষণ করুন", type="primary", key=f"ri_save_{gen}", use_container_width=True, disabled=not can_write):
+    f1, f2, f3 = st.columns([2, 1.2, 2.2])
+    f1.caption(f"মোট আইটেম-লাইন: {len(lines)} · মোট পরিমাণ: {sum(qtys):g}" + ("" if can_write else " · সংরক্ষণ করতে login লাগবে"))
+    po_pending = f2.checkbox("ERP PO pending", key=f"ri_po_{gen}",
+                             help="এই স্লিপের সব লাইন ERP Audit → ERP PO Pending-এ ট্র্যাক হবে।")
+    if f3.button("💾 সব সংরক্ষণ করুন", type="primary", key=f"ri_save_{gen}", use_container_width=True, disabled=not can_write):
         if not sr_no:
             st.error("Requisition No. (SR No.) লিখুন — এটা বাধ্যতামূলক।")
         elif (count_gate_status(fac) or {}).get("blocked"):
@@ -12914,11 +12945,11 @@ def _ri_form():
         elif ttype == "Issued" and not section:
             st.error("Section বাছুন (কোন section-এ গেল) — report / audit-এর জন্য এটা দরকার।")
         elif bad:
-            st.error("তালিকায় সমস্যা আছে (পরিমাণ ০ / স্টক কম / ট্রান্সফার নিশ্চিত করা হয়নি) — ঠিক করে আবার চেষ্টা করুন।")
+            st.error("তালিকায় সমস্যা আছে (পরিমাণ ০ / Rate নেই / স্টক কম / ট্রান্সফার নিশ্চিত করা হয়নি) — ঠিক করে আবার চেষ্টা করুন।")
         elif not confirm_existing:
             st.error("এই SR আগে ব্যবহার হয়েছে — নিশ্চিত করার টিক দিন।")
         elif guard():
-            n = save_requisition_issue(fac, [(ln["sl"], q_, xfer_flags.get(ln["sl"], False)) for ln, q_ in zip(lines, qtys)],
+            n = save_requisition_issue(fac, [(ln["sl"], q_, xfer_flags.get(ln["sl"], False), rt_) for ln, q_, rt_ in zip(lines, qtys, rates)],
                                        tx_date, sr_no, ttype, notes.strip(), verified, po_pending, section)
             if n:
                 _who = st.session_state.get("user", "")
