@@ -1254,6 +1254,9 @@ def ensure_req_no_column():
     try:
         with conn.cursor() as cur:
             cur.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS req_no TEXT")
+            cur.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS section TEXT")
+            cur.execute("""CREATE TABLE IF NOT EXISTS ri_sections (id SERIAL PRIMARY KEY, factory_name TEXT, section_name TEXT,
+                           UNIQUE(factory_name, section_name))""")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -6025,7 +6028,8 @@ def tab_issue_ledger():
     iss = qdf_c(f"""SELECT t.id, t.date, t.time, t.factory_name, t.item_name, COALESCE(i.size,'') AS size,
                   COALESCE(i.serial_no,'') AS serial_no, t.prod_id, t.sl_no, t.qty,
                   COALESCE(i.unit_price,0) AS unit_price, t.officer_name, t.trans_type, t.notes, t.verification_status,
-                  COALESCE(t.po_pending_flag,'') AS po_flag, COALESCE(t.req_no,'') AS req_no
+                  COALESCE(t.po_pending_flag,'') AS po_flag, COALESCE(t.req_no,'') AS req_no,
+                  COALESCE(t.section,'') AS section
                   FROM transactions t LEFT JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
                   WHERE t.trans_type IN ('Issued','Internal Issue'){fw(FAC, 't.')[0]} ORDER BY t.id DESC""", FP)
     if not iss.empty:
@@ -6060,7 +6064,7 @@ def tab_issue_ledger():
     view = iss
     t = term.strip().lower()
     if t:
-        scols = ["item_name", "serial_no", "prod_id", "size", "officer_name", "factory_name", "notes", "req_no"]
+        scols = ["item_name", "serial_no", "prod_id", "size", "officer_name", "factory_name", "notes", "req_no", "section"]
         m = view[scols].fillna("").astype(str).apply(lambda c: c.str.lower().str.contains(t, regex=False)).any(axis=1)
         view = view[m | (view["sl_no"].astype(str).str.strip() == t)]
     if mon != "All":
@@ -6085,10 +6089,10 @@ def tab_issue_ledger():
         st.info("Ei filter-e kono issue record nei.")
         return
 
-    _tab = lazy_tab_select(["📋 Issue Details", "📅 Date-wise Summary", "📦 Item-wise Summary", "✏️ ERP Balance Update", "🏷 Tag ERP PO Pending", "🧾 Requisition-wise"], "lz_issue")
+    _tab = lazy_tab_select(["📋 Issue Details", "📅 Date-wise Summary", "📦 Item-wise Summary", "✏️ ERP Balance Update", "🏷 Tag ERP PO Pending", "🧾 Requisition-wise", "🏭 Section-wise"], "lz_issue")
     if _tab == 0:
         detail = view.sort_values(["_dt", "id"], ascending=False)[
-            ["id", "date", "time", "req_no", "factory_name", "serial_no", "prod_id", "sl_no", "item_name", "size", "qty", "unit_price",
+            ["id", "date", "time", "req_no", "section", "factory_name", "serial_no", "prod_id", "sl_no", "item_name", "size", "qty", "unit_price",
              "total_value", "officer_name", "type", "verification_status", "erp_status", "notes"]]
         st.dataframe(detail, hide_index=True, use_container_width=True, height=380)
         export_buttons(detail, "issue_ledger")
@@ -6139,14 +6143,27 @@ def tab_issue_ledger():
         else:
             srt = (with_sr.groupby(["req_no"], as_index=False)
                    .agg(Date=("_dt", "max"), Lines=("id", "count"), Items=("sl_no", "nunique"), Qty=("qty", "sum"),
-                        Value=("total_value", "sum"), Officer=("officer_name", lambda x: ", ".join(sorted(set(map(str, x)))))))
+                        Value=("total_value", "sum"), Officer=("officer_name", lambda x: ", ".join(sorted(set(map(str, x))))),
+                         Section=("section", lambda x: ", ".join(sorted({str(s).strip() for s in x if str(s).strip()})))))
             srt = srt.sort_values(["Date", "req_no"], ascending=False)
             srt["Date"] = srt["Date"].dt.strftime(DATE_FMT)
-            srt.columns = ["SR No.", "Date", "Item lines issued", "Distinct items", "Total qty", "Value (৳)", "Officer"]
+            srt.columns = ["SR No.", "Date", "Item lines issued", "Distinct items", "Total qty", "Value (৳)", "Officer", "Section"]
             st.dataframe(srt, hide_index=True, use_container_width=True, height=420,
                          column_config={"Value (৳)": st.column_config.NumberColumn(format="%.0f")})
             export_buttons(srt, "issue_requisition_wise")
             st.caption("'Item lines issued' = ওই SR-এ কতগুলো আইটেম লাইন ইস্যু হয়েছে। ওপরের তারিখ/মাস ফিল্টার দিয়ে একদিনের সব SR মিলিয়ে দেখুন।")
+    if _tab == 6:
+        _sv = view.copy()
+        _sv["section"] = _sv["section"].astype(str).str.strip().replace("", "(Section deya hoyni)")
+        _sw = (_sv.groupby(["factory_name", "section"], as_index=False)
+               .agg(SRs=("req_no", lambda x: len({str(s).strip() for s in x if str(s).strip()})), Lines=("id", "count"),
+                    Items=("sl_no", "nunique"), Qty=("qty", "sum"), Value=("total_value", "sum"))
+               .sort_values(["factory_name", "Value"], ascending=[True, False]))
+        _sw.columns = ["Factory", "Section", "SR count", "Item lines", "Distinct items", "Total qty", "Value (৳)"]
+        st.markdown("**Section-wise issue (ওপরের ফিল্টার অনুযায়ী)**")
+        st.dataframe(_sw, hide_index=True, use_container_width=True, height=420,
+                     column_config={"Value (৳)": st.column_config.NumberColumn(format="%.0f")})
+        export_buttons(_sw, "issue_section_wise")
     tx_manager_panel(view[["id", "item_name", "qty", "date"]], "il", "🔐 Manager: Delete / Edit an issue entry")
 
 
@@ -9603,6 +9620,106 @@ def _pick_to_search(term):
     st.session_state.pop(_pck("pc_pick"), None)
 
 
+# ------------------------------------------------------------------
+#  Weekly compulsory Physical Count (system-picked items). Week = Saturday..Friday.
+#  Mode: Off / Warn / Block. Block = Requisition Issue "Issued" save is stopped (Store Manager is never blocked)
+#  when this week's quota of system-picked items is not counted by the due day.
+# ------------------------------------------------------------------
+CG_DAYS = ["শনিবার", "রবিবার", "সোমবার", "মঙ্গলবার", "বুধবার", "বৃহস্পতিবার"]
+
+
+def count_gate_settings():
+    d = {}
+    try:
+        for r in q_c("SELECT setting_key, setting_value FROM req_settings WHERE setting_key LIKE 'count_gate|%'"):
+            d[str(r["setting_key"]).split("|", 1)[1]] = r["setting_value"]
+    except Exception:
+        pass
+    def _i(k, dflt):
+        try:
+            return int(d.get(k))
+        except Exception:
+            return dflt
+    mode = d.get("mode") if d.get("mode") in ("Off", "Warn", "Block") else "Block"
+    return {"mode": mode, "target": max(1, _i("target", 5)), "due": min(5, max(0, _i("due", 4)))}
+
+
+@tx
+def count_gate_save(mode, target, due):
+    for k, v in (("mode", mode), ("target", str(int(target))), ("due", str(int(due)))):
+        run("""INSERT INTO req_settings (setting_key, setting_value) VALUES (%s,%s)
+               ON CONFLICT (setting_key) DO UPDATE SET setting_value=EXCLUDED.setting_value""", (f"count_gate|{k}", v))
+    audit("COUNT_GATE_SETTING", f"Weekly count rule: mode={mode}, target={target}, due={CG_DAYS[int(due)]}")
+    return True
+
+
+def count_gate_status(fac):
+    """Weekly progress of the system-picked items. Returns None when it cannot be worked out (never blocks then)."""
+    s = count_gate_settings()
+    if s["mode"] == "Off" or "CONSOLIDATED" in str(fac):
+        return None
+    try:
+        today = local_now().date()
+        off = (today.weekday() - 5) % 7                     # Saturday = 0
+        ws = today - timedelta(days=off)
+        days = [ws + timedelta(days=i) for i in range(off + 1)]
+        try:
+            get_today_picks(fac)                            # makes sure today's list exists
+        except Exception:
+            pass
+        keys = [f"count_picks|{fac}|{d:%Y-%m-%d}" for d in days]
+        picked = set()
+        for r in q_c("SELECT setting_value FROM req_settings WHERE setting_key = ANY(%s)", (keys,)):
+            try:
+                picked |= {int(p["sl_no"]) for p in json.loads(r["setting_value"])}
+            except Exception:
+                pass
+        counted = {int(r["sl_no"]) for r in q_c("""SELECT DISTINCT sci.sl_no FROM stock_count_items sci
+                                                  JOIN stock_counts sc ON sc.id=sci.count_id
+                                                  WHERE sci.factory_name=%s AND LEFT(sc.counted_at,11) = ANY(%s)""",
+                                               (fac, [f"{d:%d-%b-%Y}" for d in days]))}
+    except Exception:
+        return None
+    need = min(s["target"], len(picked))
+    done = len(picked & counted)
+    due_date = ws + timedelta(days=s["due"])
+    overdue = today >= due_date
+    blocked = s["mode"] == "Block" and done < need and overdue and st.session_state.get("role") != "Store Manager"
+    return {"mode": s["mode"], "done": done, "need": need, "due_name": CG_DAYS[s["due"]], "overdue": overdue, "blocked": blocked}
+
+
+def render_count_gate_banner():
+    g = count_gate_status(FAC)
+    if not g or g["need"] == 0 or g["done"] >= g["need"]:
+        return
+    c1, c2 = st.columns([5, 1.4])
+    if g["blocked"]:
+        c1.error(f"🚫 এই সপ্তাহের compulsory Physical Count শেষ হয়নি ({g['done']}/{g['need']}) — Issue save বন্ধ। "
+                 "📱 Physical Count → 🎯 তালিকার আইটেমগুলো গুনুন, তারপর আবার Issue করুন।")
+    elif g["overdue"]:
+        c1.warning(f"⚠️ এই সপ্তাহের Physical Count {g['done']}/{g['need']} — সময় পার হয়ে গেছে ({g['due_name']})। এখনই গুনুন।")
+    else:
+        c1.warning(f"🎯 এই সপ্তাহের Physical Count {g['done']}/{g['need']} — {g['due_name']}-এর মধ্যে শেষ না করলে Issue save বন্ধ হয়ে যাবে।")
+    c2.button("📱 গুনতে যান", key="cg_go", on_click=go_page, args=("📱 Physical Count", None), use_container_width=True)
+
+
+def render_count_gate_panel():
+    """Physical Count page: weekly progress for everyone; the rule itself can be changed by the Store Manager only."""
+    g = count_gate_status(FAC)
+    if g:
+        st.caption(f"📅 এই সপ্তাহের compulsory count: **{g['done']}/{g['need']}** (সিস্টেমের বাছাই করা আইটেম) · শেষ করার দিন: {g['due_name']} · Mode: {g['mode']}")
+    if st.session_state.get("role") == "Store Manager":
+        s = count_gate_settings()
+        with st.expander("⚙️ Weekly count rule (শুধু Store Manager)"):
+            m = st.selectbox("Mode", ["Block", "Warn", "Off"], index=["Block", "Warn", "Off"].index(s["mode"]), key="cg_mode",
+                             help="Block = সপ্তাহের count বাকি থাকলে Requisition Issue save বন্ধ। Warn = শুধু সতর্কতা। Off = বন্ধ।")
+            t = st.number_input("সপ্তাহে কয়টি আইটেম গুনতেই হবে", min_value=1, max_value=60, value=int(s["target"]), step=1, key="cg_target")
+            dd = st.selectbox("কোন দিনের মধ্যে শেষ করতে হবে", CG_DAYS, index=int(s["due"]), key="cg_due")
+            if st.button("💾 Rule save korun", key="cg_save") and guard():
+                if count_gate_save(m, int(t), CG_DAYS.index(dd)):
+                    done("✅ Weekly count rule save hoyeche.")
+
+
 def count_picks_panel():
     """Sits above the entry form on the Physical Count page. System stock is NOT shown, so the count stays blind."""
     if "CONSOLIDATED" in str(FAC):
@@ -9616,6 +9733,10 @@ def count_picks_panel():
         st.caption(f"আজকের ৫টি আইটেমের তালিকা তৈরি করা যায়নি: {e}")
         return
     st.markdown('<div class="section-title">🎯 আজ কোন ৫টি আইটেম গুনবেন — সিস্টেম বলে দিচ্ছে</div>', unsafe_allow_html=True)
+    try:
+        render_count_gate_panel()
+    except Exception:
+        pass
     if not picks:
         st.caption("গোনার মতো আইটেম পাওয়া যায়নি (stock > 0 আইটেম নেই)।")
         return
@@ -12362,7 +12483,7 @@ def _ri_verif_many(fac, sls, tx_dt):
 
 
 @tx
-def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_pending=False):
+def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_pending=False, section=""):
     """lines = [(sl_no, qty, xfer_ok)]. All-or-nothing: stock is re-read and locked, every line is checked first, then
     ONE update + ONE insert (+ one audit insert) write the whole slip. A line whose qty is above stock is covered by an
     auto-transfer from the other unit (same rule as the Transactions tab) when the user confirmed it."""
@@ -12427,19 +12548,85 @@ def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_
            WHERE inventory.factory_name=%s AND inventory.sl_no=v.sl""", (sls, qtys, fac))
     run("""INSERT INTO transactions (factory_name, officer_name, sl_no, prod_id, item_name, qty, trans_type, day, notes, date, time,
                   verification_status, erp_grn_status, supplier_name, challan_no, po_pending_flag, po_pending_date,
-                  unit_price_at_tx, req_no)
-           SELECT %s, %s, v.sl, v.pid, v.nm, v.q, %s, %s, v.nt, %s, %s, v.vs, 'Not Required', '', '', %s, %s::text, NULL::float8, %s
+                  unit_price_at_tx, req_no, section)
+           SELECT %s, %s, v.sl, v.pid, v.nm, v.q, %s, %s, v.nt, %s, %s, v.vs, 'Not Required', '', '', %s, %s::text, NULL::float8, %s, %s
            FROM (SELECT unnest(%s::int[]) AS sl, unnest(%s::text[]) AS pid, unnest(%s::text[]) AS nm,
                         unnest(%s::float8[]) AS q, unnest(%s::text[]) AS vs, unnest(%s::text[]) AS nt) v""",
-        (fac, user, ttype, tx_dt.day, date_s, time_s, po_flag, po_date, sr_no,
+        (fac, user, ttype, tx_dt.day, date_s, time_s, po_flag, po_date, sr_no, section or "",
          sls, [info[sl][0] for sl in sls], [info[sl][1] for sl in sls], qtys, vstat, line_notes))
-    details = [f"{fac}: {ttype} {q_:g} of {info[sl][0]} ({info[sl][1]}) [SR {sr_no}]" + (" [ERP PO Pending ticked]" if po_pending else "")
+    details = [f"{fac}: {ttype} {q_:g} of {info[sl][0]} ({info[sl][1]}) [SR {sr_no}]" + (f" [Section {section}]" if section else "") + (" [ERP PO Pending ticked]" if po_pending else "")
                for sl, q_ in zip(sls, qtys)]
     run("""INSERT INTO audit_logs (timestamp, username, action_type, details)
            SELECT %s, %s, 'TRANSACTION', d FROM unnest(%s::text[]) AS d""",
         (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user or "SYSTEM", details))
-    audit("REQUISITION_ISSUE", f"{fac}: SR {sr_no} - {len(sls)} item line(s) issued in one go")
+    if section:
+        run("INSERT INTO ri_sections (factory_name, section_name) VALUES (%s,%s) ON CONFLICT DO NOTHING", (fac, section))
+    audit("REQUISITION_ISSUE", f"{fac}: SR {sr_no} - {len(sls)} item line(s) issued in one go" + (f" · Section {section}" if section else ""))
     return len(sls)
+
+
+@tx
+def _ri_set_unit_db(fac, sl, name, old, new):
+    run("UPDATE inventory SET unit_name=%s WHERE sl_no=%s AND factory_name=%s", (new, sl, fac))
+    audit("EDIT_UOM", f"{fac}: {name}: UOM {old} -> {new} (Requisition Issue)")
+    return True
+
+
+def _unit_of(fac, sl):
+    try:
+        r = q("SELECT COALESCE(NULLIF(TRIM(unit_name),''),'Pcs') AS u FROM inventory WHERE factory_name=%s AND sl_no=%s", (fac, int(sl)))
+        return r[0]["u"] if r else "Pcs"
+    except Exception:
+        return "Pcs"
+
+
+def _ri_uom_changed(fac, sl, key, name, lines_key="ri_lines"):
+    """Instant, final UOM edit: the moment the unit is changed in the slip it is saved on the item itself."""
+    new = st.session_state.get(key)
+    lines = st.session_state.get(lines_key, [])
+    ln = next((x for x in lines if int(x["sl"]) == int(sl)), None)
+    old = (ln or {}).get("unit") or "Pcs"
+    if not new or new == old:
+        return
+    if not guard():
+        st.session_state[key] = old
+        return
+    if _ri_set_unit_db(fac, int(sl), name, old, new):
+        if ln:
+            ln["unit"] = new
+        st.session_state["rr_msg" if lines_key == "rr_lines" else "ri_msg"] = ("ok", f"✅ UOM বদলে গেছে (চূড়ান্ত): {name} → {new}")
+    else:
+        st.session_state[key] = old
+
+
+def _ri_section_pick(key, fac, current=""):
+    """Section dropdown (+ type a new one). Returns the chosen / typed section name, or '' when nothing is chosen."""
+    NONE, NEW = "— Section বাছুন —", "➕ নতুন Section লিখুন"
+    try:
+        names = [r["section_name"] for r in q_c("SELECT section_name FROM ri_sections WHERE factory_name=%s ORDER BY LOWER(section_name)", (fac,))]
+    except Exception:
+        names = []
+    if current and current not in names:
+        names = names + [current]
+    opts = [NONE] + names + [NEW]
+    pick = st.selectbox("🏭 Section (কোন section-এ গেল) *", opts, index=opts.index(current) if current in opts else 0, key=key + "_s")
+    if pick == NEW:
+        nm = " ".join(st.text_input("নতুন Section-এর নাম", key=key + "_n").split())
+        if not nm:
+            return ""
+        for x in names:
+            if x.lower() == nm.lower():
+                return x
+        return nm
+    return "" if pick == NONE else pick
+
+
+@tx
+def ri_set_section(fac, sr, section):
+    run("UPDATE transactions SET section=%s WHERE factory_name=%s AND req_no=%s AND trans_type = ANY(%s)", (section, fac, sr, list(ISSUE_TYPES)))
+    run("INSERT INTO ri_sections (factory_name, section_name) VALUES (%s,%s) ON CONFLICT DO NOTHING", (fac, section))
+    audit("REQUISITION_ISSUE_SECTION", f"{fac}: SR {sr} -> Section {section}")
+    return True
 
 
 def tab_req_issue():
@@ -12456,6 +12643,11 @@ def tab_req_issue():
         return
     mode = st.radio("Ki korben?", ["📤 Issue (SR slip)", "📥 Supplier Receipt (Challan)"], horizontal=True, key="ri_mode",
                     label_visibility="collapsed")
+    if not mode.startswith("📥"):
+        try:
+            render_count_gate_banner()
+        except Exception:
+            pass
     _ri_saved_banner()
     _ri_requests_panel()
     if mode.startswith("📥"):
@@ -12480,7 +12672,10 @@ def _ri_form():
     sr_no = c1.text_input("Requisition No. (SR No.) *", key=f"ri_sr_{gen}", placeholder="e.g. 1745").strip()
     tx_date = c2.date_input("তারিখ", value=date.today(), max_value=date.today(), key="ri_date")
     ttype = c3.selectbox("ধরন", list(ISSUE_TYPES), format_func=lambda c: TRANS_LABELS.get(c, c), key="ri_type")
-    notes = st.text_input("Remarks (ঐচ্ছিক — যেমন সেকশন / কে চেয়েছে)", key=f"ri_notes_{gen}")
+    n1, n2 = st.columns([1.4, 1])
+    notes = n1.text_input("Remarks (ঐচ্ছিক — কে চেয়েছে ইত্যাদি)", key=f"ri_notes_{gen}")
+    with n2:
+        section = _ri_section_pick(f"ri_sec_{gen}", fac)
     confirm_existing = True
     if sr_no:
         used = q_c("SELECT COUNT(*) AS n FROM transactions WHERE factory_name=%s AND req_no=%s", (fac, sr_no))
@@ -12535,8 +12730,15 @@ def _ri_form():
                 need, days = verification_needed(fac, r["sl_no"], date_v)
             except Exception:
                 need, days = False, 0
-            cur.append({"sl": int(r["sl_no"]), "pid": r["prod_id"], "name": r["item_name"], "size": r["size"],
+            try:
+                _ur = q("SELECT COALESCE(NULLIF(TRIM(unit_name),''),'Pcs') AS u FROM inventory WHERE factory_name=%s AND sl_no=%s",
+                        (fac, int(r["sl_no"])))
+                unit_v = _ur[0]["u"] if _ur else "Pcs"
+            except Exception:
+                unit_v = "Pcs"
+            cur.append({"sl": int(r["sl_no"]), "pid": r["prod_id"], "name": r["item_name"], "size": r["size"], "unit": unit_v,
                         "stock": float(r["stock"]), "need": bool(need), "days": int(days), "vdate": date_v})
+            st.session_state[f"ri_u_{gen}_{int(r['sl_no'])}"] = unit_v
             st.session_state[f"ri_q_{gen}_{int(r['sl_no'])}"] = qty_v
             st.session_state["ri_lines"] = cur
             st.session_state[f"ri_search_{gen}"] = ""
@@ -12552,8 +12754,8 @@ def _ri_form():
     if not lines:
         st.info("এখনো কোনো আইটেম যোগ হয়নি।")
         return
-    h = st.columns([0.4, 3.2, 1.2, 1.0, 1.3, 1.5, 0.7])
-    for col, t in zip(h, ["#", "আইটেম", "ERP Code", "স্টক", "ইস্যু পরিমাণ", "অবস্থা", ""]):
+    h = st.columns([0.4, 2.9, 1.2, 0.9, 1.1, 1.3, 1.5, 0.7])
+    for col, t in zip(h, ["#", "আইটেম", "ERP Code", "স্টক", "Unit (বদলানো যায়)", "ইস্যু পরিমাণ", "অবস্থা", ""]):
         col.caption(t)
     if any(ln.get("vdate") != tx_date for ln in lines):   # date changed after the item was added -> re-check the 3-day rule (1 query)
         try:
@@ -12567,16 +12769,25 @@ def _ri_form():
     qtys, bad = [], False
     xfer_flags = {}
     xcache = st.session_state.setdefault("ri_other_cache", {})
+    uoms = get_uoms()
+    can_write_ui = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
     for i, ln in enumerate(lines):
-        r = st.columns([0.4, 3.2, 1.2, 1.0, 1.3, 1.5, 0.7])
+        r = st.columns([0.4, 2.9, 1.2, 0.9, 1.1, 1.3, 1.5, 0.7])
         r[0].write(i + 1)
         r[1].write(f"{ln['name']} [{ln['size'] or '-'}]")
         r[2].write(ln["pid"])
         r[3].write(f"{ln['stock']:g}")
-        q_ = r[4].number_input("q", min_value=0.0, step=1.0, format="%g", key=f"ri_q_{gen}_{ln['sl']}", label_visibility="collapsed")
+        _cu = ln.get("unit") or "Pcs"
+        _uk = f"ri_u_{gen}_{ln['sl']}"
+        if _uk not in st.session_state:
+            st.session_state[_uk] = _cu
+        r[4].selectbox("unit", uoms if _cu in uoms else uoms + [_cu], key=_uk, label_visibility="collapsed",
+                       disabled=not can_write_ui, on_change=_ri_uom_changed, args=(fac, ln["sl"], _uk, ln["name"]),
+                       help="UOM ভুল থাকলে এখানেই বদলান — সঙ্গে সঙ্গে item-এ চূড়ান্তভাবে সেভ হয়ে যায়।")
+        q_ = r[5].number_input("q", min_value=0.0, step=1.0, format="%g", key=f"ri_q_{gen}_{ln['sl']}", label_visibility="collapsed")
         qtys.append(float(q_))
         if q_ <= 0:
-            r[5].write("⚠️ পরিমাণ দিন")
+            r[6].write("⚠️ পরিমাণ দিন")
             bad = True
         elif q_ > ln["stock"] + 1e-9:
             shortage = q_ - ln["stock"]
@@ -12588,7 +12799,7 @@ def _ri_form():
                     xcache[ck] = None
             other = xcache[ck]
             if other and float(other["stock"] or 0) >= shortage:
-                ok_x = r[5].checkbox("🔁 ট্রান্সফার নিশ্চিত", key=f"ri_x_{gen}_{ln['sl']}")
+                ok_x = r[6].checkbox("🔁 ট্রান্সফার নিশ্চিত", key=f"ri_x_{gen}_{ln['sl']}")
                 xfer_flags[ln["sl"]] = ok_x
                 if not ok_x:
                     bad = True
@@ -12599,14 +12810,14 @@ def _ri_form():
                     note_x += " নাম হুবহু এক নয় — দুটো একই আইটেম কিনা দেখে নিশ্চিত করুন।"
                 st.caption(note_x)
             else:
-                r[5].write("⛔ স্টক কম")
+                r[6].write("⛔ স্টক কম")
                 st.caption(f"⛔ {ln['name']}: শর্টেজ {shortage:g} — অন্য Unit-এ যথেষ্ট স্টক / একই আইটেম নেই।")
                 bad = True
         elif ln["need"]:
-            r[5].write(f"🔎 যাচাই লাগবে ({ln['days']} দিন)")
+            r[6].write(f"🔎 যাচাই লাগবে ({ln['days']} দিন)")
         else:
-            r[5].write("✅")
-        if r[6].button("✖", key=f"ri_rm_{gen}_{ln['sl']}", help="সারি মুছুন"):
+            r[6].write("✅")
+        if r[7].button("✖", key=f"ri_rm_{gen}_{ln['sl']}", help="সারি মুছুন"):
             remove = i
     if remove is not None:
         lines.pop(remove)
@@ -12629,21 +12840,25 @@ def _ri_form():
     if st.button("💾 সব সংরক্ষণ করুন", type="primary", key=f"ri_save_{gen}", use_container_width=True, disabled=not can_write):
         if not sr_no:
             st.error("Requisition No. (SR No.) লিখুন — এটা বাধ্যতামূলক।")
+        elif (count_gate_status(fac) or {}).get("blocked"):
+            st.error("এই সপ্তাহের compulsory Physical Count শেষ হয়নি — আগে 📱 Physical Count → 🎯 তালিকার আইটেম গুনুন, তারপর Issue save হবে।")
+        elif ttype == "Issued" and not section:
+            st.error("Section বাছুন (কোন section-এ গেল) — report / audit-এর জন্য এটা দরকার।")
         elif bad:
             st.error("তালিকায় সমস্যা আছে (পরিমাণ ০ / স্টক কম / ট্রান্সফার নিশ্চিত করা হয়নি) — ঠিক করে আবার চেষ্টা করুন।")
         elif not confirm_existing:
             st.error("এই SR আগে ব্যবহার হয়েছে — নিশ্চিত করার টিক দিন।")
         elif guard():
             n = save_requisition_issue(fac, [(ln["sl"], q_, xfer_flags.get(ln["sl"], False)) for ln, q_ in zip(lines, qtys)],
-                                       tx_date, sr_no, ttype, notes.strip(), verified, po_pending)
+                                       tx_date, sr_no, ttype, notes.strip(), verified, po_pending, section)
             if n:
                 _who = st.session_state.get("user", "")
                 st.session_state["last_req_no"] = sr_no
-                st.session_state["ri_saved"] = {"user": _who, "sr": sr_no, "n": int(n), "qty": float(sum(qtys)),
+                st.session_state["ri_saved"] = {"user": _who, "sr": sr_no, "n": int(n), "qty": float(sum(qtys)), "section": section,
                                                 "time": local_now().strftime("%d-%b-%Y %I:%M %p"), "kind": "save"}
                 st.session_state["ri_lines"] = []
                 st.session_state["ri_gen"] = gen + 1
-                done(f"✅ {_who}, apnar data sofolbhabe save hoyeche - SR {sr_no}: {n}টি আইটেম ইস্যু হয়েছে, স্টক কমেছে।")
+                done(f"✅ {_who}, apnar data sofolbhabe save hoyeche - SR {sr_no}: {n}টি আইটেম ইস্যু হয়েছে" + (f" · Section: {section}" if section else "") + ", স্টক কমেছে।")
 
 
 RR_MAX_LINES = 30
@@ -12697,7 +12912,7 @@ def _rr_form():
         r0 = q(f"SELECT {INV_COLS} FROM inventory WHERE sl_no=%s AND factory_name=%s", (pf, fac))
         if r0 and not any(int(x["sl"]) == int(r0[0]["sl_no"]) for x in lines):
             lines.append({"sl": int(r0[0]["sl_no"]), "pid": r0[0]["prod_id"], "name": r0[0]["item_name"], "size": r0[0]["size"],
-                          "stock": float(r0[0]["stock"]), "price": float(r0[0]["price"] or 0)})
+                          "stock": float(r0[0]["stock"]), "price": float(r0[0]["price"] or 0), "unit": _unit_of(fac, r0[0]["sl_no"])})
             st.session_state["rr_lines"] = lines
 
     # ---- header: supplier, challan, date
@@ -12762,8 +12977,10 @@ def _rr_form():
         elif qty_v <= 0:
             st.session_state["rr_msg"] = ("error", "পরিমাণ ০-র বেশি দিন।")
         else:
+            _u = _unit_of(fac, r["sl_no"])
             cur.append({"sl": int(r["sl_no"]), "pid": r["prod_id"], "name": r["item_name"], "size": r["size"],
-                        "stock": float(r["stock"]), "price": float(r["price"] or 0)})
+                        "stock": float(r["stock"]), "price": float(r["price"] or 0), "unit": _u})
+            st.session_state[f"rr_u_{gen}_{int(r['sl_no'])}"] = _u
             st.session_state[f"rr_q_{gen}_{int(r['sl_no'])}"] = qty_v
             st.session_state[f"rr_r_{gen}_{int(r['sl_no'])}"] = rate_v
             st.session_state["rr_lines"] = cur
@@ -12782,33 +12999,43 @@ def _rr_form():
     if not lines:
         st.info("এখনো কোনো আইটেম যোগ হয়নি।")
         return
-    h = st.columns([0.4, 3.0, 1.2, 0.9, 1.2, 1.2, 1.8, 0.7])
-    for col, t in zip(h, ["#", "আইটেম", "ERP Code", "স্টক", "রিসিভ পরিমাণ", "Rate (৳)", "অবস্থা", ""]):
+    h = st.columns([0.4, 2.7, 1.1, 0.8, 1.1, 1.1, 1.1, 1.6, 0.7])
+    for col, t in zip(h, ["#", "আইটেম", "ERP Code", "স্টক", "Unit (বদলানো যায়)", "রিসিভ পরিমাণ", "Rate (৳)", "অবস্থা", ""]):
         col.caption(t)
     remove, qtys, rates, bad = None, [], [], False
+    uoms = get_uoms()
+    can_write_ui = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
     for i, ln in enumerate(lines):
-        r = st.columns([0.4, 3.0, 1.2, 0.9, 1.2, 1.2, 1.8, 0.7])
+        r = st.columns([0.4, 2.7, 1.1, 0.8, 1.1, 1.1, 1.1, 1.6, 0.7])
         r[0].write(i + 1)
         r[1].write(f"{ln['name']} [{ln['size'] or '-'}]")
         r[2].write(ln["pid"])
         r[3].write(f"{ln['stock']:g}")
-        q_ = r[4].number_input("q", min_value=0.0, step=1.0, format="%g", key=f"rr_q_{gen}_{ln['sl']}", label_visibility="collapsed")
-        rt_ = r[5].number_input("r", min_value=0.0, step=1.0, format="%g", key=f"rr_r_{gen}_{ln['sl']}", label_visibility="collapsed")
+        _cu = ln.get("unit") or _unit_of(fac, ln["sl"])
+        ln["unit"] = _cu
+        _uk = f"rr_u_{gen}_{ln['sl']}"
+        if _uk not in st.session_state:
+            st.session_state[_uk] = _cu
+        r[4].selectbox("unit", uoms if _cu in uoms else uoms + [_cu], key=_uk, label_visibility="collapsed",
+                       disabled=not can_write_ui, on_change=_ri_uom_changed, args=(fac, ln["sl"], _uk, ln["name"], "rr_lines"),
+                       help="UOM ভুল থাকলে এখানেই বদলান — সঙ্গে সঙ্গে item-এ চূড়ান্তভাবে সেভ হয়ে যায়।")
+        q_ = r[5].number_input("q", min_value=0.0, step=1.0, format="%g", key=f"rr_q_{gen}_{ln['sl']}", label_visibility="collapsed")
+        rt_ = r[6].number_input("r", min_value=0.0, step=1.0, format="%g", key=f"rr_r_{gen}_{ln['sl']}", label_visibility="collapsed")
         qtys.append(float(q_))
         rates.append(float(rt_))
         cur_p = float(ln.get("price") or 0)
         if q_ <= 0:
-            r[6].write("⚠️ পরিমাণ দিন")
+            r[7].write("⚠️ পরিমাণ দিন")
             bad = True
         elif int(ln["sl"]) in done_sl:
-            r[6].write("🔁 এই challan-এ আগে রিসিভ")
+            r[7].write("🔁 এই challan-এ আগে রিসিভ")
         elif rt_ > 0 and cur_p > 0 and abs(rt_ - cur_p) / cur_p > 0.25:
-            r[6].write(f"⚠️ দাম {(rt_ - cur_p) / cur_p * 100:+.0f}% (এখন ৳{cur_p:g})")
+            r[7].write(f"⚠️ দাম {(rt_ - cur_p) / cur_p * 100:+.0f}% (এখন ৳{cur_p:g})")
         elif rt_ <= 0 and cur_p <= 0:
-            r[6].write("⚠️ দাম নেই")
+            r[7].write("⚠️ দাম নেই")
         else:
-            r[6].write("✅")
-        if r[7].button("✖", key=f"rr_rm_{gen}_{ln['sl']}", help="সারি মুছুন"):
+            r[7].write("✅")
+        if r[8].button("✖", key=f"rr_rm_{gen}_{ln['sl']}", help="সারি মুছুন"):
             remove = i
     if remove is not None:
         lines.pop(remove)
@@ -12979,7 +13206,7 @@ def _ri_saved_banner():
         c1.success(f"✅ **{info['user']}**, apnar correction sofolbhabe save hoyeche — **{_ri_slip_label(info['sr'])}** · {info['detail']} · {info['time']}")
     else:
         c1.success(f"✅ **{info['user']}**, apnar data sofolbhabe save hoyeche — SR **{info['sr']}** · {info['n']} ti item · "
-                   f"mot qty {info['qty']:g} · {info['time']}")
+                   f"mot qty {info['qty']:g}" + (f" · Section **{info['section']}**" if info.get("section") else "") + f" · {info['time']}")
     if c2.button("✖ Bondho", key="ri_saved_close"):
         st.session_state.pop("ri_saved", None)
         st.rerun()
@@ -13022,11 +13249,29 @@ def _ri_fix_panel():
                 default = i
                 break
         sr = names[st.selectbox("Kon slip thik korben?", labels, index=default, key="rifix_sel")]
-        lines = q("""SELECT id, sl_no, prod_id, item_name, qty, trans_type, date, notes, officer_name FROM transactions
+        lines = q("""SELECT id, sl_no, prod_id, item_name, qty, trans_type, date, notes, officer_name, COALESCE(section,'') AS section FROM transactions
                      WHERE factory_name=%s AND req_no=%s AND trans_type = ANY(%s) ORDER BY id""", (fac, sr, list(ISSUE_TYPES)))
         if not lines:
             st.info("Ei SR-e kono issue line nei.")
             return
+        _secs = sorted({str(l.get("section") or "").strip() for l in lines} - {""})
+        _cur_sec = _secs[0] if len(_secs) == 1 else ""
+        with st.container(border=True):
+            if len(_secs) > 1:
+                st.caption("🏭 Ei SR-e ekadhik section ache: " + ", ".join(_secs))
+            elif _cur_sec:
+                st.caption(f"🏭 Section: **{_cur_sec}**")
+            else:
+                st.caption("🏭 Ei SR-e Section deya hoyni — niche theke bachun.")
+            _new_sec = _ri_section_pick(f"rifix_sec_{sr}", fac, _cur_sec)
+            if st.button("🏭 Section save korun", key="rifix_secbtn", disabled=not can_write_ri()):
+                if not _new_sec:
+                    st.error("Section bachun ba notun nam likhun.")
+                elif guard() and ri_set_section(fac, sr, _new_sec):
+                    who = st.session_state.get("user", "")
+                    st.session_state["ri_saved"] = {"user": who, "sr": sr, "kind": "fix", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
+                                                    "detail": f"Section: {_new_sec}"}
+                    done(f"✅ {who}, SR {sr}-er Section save hoyeche: {_new_sec}")
         h = st.columns([3.2, 1.3, 1.1, 1.4, 1.1])
         for col, t in zip(h, ["Item", "ERP Code", "Ager qty", "Notun qty", "Bad den"]):
             col.caption(t)
@@ -15257,15 +15502,18 @@ def _rp_tx(P, types):
     ssql, sp = ("", [])
     if P.get("sup_raw"):
         ssql, sp = " AND TRIM(COALESCE(t.supplier_name,'')) = ANY(%s)", [P["sup_raw"]]
+    secsql, secp = "", []
+    if P.get("section"):
+        secsql, secp = " AND TRIM(COALESCE(t.section,'')) = %s", [P["section"]]
     df = qdf(f"""SELECT t.id, t.factory_name, t.date, t.time, t.trans_type, COALESCE(t.qty,0) AS qty,
                         COALESCE(NULLIF(t.prod_id,''), i.prod_id, '') AS code, COALESCE(NULLIF(t.item_name,''), i.item_name, '') AS item,
                         COALESCE(i.size,'') AS size, COALESCE(NULLIF(i.unit_name,''),'Pcs') AS uom, COALESCE(i.unit_price,0) AS price,
                         COALESCE(NULLIF(TRIM(i.category),''),'(No budget category)') AS bcat, COALESCE(t.officer_name,'') AS officer,
                         COALESCE(NULLIF(TRIM(t.supplier_name),''),'') AS supplier, COALESCE(t.challan_no,'') AS challan,
-                        COALESCE(t.req_no,'') AS req_no, t.unit_price_at_tx AS tx_rate
+                        COALESCE(t.req_no,'') AS req_no, COALESCE(TRIM(t.section),'') AS section, t.unit_price_at_tx AS tx_rate
                  FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
-                 WHERE t.factory_name = ANY(%s) AND t.trans_type = ANY(%s){psql}{isql}{ssql}
-                 ORDER BY t.factory_name, {_sql_date('t.date')} NULLS LAST, t.id""", tuple([P["units"], list(types)] + pp + ip + sp))
+                 WHERE t.factory_name = ANY(%s) AND t.trans_type = ANY(%s){psql}{isql}{ssql}{secsql}
+                 ORDER BY t.factory_name, {_sql_date('t.date')} NULLS LAST, t.id""", tuple([P["units"], list(types)] + pp + ip + sp + secp))
     return _rpn(df, "qty", "price", "tx_rate").assign(tx_rate=lambda x: x["tx_rate"].where(x["tx_rate"] > 0))
 
 
@@ -15331,15 +15579,17 @@ def rp_receive(P):
 
 def rp_issue(P):
     df = _rp_tx(P, P.get("ttypes") or list(ISSUE_TYPES))
-    cols = [("SL", "i"), ("Date", "d"), ("Txn Ref", "t"), ("SR / Req No", "t"), ("Item Code", "t"), ("Item Name", "t"), ("Size", "t"), ("UOM", "t"),
-            ("Issued Qty", "q"), ("Rate (Tk)", "r"), ("Amount (Tk)", "a"), ("Issued By", "t")]
+    by_sec = P.get("group") == "Section"
+    cols = [("SL", "i"), ("Date", "d"), ("Txn Ref", "t"), ("SR / Req No", "t"), ("Section", "t"), ("Item Code", "t"), ("Item Name", "t"), ("Size", "t"),
+            ("UOM", "t"), ("Issued Qty", "q"), ("Rate (Tk)", "r"), ("Amount (Tk)", "a"), ("Issued By", "t")]
 
     def build(u):
         d = df[df["factory_name"] == u]
         if d.empty:
             return []
+        d = d.assign(grp=d["section"].where(d["section"] != "", "(Section not set)") if by_sec else d["bcat"])
         rows, n, grand, miss = [], 0, 0.0, 0
-        for bc, g in d.sort_values("bcat", kind="stable").groupby("bcat", sort=True):
+        for bc, g in d.sort_values("grp", kind="stable").groupby("grp", sort=True):
             amt = 0.0
             for r in g.itertuples():
                 n += 1
@@ -15347,14 +15597,14 @@ def rp_issue(P):
                 a = r.qty * rt if rt else None
                 miss += 0 if rt else 1
                 amt += a or 0.0
-                rows.append([n, r.date, f"TX-{r.id}", r.req_no, r.code, r.item, r.size, r.uom, r.qty, rt, a, r.officer])
+                rows.append([n, r.date, f"TX-{r.id}", r.req_no, r.section or "-", r.code, r.item, r.size, r.uom, r.qty, rt, a, r.officer])
             grand += amt
-            rows.append(_RpSub([f"Sub-total: {bc} ({len(g)} issues)", None, None, None, None, None, None, None, _rp_qty_tot(g, "qty"), None, amt, None]))
-        tot = [f"TOTAL - {u} ({len(d)} issues)", None, None, None, None, None, None, None, _rp_qty_tot(d, "qty"), None, grand, None]
+            rows.append(_RpSub([f"Sub-total: {bc} ({len(g)} issues)", None, None, None, None, None, None, None, None, _rp_qty_tot(g, "qty"), None, amt, None]))
+        tot = [f"TOTAL - {u} ({len(d)} issues)", None, None, None, None, None, None, None, None, _rp_qty_tot(d, "qty"), None, grand, None]
         note = " ".join(x for x in (_rp_uom_note(d, "qty") if d["uom"].nunique() > 1 else None,
                                     f"{miss} issue(s) have no stock rate; their amount is not included." if miss else None) if x)
         return [_rp_sec(cols, rows, tot, note=note or None)]
-    return _rp_blocks(P, build), ["Issue amount = issued quantity x the item's stock rate (same basis as the Budget page). Grouped by Budget Category."]
+    return _rp_blocks(P, build), [f"Issue amount = issued quantity x the item's stock rate (same basis as the Budget page). Grouped by {'Section' if by_sec else 'Budget Category'}."]
 
 
 def rp_tx_history(P):
@@ -15693,7 +15943,7 @@ RP_REGISTRY = [
     dict(key="supplier", label="Supplier-wise Report", type="Supplier Receipt Report", dates=True, flt=("supplier", "item", "pcat", "bcat"), orient="L", fn=rp_supplier),
     dict(key="receive", label="Purchase / Receive Report", type="Receipt Report", dates=True, flt=("supplier", "item", "pcat", "bcat", "ttype"), orient="L", fn=rp_receive,
          tt=("Supplier. Rec", "Internal Rec", "Stock Adjustment (+)"), tt_def=("Supplier. Rec", "Internal Rec")),
-    dict(key="issue", label="Issue / Consumption Report", type="Issue Report", dates=True, flt=("item", "pcat", "bcat", "ttype"), orient="L", fn=rp_issue,
+    dict(key="issue", label="Issue / Consumption Report", type="Issue Report", dates=True, flt=("item", "pcat", "bcat", "section", "group", "ttype"), orient="L", fn=rp_issue,
          tt=("Issued", "Internal Issue"), tt_def=("Issued", "Internal Issue")),
     dict(key="txhist", label="Transaction History Report", type="Transaction Report", dates=True, flt=("supplier", "item", "pcat", "bcat", "ttype"), orient="L", fn=rp_tx_history,
          tt=tuple(RP_NAMES), tt_def=tuple(RP_NAMES)),
@@ -15789,7 +16039,7 @@ def tab_reports():
         top[3].markdown(f"**{today:%d-%b-%Y}**")
     fl = list(R["flt"]) + (["alld"] if R["dates"] else [])
     cols = st.columns(len(fl))
-    P = {"units": units, "d1": d1, "d2": d2, "item": "", "sup_raw": None, "pcat": None, "bcat": None, "ttypes": None, "status": None}
+    P = {"units": units, "d1": d1, "d2": d2, "item": "", "sup_raw": None, "pcat": None, "bcat": None, "ttypes": None, "status": None, "section": None, "group": None}
     lines = []
     for c, f in zip(cols, fl):
         if f == "alld":
@@ -15816,6 +16066,19 @@ def tab_reports():
             if sel != "All":
                 P["bcat"] = sel
                 lines.append(("Budget Category", sel))
+        elif f == "section":
+            try:
+                sdf = qdf_c("SELECT DISTINCT section_name AS s FROM ri_sections WHERE factory_name = ANY(%s) ORDER BY 1", (list(units),))
+                sopts = sdf["s"].tolist() if not sdf.empty else []
+            except Exception:
+                sopts = []
+            sel = c.selectbox("Section", ["All sections"] + sopts, key="rp_section")
+            if sel != "All sections":
+                P["section"] = sel
+                lines.append(("Section", sel))
+        elif f == "group":
+            P["group"] = c.selectbox("Group by", ["Budget Category", "Section"], key="rp_group")
+            lines.append(("Grouped by", P["group"]))
         elif f == "ttype":
             names = [RP_NAMES[t] for t in R["tt"]]
             chosen = c.multiselect("Transaction Type", names, default=[RP_NAMES[t] for t in R["tt_def"]], key=f"rp_tt_{R['key']}")
@@ -15827,7 +16090,7 @@ def tab_reports():
             if P["status"] not in ("All", "All items"):
                 lines.append(("Status", P["status"]))
     period = (f"{d1:%d-%b-%Y} to {d2:%d-%b-%Y}" if d1 else "All dates") if R["dates"] else f"As on {today:%d-%b-%Y} (current balance)"
-    sig = repr((R["key"], units, d1, d2, P["item"], P["sup_raw"], P["pcat"], P["bcat"], P["ttypes"], P["status"]))
+    sig = repr((R["key"], units, d1, d2, P["item"], P["sup_raw"], P["pcat"], P["bcat"], P["ttypes"], P["status"], P["section"], P["group"]))
     if st.button("▶ Generate Report", type="primary", key="rp_gen"):
         with st.spinner("Preparing report..."):
             try:
