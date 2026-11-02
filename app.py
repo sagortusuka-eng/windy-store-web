@@ -3159,6 +3159,42 @@ def tab_dashboard():
 # ============================================================
 #  TAB 1 - TRANSACTIONS (daily entry, top priority)
 # ============================================================
+def _receipt_core(fac, user, item, qty, ttype, day, notes, date_s, time_s, supplier, challan, po_flag, po_date, rate, rate_mode):
+    """Everything a received item needs: stock, purchase rate -> unit price, the receipt row and the requisition Received qty.
+    Runs inside the caller's transaction (used by the single Transactions form and by the multi-item receipt slip)."""
+    sl, pid, name = item["sl_no"], item["prod_id"], item["item_name"]
+    stock = float(item["stock"] or 0)
+    grn = "Pending" if ttype == "Supplier. Rec" else "Not Required"
+    run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (qty, sl, fac))
+    tx_price = float(item.get("price") or 0)
+    price_note = ""
+    if ttype == "Supplier. Rec" and rate and float(rate) > 0:
+        # Purchase rate typed on the receipt: it becomes the item's Unit Price, so Issues of this item reach the budget.
+        rate, old_p = float(rate), tx_price
+        if rate_mode == "Weighted average" and old_p > 0 and stock > 0:
+            new_p = round((stock * old_p + qty * rate) / (stock + qty), 4)
+        elif rate_mode == "Keep current price" and old_p > 0:
+            new_p = None
+        else:
+            new_p = rate
+        if new_p is not None and abs(new_p - old_p) > 1e-9:
+            run("UPDATE inventory SET unit_price=%s WHERE sl_no=%s AND factory_name=%s", (new_p, sl, fac))
+        tx_price = rate
+        price_note = f" [Purchase rate {rate:g}; unit price {old_p:g}->{(old_p if new_p is None else new_p):g}]"
+    insert_tx(fac, user, sl, pid, name, qty, ttype, day, notes, date_s, time_s, "Verified", grn,
+              supplier if ttype == "Supplier. Rec" else "", challan if ttype == "Supplier. Rec" else "",
+              po_flag=po_flag, po_date=po_date,
+              unit_price_at_tx=tx_price if ttype == "Supplier. Rec" else None)
+    if price_note:
+        audit("PURCHASE_RATE", f"{fac}: {pid} ({name}){price_note}")
+    if ttype == "Supplier. Rec":
+        _got = req_auto_receive(fac, sl, pid, qty, date_s)
+        if _got:
+            _txt = ", ".join(f"{n} +{v:g}" for n, v in _got)
+            _prev = st.session_state.get("_req_auto_note", "")
+            st.session_state["_req_auto_note"] = (_prev + ", " + _txt) if _prev else "Requisition Received qty auto-update: " + _txt
+
+
 @tx
 def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, supplier="", challan="", po_pending=False,
                      erp_open=None, price_open=None, rate=None, rate_mode=None, req_no=""):
@@ -3217,33 +3253,7 @@ def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, sup
         return True
 
     if ttype in RECEIPT_TYPES:
-        grn = "Pending" if ttype == "Supplier. Rec" else "Not Required"
-        run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (qty, sl, fac))
-        tx_price = float(item.get("price") or 0)
-        price_note = ""
-        if ttype == "Supplier. Rec" and rate and float(rate) > 0:
-            # Purchase rate typed on the receipt: it becomes the item's Unit Price, so Issues of this item reach the budget.
-            rate, old_p = float(rate), tx_price
-            if rate_mode == "Weighted average" and old_p > 0 and stock > 0:
-                new_p = round((stock * old_p + qty * rate) / (stock + qty), 4)
-            elif rate_mode == "Keep current price" and old_p > 0:
-                new_p = None
-            else:
-                new_p = rate
-            if new_p is not None and abs(new_p - old_p) > 1e-9:
-                run("UPDATE inventory SET unit_price=%s WHERE sl_no=%s AND factory_name=%s", (new_p, sl, fac))
-            tx_price = rate
-            price_note = f" [Purchase rate {rate:g}; unit price {old_p:g}->{(old_p if new_p is None else new_p):g}]"
-        insert_tx(fac, user, sl, pid, name, qty, ttype, day, notes, date_s, time_s, "Verified", grn,
-                  supplier if ttype == "Supplier. Rec" else "", challan if ttype == "Supplier. Rec" else "",
-                  po_flag=po_flag, po_date=po_date,
-                  unit_price_at_tx=tx_price if ttype == "Supplier. Rec" else None)
-        if price_note:
-            audit("PURCHASE_RATE", f"{fac}: {pid} ({name}){price_note}")
-        if ttype == "Supplier. Rec":
-            _got = req_auto_receive(fac, sl, pid, qty, date_s)
-            if _got:
-                st.session_state["_req_auto_note"] = "Requisition Received qty auto-update: " + ", ".join(f"{n} +{v:g}" for n, v in _got)
+        _receipt_core(fac, user, item, qty, ttype, day, notes, date_s, time_s, supplier, challan, po_flag, po_date, rate, rate_mode)
     else:
         if qty > stock:
             st.error(f"Available stock ({stock:g}) kom ache requested qty ({qty:g}) theke.")
@@ -3254,6 +3264,30 @@ def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, sup
     audit("TRANSACTION", f"{fac}: {ttype} {qty:g} of {pid} ({name})" + (f" [SR {req_no}]" if req_no else "")
           + (" [ERP PO Pending ticked]" if po_pending else ""))
     return True
+
+
+@tx
+def save_supplier_receipt(fac, lines, tx_dt, supplier, challan, notes, po_pending, rate_mode):
+    """One challan, many items: all saved together or none (stock, purchase rate, requisition Received qty). Returns item count."""
+    user = st.session_state.get("user", "")
+    date_s, time_s, day = tx_dt.strftime(DATE_FMT), datetime.now().strftime("%I:%M %p"), tx_dt.day
+    po_flag, po_date = ("Pending", date_s) if po_pending else ("", None)
+    st.session_state.pop("_req_auto_note", None)
+    n = 0
+    for ln in lines:
+        r = q(f"SELECT {INV_COLS} FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE", (int(ln["sl"]), fac))
+        if not r:
+            raise ValueError("Item ar paoa jacche na - page refresh kore abar chesta korun.")
+        item, qty = r[0], float(ln["qty"])
+        if qty <= 0:
+            raise ValueError(f"{item['item_name']}: quantity 0-r beshi din.")
+        _receipt_core(fac, user, item, qty, "Supplier. Rec", day, notes, date_s, time_s, supplier, challan, po_flag, po_date,
+                      (float(ln.get("rate") or 0) or None), rate_mode)
+        audit("TRANSACTION", f"{fac}: Supplier. Rec {qty:g} of {item['prod_id']} ({item['item_name']}) [Challan {challan}]"
+              + (" [ERP PO Pending ticked]" if po_pending else ""))
+        n += 1
+    audit("RECEIPT_SLIP", f"{fac}: challan {challan} from {supplier}: {n} item(s) received")
+    return n
 
 
 @tx
@@ -6581,6 +6615,30 @@ def auto_map(heads):
     return mp
 
 
+_PDF_UNITS = (r"(?:METERS?|MTRS?|MTR|PCS|PC|PIECES?|KGS?|LTRS?|LITERS?|LITRES?|SETS?|NOS|NO|ROLLS?|BOX(?:ES)?|PAIRS?|FEET|FT|DRUMS?|"
+              r"COILS?|BAGS?|CARTONS?|CTNS?|DOZEN|GMS?|TONS?|SQM|SFT|YARDS?|BUNDLES?|PACKETS?|PKT|CAN|BOTTLES?|TUBES?)")
+_PDF_ITEM_RE = re.compile(r"^(?:(?P<sl>\d{1,3})[.)]?\s+)?(?P<item>(?=.*[A-Za-z]).+?)\s+(?P<qty>\d+(?:,\d{3})*(?:\.\d+)?)\s+(?P<unit>"
+                          + _PDF_UNITS + r")\b\s*(?P<rem>.*)$", re.I)
+
+
+def _pdf_item_lines(text):
+    """Challan / PO / requisition PDFs that are not ruled tables (e.g. a scanned challan): finds lines shaped like
+    '<item name>  <qty>  <unit>  <remarks>' and returns grid rows [SL, Item, Qty, Unit, Remarks]."""
+    out, seen = [], set()
+    for ln in str(text or "").splitlines():
+        m = _PDF_ITEM_RE.match(ln.strip())
+        if not m:
+            continue
+        item = re.sub(r"\s+", " ", m.group("item")).strip(" :-")
+        qty = m.group("qty").replace(",", "")
+        key = (re.sub(r"[^a-z0-9]", "", item.lower()), qty)
+        if len(item) < 3 or key in seen:
+            continue
+        seen.add(key)
+        out.append([str(len(out) + 1), item, qty, m.group("unit").upper(), m.group("rem").strip()])
+    return out
+
+
 def pdf_to_raw(upload):
     """Reads a requisition PDF into a plain grid (list of rows) so the normal Excel/CSV import steps can be used on it.
     Tables are read with pdfplumber when installed; otherwise (or when the PDF has no ruled table) the text lines are split
@@ -6617,16 +6675,20 @@ def pdf_to_raw(upload):
             return None, {}, "PDF পড়ার লাইব্রেরি নেই — requirements.txt-এ `pdfplumber` (বা `pypdf`) যোগ করে redeploy করুন।"
         except Exception as e:
             return None, {}, f"PDF পড়া যায়নি: {e}"
-        for ln in ltext.splitlines():
-            parts = [p.strip() for p in re.split(r"\s{2,}|\t", ln) if p.strip()]
-            if len(parts) >= 2:
-                rows.append(parts)
+        found = _pdf_item_lines(text or ltext)
+        if found:
+            rows = [["SL#", "Item Description", "Quantity", "Unit", "Remarks"]] + found
+        else:
+            for ln in ltext.splitlines():
+                parts = [p.strip() for p in re.split(r"\s{2,}|\t", ln) if p.strip()]
+                if len(parts) >= 2:
+                    rows.append(parts)
     if not rows:
         return None, {}, "PDF থেকে কোনো লেখা/টেবিল পাওয়া যায়নি (স্ক্যান করা ছবির PDF হতে পারে) — Excel/CSV ব্যবহার করুন।"
     w = max(len(r) for r in rows)
     raw = pd.DataFrame([r + [""] * (w - len(r)) for r in rows])
     meta = {}
-    m = re.search(r"(?:requisition|req\.?)\s*(?:no\.?|number|#)\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9\-/]*)", text, re.I)
+    m = re.search(r"(?:requisition|req\.?)\s*(?:no\.?|number|#)\s*[:\-]?\s*#?\s*([A-Za-z0-9][A-Za-z0-9\-/]*)", text, re.I)
     if m:
         meta["req_no"] = m.group(1)
     m = re.search(r"date\s*[:\-]?\s*(\d{1,2}[-/ ][A-Za-z]{3}[-/ ]\d{4}|\d{1,2}[-/]\d{1,2}[-/]\d{4}|\d{4}-\d{2}-\d{2})", text, re.I)
@@ -12370,11 +12432,9 @@ def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_
 
 
 def tab_req_issue():
-    st.title("🧾 Requisition Issue")
-    st.caption(f"একটা রিকুইজিশন স্লিপের সব আইটেম (সর্বোচ্চ {RI_MAX_LINES}টি) এক SR নম্বরে একসাথে ইস্যু করুন। "
-               "SR নম্বর বাধ্যতামূলক। স্টক কম হলে অন্য Unit থেকে অটো-ট্রান্সফার (নিশ্চিত করলে) হবে; না হলে কিছুই সংরক্ষণ হয় না।")
+    st.title("🧾 Requisition Issue & Supplier Receipt")
     if is_cons_view:
-        st.info("ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ ইস্যু করা যায় না)।")
+        st.info("ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ ইস্যু/রিসিভ করা যায় না)।")
         return
     try:
         if not st.session_state.get("_req_no_column_ready"):
@@ -12383,8 +12443,18 @@ def tab_req_issue():
     except Exception as e:
         st.error(f"req_no column setup failed: {e}")
         return
+    mode = st.radio("Ki korben?", ["📤 Issue (SR slip)", "📥 Supplier Receipt (Challan)"], horizontal=True, key="ri_mode",
+                    label_visibility="collapsed")
     _ri_saved_banner()
     _ri_requests_panel()
+    if mode.startswith("📥"):
+        st.caption(f"Ek challan-er shob item (sorbocho {RR_MAX_LINES} ti) ek sathe receive korun. Supplier ar Challan No. bad-dhomulok. "
+                   "Receive korle stock bare, ar item-er requisition thakle tar Received qty auto jog hoy.")
+        _rr_form()
+        _rr_fix_panel()
+        return
+    st.caption(f"একটা রিকুইজিশন স্লিপের সব আইটেম (সর্বোচ্চ {RI_MAX_LINES}টি) এক SR নম্বরে একসাথে ইস্যু করুন। "
+               "SR নম্বর বাধ্যতামূলক। স্টক কম হলে অন্য Unit থেকে অটো-ট্রান্সফার (নিশ্চিত করলে) হবে; না হলে কিছুই সংরক্ষণ হয় না।")
     _ri_form()
     _ri_fix_panel()
 
@@ -12564,23 +12634,347 @@ def _ri_form():
                 done(f"✅ {_who}, apnar data sofolbhabe save hoyeche - SR {sr_no}: {n}টি আইটেম ইস্যু হয়েছে, স্টক কমেছে।")
 
 
+RR_MAX_LINES = 30
+
+
+def _rr_quick_add_item(gen):
+    """Supplier Receipt slip: item not in inventory -> create it right here (same fields / rules as Inventory > Add New Item,
+    opening stock 0 because the receipt adds the stock), then it is put on the list."""
+    with st.expander("➕ Item তালিকায় নেই? এখান থেকে নতুন Item add করুন"):
+        ensure_master_tables()
+        k = f"rrqa_{gen}_"
+
+        def _qa_dept_changed():
+            st.session_state[k + "cat"] = SEL
+        a1, a2, a3 = st.columns(3)
+        qa_name = a1.text_input("Item Name*", key=k + "name")
+        qa_code = a2.text_input("ERP Code (blank = temporary)", key=k + "code")
+        qa_size = a3.text_input("Size (optional)", key=k + "size")
+        try:
+            similar_item_alert(FAC, qa_name, qa_size)
+        except Exception:
+            pass
+        b1, b2, b3 = st.columns(3)
+        qa_dept = b1.selectbox("Department*", list(DEPARTMENTS), key=k + "dept", on_change=_qa_dept_changed)
+        qa_cat = b2.selectbox("Budget Category*", [SEL] + get_budget_categories(FAC, qa_dept), key=k + "cat")
+        qa_pcat = b3.selectbox("Product Category*", [SEL] + get_product_categories(), key=k + "pcat")
+        c1, c2 = st.columns(2)
+        qa_uom = c1.selectbox("UOM*", [SEL] + get_uoms(), key=k + "uom")
+        qa_price = c2.number_input("Unit Price (BDT) — optional", min_value=0.0, step=1.0, key=k + "price")
+        st.caption("Opening stock 0 thakbe; receipt-er Quantity diye stock barbe. Save korle item ti nijei challan-er talikay chole jabe.")
+        if st.button("💾 Item Save kore talikay jog korun", key=k + "save", use_container_width=True) and guard():
+            missing = [lbl for lbl, bad in (("Item Name", not qa_name.strip()), ("Budget Category", qa_cat == SEL),
+                                             ("Product Category", qa_pcat == SEL), ("UOM", qa_uom == SEL)) if bad]
+            if missing:
+                st.error("Required: " + ", ".join(missing) + ".")
+            else:
+                res = add_item(FAC, qa_code, qa_name.strip(), qa_size.strip(), qa_dept, qa_cat, 0.0, qa_price, "", qa_uom, qa_pcat)
+                if res:
+                    st.session_state["_rr_prefill_sl"] = res[1]
+                    done(f"Item ager theke chilo - talikay jog kora holo: {qa_name.strip()}" if res[0] == "exists"
+                         else f"New item added: {qa_name.strip()} [{qa_size.strip() or 'no size'}] · ERP Code {res[2]} - ekhon Quantity din.")
+
+
+@_frag
+def _rr_form():
+    fac = FAC
+    gen = st.session_state.get("rr_gen", 0)
+    lines = st.session_state.setdefault("rr_lines", [])
+    pf = st.session_state.pop("_rr_prefill_sl", None)    # item just created -> put it on the list
+    if pf:
+        r0 = q(f"SELECT {INV_COLS} FROM inventory WHERE sl_no=%s AND factory_name=%s", (pf, fac))
+        if r0 and not any(int(x["sl"]) == int(r0[0]["sl_no"]) for x in lines):
+            lines.append({"sl": int(r0[0]["sl_no"]), "pid": r0[0]["prod_id"], "name": r0[0]["item_name"], "size": r0[0]["size"],
+                          "stock": float(r0[0]["stock"]), "price": float(r0[0]["price"] or 0)})
+            st.session_state["rr_lines"] = lines
+
+    # ---- header: supplier, challan, date
+    recent = q_c("""SELECT supplier_name AS s, MAX(id) AS m FROM transactions
+                    WHERE factory_name=%s AND trans_type='Supplier. Rec' AND COALESCE(supplier_name,'')<>''
+                    GROUP BY supplier_name ORDER BY m DESC LIMIT 40""", (fac,))
+    NEW_SUP = "✍️ Notun supplier (nam likhun)"
+    c1, c2, c3 = st.columns([1.5, 1.2, 1])
+    pick_sup = c1.selectbox("Supplier *", [NEW_SUP] + [r["s"] for r in recent], key=f"rr_sup_pick_{gen}")
+    supplier = c1.text_input("Supplier-er nam", key=f"rr_sup_new_{gen}").strip() if pick_sup == NEW_SUP else pick_sup
+    challan = c2.text_input("Challan No. *", key=f"rr_challan_{gen}", placeholder="Supplier challan number").strip()
+    tx_date = c3.date_input("তারিখ", value=date.today(), max_value=date.today(), key="rr_date")
+    notes = st.text_input("Remarks (ঐচ্ছিক — যেমন PO No., গাড়ির নম্বর)", key=f"rr_notes_{gen}")
+
+    done_sl, confirm_existing = set(), True
+    if challan and supplier:
+        prior = q_c("""SELECT sl_no FROM transactions WHERE factory_name=%s AND trans_type='Supplier. Rec'
+                       AND challan_no=%s AND COALESCE(supplier_name,'')=%s""", (fac, challan, supplier))
+        done_sl = {int(r["sl_no"]) for r in prior}
+        if done_sl:
+            st.warning(f"⚠️ Challan {challan} ({supplier}) theke ei Unit-e ager-i {len(done_sl)} ti line receive kora hoyeche. "
+                       "Ekoi challan-er baki item jog korchen to? Same item duibar receive hole stock duibar barbe.")
+            confirm_existing = st.checkbox(f"Haan, Challan {challan}-e aro item receive korchi", key=f"rr_conf_{gen}")
+
+    # ---- add one item
+    st.markdown("**➕ আইটেম যোগ করুন**")
+    ALL_CAT = "সব Category"
+    cat_rows = q_c("""SELECT DISTINCT COALESCE(NULLIF(TRIM(category),''),'(Category নেই)') AS c FROM inventory
+                      WHERE factory_name=%s ORDER BY 1""", (fac,))
+    cat_sel = st.selectbox("📂 Category", [ALL_CAT] + [r["c"] for r in cat_rows], key=f"rr_cat_{gen}")
+    a1, a2, a3, a4 = st.columns([2.0, 2.3, 0.9, 1.1])
+    term = a1.text_input("🔍 খুঁজুন (নাম / ERP code / size / serial)", key=f"rr_search_{gen}").strip()
+    if cat_sel != ALL_CAT:
+        like = f"%{term.lower()}%"
+        cands = q_c(f"""SELECT {INV_COLS} FROM inventory
+                        WHERE factory_name=%s AND COALESCE(NULLIF(TRIM(category),''),'(Category নেই)')=%s
+                          AND (%s='' OR LOWER(item_name) LIKE %s OR LOWER(COALESCE(size,'')) LIKE %s OR LOWER(prod_id) LIKE %s
+                               OR LOWER(COALESCE(serial_no,'')) LIKE %s OR CAST(sl_no AS TEXT)=%s)
+                        ORDER BY item_name, size LIMIT 400""", (fac, cat_sel, term, like, like, like, like, term))
+    else:
+        cands = search_items(fac, term)[:30] if len(term) >= 2 else []
+    labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · স্টক {float(r['stock']):g}": r for r in cands}
+    pick = a2.selectbox(f"আইটেম ({len(labels)}টি)" if labels else "আইটেম", list(labels) if labels else ["— আগে Category বা নাম খুঁজুন —"],
+                        key=f"rr_pick_{gen}")
+    a3.number_input("পরিমাণ", min_value=0.0, step=1.0, format="%g", key=f"rr_qty_{gen}")
+    a4.number_input("Rate (৳)", min_value=0.0, step=1.0, format="%g", key=f"rr_rate_{gen}",
+                    help="Purchase rate (ঐচ্ছিক). 0 রাখলে Unit Price বদলাবে না।")
+
+    def _add():
+        pick_v = st.session_state.get(f"rr_pick_{gen}")
+        qty_v = float(st.session_state.get(f"rr_qty_{gen}") or 0)
+        rate_v = float(st.session_state.get(f"rr_rate_{gen}") or 0)
+        if not labels or pick_v not in labels:
+            st.session_state["rr_msg"] = ("error", "আগে আইটেম খুঁজে বাছুন।")
+            return
+        r = labels[pick_v]
+        cur = st.session_state.get("rr_lines", [])
+        if len(cur) >= RR_MAX_LINES:
+            st.session_state["rr_msg"] = ("error", f"একটা challan-এ সর্বোচ্চ {RR_MAX_LINES}টি আইটেম।")
+        elif any(int(x["sl"]) == int(r["sl_no"]) for x in cur):
+            st.session_state["rr_msg"] = ("error", "এই আইটেম তালিকায় আগেই আছে — পরিমাণ নিচে বদলান।")
+        elif qty_v <= 0:
+            st.session_state["rr_msg"] = ("error", "পরিমাণ ০-র বেশি দিন।")
+        else:
+            cur.append({"sl": int(r["sl_no"]), "pid": r["prod_id"], "name": r["item_name"], "size": r["size"],
+                        "stock": float(r["stock"]), "price": float(r["price"] or 0)})
+            st.session_state[f"rr_q_{gen}_{int(r['sl_no'])}"] = qty_v
+            st.session_state[f"rr_r_{gen}_{int(r['sl_no'])}"] = rate_v
+            st.session_state["rr_lines"] = cur
+            st.session_state[f"rr_search_{gen}"] = ""
+            st.session_state[f"rr_qty_{gen}"] = 0.0
+            st.session_state[f"rr_rate_{gen}"] = 0.0
+            st.session_state["rr_msg"] = ("ok", f"যোগ হয়েছে: {r['item_name']}")
+    st.button("➕ তালিকায় যোগ করুন", key=f"rr_add_{gen}", on_click=_add)
+    msg = st.session_state.pop("rr_msg", None)
+    if msg:
+        (st.error if msg[0] == "error" else st.caption)(msg[1])
+    _rr_quick_add_item(gen)
+
+    # ---- the list
+    st.markdown(f"**📋 এই challan-এর আইটেম ({len(lines)}/{RR_MAX_LINES})**")
+    if not lines:
+        st.info("এখনো কোনো আইটেম যোগ হয়নি।")
+        return
+    h = st.columns([0.4, 3.0, 1.2, 0.9, 1.2, 1.2, 1.8, 0.7])
+    for col, t in zip(h, ["#", "আইটেম", "ERP Code", "স্টক", "রিসিভ পরিমাণ", "Rate (৳)", "অবস্থা", ""]):
+        col.caption(t)
+    remove, qtys, rates, bad = None, [], [], False
+    for i, ln in enumerate(lines):
+        r = st.columns([0.4, 3.0, 1.2, 0.9, 1.2, 1.2, 1.8, 0.7])
+        r[0].write(i + 1)
+        r[1].write(f"{ln['name']} [{ln['size'] or '-'}]")
+        r[2].write(ln["pid"])
+        r[3].write(f"{ln['stock']:g}")
+        q_ = r[4].number_input("q", min_value=0.0, step=1.0, format="%g", key=f"rr_q_{gen}_{ln['sl']}", label_visibility="collapsed")
+        rt_ = r[5].number_input("r", min_value=0.0, step=1.0, format="%g", key=f"rr_r_{gen}_{ln['sl']}", label_visibility="collapsed")
+        qtys.append(float(q_))
+        rates.append(float(rt_))
+        cur_p = float(ln.get("price") or 0)
+        if q_ <= 0:
+            r[6].write("⚠️ পরিমাণ দিন")
+            bad = True
+        elif int(ln["sl"]) in done_sl:
+            r[6].write("🔁 এই challan-এ আগে রিসিভ")
+        elif rt_ > 0 and cur_p > 0 and abs(rt_ - cur_p) / cur_p > 0.25:
+            r[6].write(f"⚠️ দাম {(rt_ - cur_p) / cur_p * 100:+.0f}% (এখন ৳{cur_p:g})")
+        elif rt_ <= 0 and cur_p <= 0:
+            r[6].write("⚠️ দাম নেই")
+        else:
+            r[6].write("✅")
+        if r[7].button("✖", key=f"rr_rm_{gen}_{ln['sl']}", help="সারি মুছুন"):
+            remove = i
+    if remove is not None:
+        lines.pop(remove)
+        st.session_state["rr_lines"] = lines
+        try:
+            st.rerun(scope="fragment")
+        except TypeError:
+            st.rerun()
+    st.caption(f"মোট আইটেম-লাইন: {len(lines)} · মোট পরিমাণ: {sum(qtys):g}")
+    rate_mode = "Latest purchase rate"
+    if any(x > 0 for x in rates):
+        rate_mode = st.selectbox("Unit Price update (যে item-এ Rate দিয়েছেন)", ["Latest purchase rate", "Weighted average", "Keep current price"],
+                                 key=f"rr_ratemode_{gen}")
+    po_pending = st.checkbox("ERP PO pending", key=f"rr_po_{gen}", help="এই challan-এর সব লাইন ERP Audit → ERP PO Pending-এ ট্র্যাক হবে।")
+    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
+    if not can_write:
+        st.caption("সংরক্ষণ করতে login লাগবে (Auditor role শুধু দেখতে পারে)।")
+    if st.button("💾 Challan-er shob item receive korun", type="primary", key=f"rr_save_{gen}", use_container_width=True, disabled=not can_write):
+        if not supplier:
+            st.error("Supplier-er nam din.")
+        elif not challan:
+            st.error("Challan No. likhun - eta bad-dhomulok.")
+        elif bad:
+            st.error("তালিকায় সমস্যা আছে (পরিমাণ ০) — ঠিক করে আবার চেষ্টা করুন।")
+        elif not confirm_existing:
+            st.error("এই challan আগে রিসিভ হয়েছে — নিশ্চিত করার টিক দিন।")
+        elif guard():
+            n = save_supplier_receipt(fac, [{"sl": ln["sl"], "qty": q_, "rate": rt_} for ln, q_, rt_ in zip(lines, qtys, rates)],
+                                      tx_date, supplier, challan, notes.strip(), po_pending, rate_mode)
+            if n:
+                who = st.session_state.get("user", "")
+                _rn = st.session_state.pop("_req_auto_note", "")
+                st.session_state["ri_saved"] = {"user": who, "sr": challan, "kind": "rcv", "n": int(n), "qty": float(sum(qtys)),
+                                                "detail": supplier, "time": local_now().strftime("%d-%b-%Y %I:%M %p")}
+                st.session_state["rr_lines"] = []
+                st.session_state["rr_gen"] = gen + 1
+                done(f"✅ {who}, apnar data sofolbhabe save hoyeche - Challan {challan}: {n}টি আইটেম receive hoyeche, stock barche."
+                     + (f" {_rn}" if _rn else ""))
+
+
+@_frag
+def _rr_fix_panel():
+    """Edit / delete a challan that was already received: change a quantity or remove a wrong line. Stock follows; the
+    requisition Received qty follows too. Manager password for a direct fix, or a request the Store Manager approves."""
+    fac = FAC
+    with st.expander("✏️ Receive kora challan thik korun (qty bodlano · vul line bad deya)"):
+        look = st.text_input("Challan number likhe khujun (ager challan hole)", key="rrfix_look").strip()
+        sql = """SELECT COALESCE(challan_no,'') AS ch, COALESCE(supplier_name,'') AS sup, date, COUNT(*) AS n, MAX(id) AS last_id
+                 FROM transactions WHERE factory_name=%s AND trans_type='Supplier. Rec'"""
+        par = [fac]
+        if look:
+            sql += " AND challan_no=%s"
+            par.append(look)
+        groups = q(sql + " GROUP BY COALESCE(challan_no,''), COALESCE(supplier_name,''), date ORDER BY MAX(id) DESC LIMIT 40", par)
+        if look and not groups:
+            st.warning(f"Challan {look} ei unit-e paoa jayni.")
+        if not groups:
+            st.caption("Ei unit-e kono receive kora challan nei.")
+            return
+        names = {f"Challan {g['ch'] or '(nei)'} · {g['sup'] or '-'} · {g['date']} · {g['n']} item": (g["ch"], g["sup"], g["date"]) for g in groups}
+        ch, sup, dt = names[st.selectbox("Kon challan thik korben?", list(names), key="rrfix_sel")]
+        lines = q("""SELECT id, sl_no, prod_id, item_name, qty, date, notes FROM transactions
+                     WHERE factory_name=%s AND trans_type='Supplier. Rec' AND COALESCE(challan_no,'')=%s
+                       AND COALESCE(supplier_name,'')=%s AND date=%s ORDER BY id""", (fac, ch, sup, dt))
+        label = f"Challan {ch or '(nei)'}"
+        h = st.columns([3.2, 1.3, 1.1, 1.4, 1.1])
+        for col, t in zip(h, ["Item", "ERP Code", "Ager qty", "Notun qty", "Bad den"]):
+            col.caption(t)
+        edits, dels = {}, []
+        for ln in lines:
+            tid, old = int(ln["id"]), float(ln["qty"] or 0)
+            c = st.columns([3.2, 1.3, 1.1, 1.4, 1.1])
+            c[0].write(ln["item_name"])
+            c[1].write(ln["prod_id"])
+            c[2].write(f"{old:g}")
+            nq = c[3].number_input("q", min_value=0.0, step=1.0, value=old, format="%g", key=f"rrfix_q_{tid}_{old:g}",
+                                   label_visibility="collapsed")
+            if c[4].checkbox("✖", key=f"rrfix_d_{tid}"):
+                dels.append(ln)
+            elif abs(nq - old) > 1e-9:
+                edits[tid] = (ln, float(nq))
+        is_mgr = st.session_state.get("role") == "Store Manager"
+        n_pend = _ri_pending_n(fac, label)
+        if n_pend:
+            st.caption(f"⏳ Ei challan-er jonno {n_pend} ti correction request ager-i pending ache (upore '📥 Correction request' e dekhun).")
+        if not (edits or dels):
+            st.caption("Qty bodlan ba bad deyar jonno ✖ tick din, tarpor niche kivabe thik korben bachun. "
+                       "Item bhule gele ekoi challan number diye upore form-e abar receive korun.")
+            return
+        if any(nq <= 0 for _, nq in edits.values()):
+            st.error("Qty 0 kora jabe na - oi item bad dite hole ✖ tick din.")
+            return
+        st.info(f"Change: {len(edits)} ti qty bodlabe, {len(dels)} ti line delete hobe - stock ar requisition Received qty oi onujayi thik hobe.")
+        mode = st.radio("Kivabe thik korben?", ["📨 Request pathan (Manager approve korbe)", "🔐 Ekhoni thik korun (Manager password)"],
+                        index=1 if is_mgr else 0, horizontal=True, key="rrfix_mode")
+        if mode.startswith("📨"):
+            reason = st.text_input("Karon likhun - ki bhul hoyechilo? *", key="rrfix_reason").strip()
+            if st.button("📨 Correction request pathan", type="primary", key="rrfix_req_btn", disabled=not can_write_ri()):
+                if len(reason) < 5:
+                    st.error("Karon likhun (kom-pokkhe 5 akkhor), jate manager bujhte pare.")
+                elif guard():
+                    items = [{"action": "Change qty", "tx_id": tid, "sl_no": int(ln["sl_no"]), "prod_id": ln["prod_id"],
+                              "item_name": ln["item_name"], "old_qty": float(ln["qty"] or 0), "new_qty": float(nq)}
+                             for tid, (ln, nq) in edits.items()]
+                    items += [{"action": "Remove line", "tx_id": int(ln["id"]), "sl_no": int(ln["sl_no"]), "prod_id": ln["prod_id"],
+                               "item_name": ln["item_name"], "old_qty": float(ln["qty"] or 0), "new_qty": 0.0} for ln in dels]
+                    res_ = ri_create_requests(fac, label, items, reason, dt, "Supplier. Rec")
+                    if res_ is None:
+                        return
+                    made, skipped = res_
+                    if not made:
+                        st.warning("Ei line-gulor request ager-i pending ache - manager-er jonno opekkha korun.")
+                    else:
+                        who = st.session_state.get("user", "")
+                        st.session_state["ri_saved"] = {"user": who, "sr": label, "kind": "req", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
+                                                        "detail": f"{made} ti request" + (f" ({skipped} ti ager-i pending chilo)" if skipped else "")}
+                        st.session_state.pop("rrfix_reason", None)
+                        done(f"📨 {who}, apnar correction request pathano hoyeche ({made} ti). Manager approve korle correction hobe.")
+            return
+        pw_ok = mgr_check("rrfix_pw")
+        conf = confirm_box("rrfix_conf", "⚠️ Ami confirm korchi - ei change gulo stock-shoho save hobe.")
+        if st.button("💾 Correction save korun", type="primary", key="rrfix_save", disabled=not can_write_ri()):
+            if not pw_ok:
+                st.error("Store Manager password din.")
+            elif not conf:
+                st.error("Confirm tick din.")
+            elif guard():
+                n_edit = n_del = 0
+                try:
+                    for tid, (ln, nq) in edits.items():
+                        if not pc_edit_tx(tid, nq, ln["date"], ln["notes"]):
+                            raise ValueError("ekta line-er correction hoyni (upore error dekhun)")
+                        n_edit += 1
+                    for ln in dels:
+                        stk = q("SELECT COALESCE(current_stock,0) AS s FROM inventory WHERE sl_no=%s AND factory_name=%s", (ln["sl_no"], fac))
+                        if stk and float(stk[0]["s"]) < float(ln["qty"] or 0) - 1e-9:
+                            raise ValueError(f"{ln['item_name']}: line bad dile stock negative hoye jabe (mal ager-i issue hoyeche)")
+                        if not delete_transaction(int(ln["id"])):
+                            raise ValueError("ekta line delete hoyni (upore error dekhun)")
+                        n_del += 1
+                except ValueError as e:
+                    st.error(f"{e}  (ei porjonto save hoyeche: {n_edit} qty change, {n_del} delete)")
+                    if n_edit or n_del:
+                        st.rerun()
+                    return
+                who = st.session_state.get("user", "")
+                audit("RECEIPT_FIX", f"{fac}: {label} corrected by {who}: {n_edit} qty change(s), {n_del} line(s) removed")
+                st.session_state["ri_saved"] = {"user": who, "sr": label, "kind": "fix", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
+                                                "detail": f"{n_edit} qty bodlano, {n_del} line bad"}
+                st.session_state.pop("rrfix_pw", None)
+                st.session_state.pop("rrfix_conf", None)
+                done(f"✅ {who}, {label}-er correction sofolbhabe save hoyeche ({n_edit} qty bodlano, {n_del} line bad).")
+
+
 def _ri_saved_banner():
     """Stays at the top of the page after a save / fix: who saved it, which SR, how many items."""
     info = st.session_state.get("ri_saved")
     if not info or info.get("user") != st.session_state.get("user"):
         return
     c1, c2 = st.columns([8, 1])
-    if info.get("kind") == "req":
-        c1.success(f"📨 **{info['user']}**, apnar correction request manager-er kache pathano hoyeche — SR **{info['sr']}** · "
+    if info.get("kind") == "rcv":
+        c1.success(f"✅ **{info['user']}**, apnar data sofolbhabe save hoyeche — Challan **{info['sr']}** · {info['detail']} · "
+                   f"{info['n']} ti item receive · mot qty {info['qty']:g} · {info['time']}")
+    elif info.get("kind") == "req":
+        c1.success(f"📨 **{info['user']}**, apnar correction request manager-er kache pathano hoyeche — **{_ri_slip_label(info['sr'])}** · "
                    f"{info['detail']} · {info['time']}. Manager approve korle correction hobe.")
     elif info.get("kind") == "fix":
-        c1.success(f"✅ **{info['user']}**, apnar correction sofolbhabe save hoyeche — SR **{info['sr']}** · {info['detail']} · {info['time']}")
+        c1.success(f"✅ **{info['user']}**, apnar correction sofolbhabe save hoyeche — **{_ri_slip_label(info['sr'])}** · {info['detail']} · {info['time']}")
     else:
         c1.success(f"✅ **{info['user']}**, apnar data sofolbhabe save hoyeche — SR **{info['sr']}** · {info['n']} ti item · "
                    f"mot qty {info['qty']:g} · {info['time']}")
     if c2.button("✖ Bondho", key="ri_saved_close"):
         st.session_state.pop("ri_saved", None)
         st.rerun()
+
+
+def _ri_slip_label(req_no):
+    return str(req_no) if str(req_no).startswith("Challan ") else f"SR {req_no}"
 
 
 def _ri_use_sr(sr):
@@ -12805,13 +13199,18 @@ def _ri_apply_request(r, who):
     """Does what the request asks (stock-safe functions). Returns (ok, message). Nothing is changed when ok is False."""
     try:
         if r["action"] in ("Change qty", "Remove line"):
-            cur = q("SELECT id, qty, notes, date FROM transactions WHERE id=%s", (r["tx_id"],))
+            cur = q("SELECT id, qty, notes, date, trans_type, sl_no, factory_name FROM transactions WHERE id=%s", (r["tx_id"],))
             if not cur:
                 return False, "Oi line ar nei (ager-i delete hoyeche). Request ta Reject korun."
             c = cur[0]
             if abs(float(c["qty"] or 0) - float(r["old_qty"] or 0)) > 1e-9:
                 return False, (f"Request-er por line-er qty bodle gese (ekhon {float(c['qty']):g}, request-e chilo {float(r['old_qty']):g}). "
                                "Reject kore notun request nite bolun.")
+            if r["action"] == "Remove line" and c["trans_type"] in RECEIPT_TYPES:
+                stk = q("SELECT COALESCE(current_stock,0) AS s FROM inventory WHERE sl_no=%s AND factory_name=%s", (c["sl_no"], c["factory_name"]))
+                if stk and float(stk[0]["s"]) < float(c["qty"] or 0) - 1e-9:
+                    return False, (f"Line bad dile stock negative hoye jabe (stock {float(stk[0]['s']):g}, receipt {float(c['qty']):g}) - "
+                                   "mal ager-i issue hoye gese. Reject korun ba age stock thik korun.")
             done_ = (pc_edit_tx(int(r["tx_id"]), float(r["new_qty"]), c["date"], c["notes"]) if r["action"] == "Change qty"
                      else delete_transaction(int(r["tx_id"])))
             if not done_:
@@ -12848,7 +13247,7 @@ def _ri_requests_panel():
             pw_ok = mgr_check("rireq_pw") if is_mgr else False
             for r in pend:
                 with st.container(border=True):
-                    st.markdown(f"**#{r['id']} · SR {r['req_no']}** · {r['item_name']} · {_desc(r)}")
+                    st.markdown(f"**#{r['id']} · {_ri_slip_label(r['req_no'])}** · {r['item_name']} · {_desc(r)}")
                     st.caption(f"Karon: {r['reason']} · pathiyeche: {r['requested_by']} · {r['requested_at']}")
                     if is_mgr:
                         note = st.text_input("Manager-er note (reject korle karon likhun)", key=f"rireq_note_{r['id']}").strip()
@@ -12864,7 +13263,7 @@ def _ri_requests_panel():
                                     st.session_state["ri_saved"] = {"user": who, "sr": r["req_no"], "kind": "fix",
                                                                     "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
                                                                     "detail": f"request #{r['id']} approve ({_desc(r)})"}
-                                    done(f"✅ Request #{r['id']} approve hoyeche - SR {r['req_no']}: {_desc(r)}.")
+                                    done(f"✅ Request #{r['id']} approve hoyeche - {_ri_slip_label(r['req_no'])}: {_desc(r)}.")
                                 else:
                                     st.error(msg)
                         if b2.button("❌ Reject", key=f"rireq_no_{r['id']}"):
