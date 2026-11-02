@@ -12599,26 +12599,75 @@ def _ri_uom_changed(fac, sl, key, name, lines_key="ri_lines"):
         st.session_state[key] = old
 
 
-def _ri_section_pick(key, fac, current=""):
-    """Section dropdown (+ type a new one). Returns the chosen / typed section name, or '' when nothing is chosen."""
-    NONE, NEW = "— Section বাছুন —", "➕ নতুন Section লিখুন"
+def _ri_section_names(fac):
     try:
-        names = [r["section_name"] for r in q_c("SELECT section_name FROM ri_sections WHERE factory_name=%s ORDER BY LOWER(section_name)", (fac,))]
+        return [r["section_name"] for r in q_c("SELECT section_name FROM ri_sections WHERE factory_name=%s ORDER BY LOWER(section_name)", (fac,))]
     except Exception:
-        names = []
+        return []
+
+
+def _ri_section_pick(key, fac, current=""):
+    """Officers only PICK from the list the Store Manager saved (nobody can type a new section here)."""
+    NONE = "— Section বাছুন —"
+    names = _ri_section_names(fac)
     if current and current not in names:
-        names = names + [current]
-    opts = [NONE] + names + [NEW]
+        names = names + [current]          # an old slip may carry a section that was later removed from the list
+    if not names:
+        st.warning("এই Unit-এর Section list এখনো সেট করা হয়নি — Store Manager আগে Section list সেভ করুন।")
+        return ""
+    opts = [NONE] + names
     pick = st.selectbox("🏭 Section (কোন section-এ গেল) *", opts, index=opts.index(current) if current in opts else 0, key=key + "_s")
-    if pick == NEW:
-        nm = " ".join(st.text_input("নতুন Section-এর নাম", key=key + "_n").split())
-        if not nm:
-            return ""
-        for x in names:
-            if x.lower() == nm.lower():
-                return x
-        return nm
     return "" if pick == NONE else pick
+
+
+@tx
+def ri_sections_add(facs, names):
+    n = 0
+    for f in facs:
+        have = {x.lower() for x in _ri_section_names(f)}
+        for nm in names:
+            if nm.lower() not in have:
+                run("INSERT INTO ri_sections (factory_name, section_name) VALUES (%s,%s) ON CONFLICT DO NOTHING", (f, nm))
+                have.add(nm.lower())
+                n += 1
+    audit("SECTION_LIST_ADD", f"{', '.join(facs)}: {', '.join(names)}")
+    return n or True
+
+
+@tx
+def ri_sections_delete(fac, names):
+    run("DELETE FROM ri_sections WHERE factory_name=%s AND section_name = ANY(%s)", (fac, list(names)))
+    audit("SECTION_LIST_DELETE", f"{fac}: {', '.join(names)}")
+    return True
+
+
+def _ri_section_manager():
+    """Store Manager only: write the factory's section list once; officers pick from it while issuing."""
+    if st.session_state.get("role") != "Store Manager":
+        return
+    fac = FAC
+    with st.expander(f"⚙️ Section list — {fac} (শুধু Store Manager)"):
+        have = _ri_section_names(fac)
+        st.caption("এই Unit-এর Section: " + (", ".join(have) if have else "এখনো কিছু নেই"))
+        txt = st.text_area("নতুন Section লিখুন (প্রতি লাইনে একটি)", key="rism_txt", height=110, placeholder="Cutting\nSewing\nFinishing")
+        all_f = st.checkbox("সব Factory-তে একই Section যোগ করুন", key="rism_all")
+        if st.button("💾 Section list-এ যোগ করুন", key="rism_add") and guard():
+            names = []
+            for ln in txt.splitlines():
+                nm = " ".join(ln.split())
+                if nm and nm.lower() not in {x.lower() for x in names}:
+                    names.append(nm)
+            if not names:
+                st.error("অন্তত একটি Section লিখুন।")
+            elif ri_sections_add(list(FACTORIES) if all_f else [fac], names):
+                st.session_state.pop("rism_txt", None)
+                done(f"✅ Section list save hoyeche: {', '.join(names)}")
+        if have:
+            rm = st.multiselect("তালিকা থেকে বাদ দিন", have, key="rism_del",
+                                help="আগের Issue-র data-তে Section-এর নাম যেমন আছে তেমনই থাকবে; শুধু নতুন Issue-র dropdown থেকে সরবে।")
+            if rm and st.button("🗑 বাদ দিন", key="rism_delbtn") and guard():
+                if ri_sections_delete(fac, rm):
+                    done(f"✅ Section list theke bad deya hoyeche: {', '.join(rm)}")
 
 
 @tx
@@ -12648,6 +12697,8 @@ def tab_req_issue():
             render_count_gate_banner()
         except Exception:
             pass
+    if not mode.startswith("📥"):
+        _ri_section_manager()
     _ri_saved_banner()
     _ri_requests_panel()
     if mode.startswith("📥"):
