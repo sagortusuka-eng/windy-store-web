@@ -5284,8 +5284,19 @@ def erp_product_received_view():
                  FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
                  WHERE t.trans_type='Supplier. Rec'{fsql} ORDER BY t.id DESC""", fp)
     st.markdown('<div class="section-title">Product Received · ERP & receiving history</div>', unsafe_allow_html=True)
+    try:
+        if "CONSOLIDATED" not in str(FAC):
+            _oth = q_c("""SELECT factory_name, COUNT(*) AS n FROM transactions
+                          WHERE trans_type='Supplier. Rec' AND date=%s AND factory_name<>%s GROUP BY factory_name""",
+                       (local_now().strftime(DATE_FMT), FAC))
+            if _oth:
+                st.info("ℹ️ Ekhane shudhu **" + FAC + "**-er receipt dekhay. Ajke onno unit-e receipt hoyeche: "
+                        + ", ".join(f"**{r['factory_name']}** {int(r['n'])} ti" for r in _oth)
+                        + " — oi record dekhte upore Active factory bodle nin (ba CONSOLIDATED).")
+    except Exception:
+        pass
     if rc.empty:
-        st.info("Supplier receipt record nei. [1] TRANSACTIONS-e 'Supplier Receipt' diye product receive korun.")
+        st.info("Ei unit-e Supplier receipt record nei. 🧾 Requisition Issue → 📥 Supplier Receipt diye product receive korun.")
         return
     rc["qty"] = rc["qty"].astype(float)
     rc["_dt"] = pd.to_datetime(rc["date"].apply(parse_date), errors="coerce")
@@ -12448,8 +12459,9 @@ def tab_req_issue():
     _ri_saved_banner()
     _ri_requests_panel()
     if mode.startswith("📥"):
-        st.caption(f"Ek challan-er shob item (sorbocho {RR_MAX_LINES} ti) ek sathe receive korun. Supplier ar Challan No. bad-dhomulok. "
-                   "Receive korle stock bare, ar item-er requisition thakle tar Received qty auto jog hoy.")
+        st.caption(f"📍 Ei receipt **{FAC}**-e save hobe. Ek challan-er shob item (sorbocho {RR_MAX_LINES} ti) ek sathe receive korun. "
+                   "Supplier ar Challan No. bad-dhomulok. Receive korle stock bare, ar item-er requisition thakle tar Received qty auto jog hoy. "
+                   "Dekhben: 🔍 ERP Audit → 📥 Product Received.")
         _rr_form()
         _rr_fix_panel()
         return
@@ -16693,8 +16705,10 @@ sidebar_clock()
 
 with st.sidebar:
     st.markdown('<div class="nav-section-title">Workspace</div>', unsafe_allow_html=True)
-    for nav_index in range(6):
-        nav_label = TAB_NAMES[nav_index]
+    _ws_names = list(TAB_NAMES[:6]) + [NAV_REQ_ISSUE]         # Requisition Issue (+ Supplier Receipt) sits right under Physical Count
+    _hidden_nav = {"🗓 Daily Work Sheet"}                      # not used any more - removed from the sidebar (the page itself is untouched)
+    for nav_label in _ws_names:
+        nav_index = TAB_NAMES.index(nav_label)
         if st.button(
             nav_label,
             key=f"sidebar_nav_{nav_index}",
@@ -16707,6 +16721,8 @@ with st.sidebar:
     st.markdown('<div class="nav-section-title">Management</div>', unsafe_allow_html=True)
     for nav_index in range(6, len(TAB_NAMES)):
         nav_label = TAB_NAMES[nav_index]
+        if nav_label in _ws_names or nav_label in _hidden_nav:
+            continue
         if st.button(
             nav_label,
             key=f"sidebar_nav_{nav_index}",
