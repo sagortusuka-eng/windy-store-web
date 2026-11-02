@@ -1263,6 +1263,21 @@ def ensure_req_no_column():
         raise
 
 
+def ensure_section_schema():
+    """transactions.section + ri_sections list table. Separate step with its own run-once flag, so it also runs on a server
+    that was already running before this feature was added."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS section TEXT")
+            cur.execute("""CREATE TABLE IF NOT EXISTS ri_sections (id SERIAL PRIMARY KEY, factory_name TEXT, section_name TEXT,
+                           UNIQUE(factory_name, section_name))""")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def ensure_req_link_table():
     """Remembers which requisition line got how much of which Supplier Receipt, so deleting / editing that receipt can undo it."""
     conn = get_conn()
@@ -12687,6 +12702,9 @@ def tab_req_issue():
         if not st.session_state.get("_req_no_column_ready"):
             run_once_per_process("req_no_column", ensure_req_no_column)
             st.session_state["_req_no_column_ready"] = True
+        if not st.session_state.get("_section_schema_ready"):
+            run_once_per_process("section_schema_v1", ensure_section_schema)
+            st.session_state["_section_schema_ready"] = True
     except Exception as e:
         st.error(f"req_no column setup failed: {e}")
         return
@@ -16974,6 +16992,9 @@ try:
     if not st.session_state.get("_req_no_column_ready"):
         run_once_per_process("req_no_column", ensure_req_no_column)
         st.session_state["_req_no_column_ready"] = True
+    if not st.session_state.get("_section_schema_ready"):
+        run_once_per_process("section_schema_v1", ensure_section_schema)
+        st.session_state["_section_schema_ready"] = True
     if not st.session_state.get("_req_link_table_ready"):
         run_once_per_process("req_link_table", ensure_req_link_table)
         st.session_state["_req_link_table_ready"] = True
