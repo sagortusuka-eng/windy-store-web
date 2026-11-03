@@ -1292,6 +1292,21 @@ def ensure_req_link_table():
         raise
 
 
+def ensure_req_tracker_schema():
+    """Additive columns for the Requisition Tracker: imported Size / UOM, sourcing handover and supplier order info."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            for col, typ in (("size", "TEXT DEFAULT ''"), ("uom", "TEXT DEFAULT ''"), ("sourcing_manager", "TEXT DEFAULT ''"),
+                             ("handover_date", "TEXT"), ("handover_by", "TEXT DEFAULT ''"), ("supplier_name", "TEXT DEFAULT ''"),
+                             ("order_date", "TEXT"), ("order_note", "TEXT DEFAULT ''")):
+                cur.execute(f"ALTER TABLE requisition_tracking ADD COLUMN IF NOT EXISTS {col} {typ}")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def ensure_ri_request_table():
     """Correction requests for saved Requisition Issue slips: an officer asks, the Store Manager approves / rejects."""
     conn = get_conn()
@@ -6507,7 +6522,11 @@ def req_calc(r):
 
 def load_requisitions():
     rows = q_c(f"""SELECT id, factory_name, req_no, department, req_date, item_name, req_qty, audit_approved_qty AS aud_qty,
-                 actual_received_qty AS rec_qty, po_date, received_date, COALESCE(prod_id,'') AS prod_id
+                 actual_received_qty AS rec_qty, po_date, received_date, COALESCE(prod_id,'') AS prod_id,
+                 COALESCE(NULLIF(size,''), (SELECT COALESCE(i.size,'') FROM inventory i
+                          WHERE i.factory_name=requisition_tracking.factory_name AND i.prod_id=requisition_tracking.prod_id LIMIT 1), '') AS size,
+                 COALESCE(uom,'') AS uom, COALESCE(sourcing_manager,'') AS sourcing_manager, COALESCE(handover_date,'') AS handover_date,
+                 COALESCE(supplier_name,'') AS supplier_name, COALESCE(order_date,'') AS order_date, COALESCE(order_note,'') AS order_note
                  FROM requisition_tracking WHERE 1=1{FSQL} ORDER BY id DESC""", FP)
     return [req_calc(r) for r in rows]
 
@@ -6628,9 +6647,10 @@ def import_requisition(fac, rows, create_items):
         else:
             code = p["code"]
         run("""INSERT INTO requisition_tracking (factory_name, req_no, department, req_date, item_name, req_qty,
-               audit_approved_qty, actual_received_qty, status, po_delay_days, prod_id)
-               VALUES (%s,%s,%s,%s,%s,%s,0,0,'Req Created - Audit Pending',0,%s)""",
-            (fac, p["req_no"], p["dept"], p["date"], p["item"], p["qty"], code))
+               audit_approved_qty, actual_received_qty, status, po_delay_days, prod_id, size, uom)
+               VALUES (%s,%s,%s,%s,%s,%s,0,0,'Req Created - Audit Pending',0,%s,%s,%s)""",
+            (fac, p["req_no"], p["dept"], p["date"], p["item"], p["qty"], code,
+             (p.get("size") or "").strip(), (p.get("uom") or "").strip()))
     audit("IMPORT_REQUISITION", f"Imported {len(rows)} line(s) into {fac}, new items {new_items}")
     return new_items
 
@@ -6931,7 +6951,7 @@ def _req_item_summary(rows):
     for r in rows:
         code = str(r["prod_id"] or "").strip()
         key = (r["factory_name"] if cons else "", code or ("name:" + str(r["item_name"]).strip().lower()))
-        g = groups.setdefault(key, {"Unit": r["factory_name"], "Item": r["item_name"], "ERP Code": code, "Requisitions": 0,
+        g = groups.setdefault(key, {"Unit": r["factory_name"], "Item": r["item_name"], "Size": r.get("size") or "", "ERP Code": code, "Requisitions": 0,
                                     "Req Qty": 0.0, "Approved": 0.0, "Received": 0.0, "Pending": 0.0, "base": 0.0, "age": 0})
         g["Requisitions"] += 1
         g["Req Qty"] += r["req_qty"]
@@ -6959,7 +6979,7 @@ def _req_item_summary(rows):
     st.caption(f"Items: {len(items):,} | Requested: {sum(g['Req Qty'] for g in items):,.0f} | "
                f"Approved: {sum(g['Approved'] for g in items):,.0f} | Received: {sum(g['Received'] for g in items):,.0f} | "
                f"Pending: {sum(g['Pending'] for g in items):,.0f}")
-    cols = ["Item", "ERP Code", "Requisitions", "Req Qty", "Approved", "Received", "Pending", "Received %", "Oldest pending (days)", "Status"]
+    cols = ["Item", "Size", "ERP Code", "Requisitions", "Req Qty", "Approved", "Received", "Pending", "Received %", "Oldest pending (days)", "Status"]
     if cons:
         cols = ["Unit"] + cols
     df = pd.DataFrame(items)[cols]
@@ -6978,7 +6998,7 @@ def _req_item_summary(rows):
               and ((str(r["prod_id"] or "").strip() == g["ERP Code"] and g["ERP Code"])
                    or (not g["ERP Code"] and str(r["item_name"]).strip().lower() == str(g["Item"]).strip().lower()))]
     detail.sort(key=lambda r: parse_date(r["req_date"]) or datetime.max)
-    st.dataframe(pd.DataFrame([{"Req No": r["req_no"], "Req Date": r["req_date"], "Department": r["department"],
+    st.dataframe(pd.DataFrame([{"Req No": r["req_no"], "Req Date": r["req_date"], "Department": r["department"], "Size": r.get("size") or "",
                                 "Req Qty": r["req_qty"], "Approved": r["aud_qty"], "Received": r["rec_qty"], "Pending": r["pending"],
                                 "PO Date": r["po_date"] or "Pending PO", "Last received": r["received_date"] or "",
                                 "Status": r["calc_status"]} for r in detail]),
@@ -6986,13 +7006,268 @@ def _req_item_summary(rows):
     st.caption("Approve / PO date / Edit korte upore '🧾 Requisition-wise' view-e jan.")
 
 
+# ------------------------------------------------------------
+#  REQUISITION TRACKER (premium view): one Req No -> full picture + sourcing handover / supplier order
+# ------------------------------------------------------------
+_RQ_CSS = """<style>
+.rq-hero{background:linear-gradient(135deg,#0f172a 0%,#1e293b 58%,#9a3412 150%);color:#fff;border-radius:18px;padding:20px 24px;display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;box-shadow:0 10px 30px rgba(15,23,42,.18);margin:6px 0 14px}
+.rq-eyebrow{font-size:11px;letter-spacing:.18em;opacity:.7;font-weight:700}
+.rq-title{font-size:30px;font-weight:800;letter-spacing:-.01em;line-height:1.15;margin:2px 0 8px;word-break:break-word}
+.rq-meta{font-size:13px;opacity:.88;display:flex;gap:16px;flex-wrap:wrap}
+.rq-badge{padding:8px 16px;border-radius:999px;font-weight:700;font-size:13px;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.3);white-space:nowrap}
+.rq-badge.ok{background:#16a34a;border-color:#16a34a}
+.rq-badge.part{background:#f59e0b;border-color:#f59e0b;color:#1f2937}
+.rq-badge.po{background:#2563eb;border-color:#2563eb}
+.rq-badge.apr{background:#7c3aed;border-color:#7c3aed}
+.rq-badge.wait{background:#dc2626;border-color:#dc2626}
+.rq-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:14px}
+.rq-kpi{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:14px 16px 14px 20px;position:relative;overflow:hidden;box-shadow:0 1px 3px rgba(15,23,42,.05)}
+.rq-kpi:before{content:"";position:absolute;left:0;top:0;bottom:0;width:6px;background:var(--c,#0f766e)}
+.rq-kpi small{display:block;font-size:11px;font-weight:700;letter-spacing:.08em;color:#64748b;text-transform:uppercase}
+.rq-kpi b{display:block;font-size:25px;font-weight:800;color:#0f172a;margin-top:3px;line-height:1.1}
+.rq-prog{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:12px 16px;margin-bottom:14px}
+.rq-prog-h{display:flex;justify-content:space-between;font-size:12.5px;font-weight:700;color:#334155;margin-bottom:7px}
+.rq-bar{height:12px;border-radius:999px;background:#e2e8f0;overflow:hidden}
+.rq-bar>div{height:100%;border-radius:999px;background:linear-gradient(90deg,#f97316,#16a34a)}
+.rq-steps{display:grid;grid-template-columns:repeat(5,1fr);margin:4px 0 14px;background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 8px;box-shadow:0 1px 3px rgba(15,23,42,.05)}
+.rq-step{text-align:center;position:relative;padding:0 6px}
+.rq-dot{width:34px;height:34px;border-radius:50%;margin:0 auto 8px;display:flex;align-items:center;justify-content:center;font-weight:800;background:#e2e8f0;color:#64748b;position:relative;z-index:1}
+.rq-step.done .rq-dot{background:#16a34a;color:#fff}
+.rq-step.part .rq-dot{background:#f59e0b;color:#fff}
+.rq-step:not(:last-child):after{content:"";position:absolute;top:16px;left:calc(50% + 20px);right:calc(-50% + 20px);height:3px;background:#e2e8f0}
+.rq-step.done:not(:last-child):after{background:#16a34a}
+.rq-st-t{font-size:12.5px;font-weight:700;color:#0f172a}
+.rq-st-s{font-size:11.5px;color:#64748b;margin-top:2px;word-break:break-word}
+.rq-ho{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-bottom:14px}
+.rq-ho>div{background:linear-gradient(180deg,#fff,#f8fafc);border:1px solid #e2e8f0;border-radius:14px;padding:12px 16px}
+.rq-ho small{display:block;font-size:11px;font-weight:700;letter-spacing:.08em;color:#64748b;text-transform:uppercase}
+.rq-ho b{font-size:15.5px;color:#0f172a;word-break:break-word}
+.rq-h2{font-size:15px;font-weight:800;color:#0f172a;margin:18px 0 8px;display:flex;align-items:center;gap:8px}
+.rq-h2:after{content:"";flex:1;height:1px;background:#e2e8f0}
+@media(max-width:700px){.rq-steps{grid-template-columns:1fr 1fr;row-gap:14px}.rq-step:after{display:none}.rq-title{font-size:23px}}
+</style>"""
+
+
+def _rq_n(v):
+    try:
+        s = f"{float(v or 0):,.2f}"
+    except Exception:
+        return "0"
+    return s.rstrip("0").rstrip(".") if "." in s else s
+
+
+def _rq_join(vals):
+    seen, out = set(), []
+    for v in vals:
+        v = str(v or "").strip()
+        if v and v.lower() not in seen:
+            seen.add(v.lower())
+            out.append(v)
+    return out
+
+
+@tx
+def set_req_handover(ids, manager, hand_date, supplier, order_date, note, mark_po, req_no):
+    """Stores who got the requisition at Sourcing and which supplier was ordered. Blank fields never wipe saved values."""
+    sets, vals = [], []
+    for col, v in (("sourcing_manager", manager), ("handover_date", hand_date), ("supplier_name", supplier),
+                   ("order_date", order_date), ("order_note", note)):
+        if v:
+            sets.append(f"{col}=%s")
+            vals.append(v)
+    if mark_po and order_date:
+        sets.append("po_date=%s")
+        vals.append(order_date)
+    sets.append("handover_by=%s")
+    vals.append(st.session_state.get("user", ""))
+    for rid in ids:
+        run(f"UPDATE requisition_tracking SET {', '.join(sets)} WHERE id=%s", tuple(vals) + (int(rid),))
+    audit("REQ_HANDOVER_ORDER", f"Req {req_no}: {len(ids)} line(s); sourcing manager={manager or '-'}, handover={hand_date or '-'}, "
+                               f"supplier={supplier or '-'}, order date={order_date or '-'}")
+    return True
+
+
+def req_tracker_view():
+    st.markdown(_RQ_CSS, unsafe_allow_html=True)
+    rows_all = load_requisitions()
+    if not rows_all:
+        st.info("Requisition nei.")
+        return
+    cons = "CONSOLIDATED" in str(FAC)
+    groups = {}
+    for r in rows_all:                       # rows come newest first
+        groups.setdefault((r["factory_name"], str(r["req_no"] or "").strip()), []).append(r)
+    c1, c2 = st.columns([1.2, 1.8])
+    term = c1.text_input("🔍 Requisition Number", key="rqt_term", placeholder="Req No likhun (puro ba ongsho)").strip().lower()
+    keys = [k for k in groups if (term in k[1].lower())] if term else list(groups)
+    if not keys:
+        st.warning("Ei number-e kono requisition paoya jayni.")
+        return
+    keys = keys[:80]
+    names = [k[1] + (f" · {k[0]}" if cons else "") + f" · {len(groups[k])} item" for k in keys]
+    pick = c2.selectbox("Requisition select" + (" (recent 80)" if not term and len(groups) > 80 else ""), names, key="rqt_pick")
+    key = keys[names.index(pick)]
+    lines = sorted(groups[key], key=lambda r: r["id"])
+    req_no, fac_name = key[1], key[0]
+    kk = re.sub(r"[^A-Za-z0-9]", "_", f"{fac_name}_{req_no}")
+
+    req_t = sum(r["req_qty"] for r in lines)
+    aud_t = sum(r["aud_qty"] for r in lines)
+    rec_t = sum(r["rec_qty"] for r in lines)
+    pend_t = sum(r["pending"] for r in lines)
+    base_t = sum(r["base"] for r in lines)
+    pct = min(rec_t / base_t * 100.0, 100.0) if base_t > 0 else 0.0
+    n_aud = sum(1 for r in lines if r["aud_qty"] > 0)
+    n_full = sum(1 for r in lines if r["calc_status"] == "Fully Received")
+    mgrs = _rq_join(r["sourcing_manager"] for r in lines)
+    sups = _rq_join(r["supplier_name"] for r in lines)
+    hdates = _rq_join(r["handover_date"] for r in lines)
+    odates = _rq_join(r["order_date"] for r in lines)
+    n_ho = sum(1 for r in lines if r["sourcing_manager"])
+    n_ord = sum(1 for r in lines if r["supplier_name"])
+    dates = [parse_date(r["req_date"]) for r in lines if parse_date(r["req_date"])]
+    req_date_s = min(dates).strftime(DATE_FMT) if dates else (lines[0]["req_date"] or "-")
+    depts = " / ".join(_rq_join(r["department"] for r in lines)) or "-"
+
+    if n_full == len(lines):
+        stt, cls = "✅ Fully Received", "ok"
+    elif rec_t > 0:
+        stt, cls = "🟠 Partially Received", "part"
+    elif any(r["has_po"] for r in lines) or n_ord:
+        stt, cls = "🔵 PO / Order Placed", "po"
+    elif n_aud:
+        stt, cls = "🟣 Audit Approved", "apr"
+    else:
+        stt, cls = "🔴 Audit Pending", "wait"
+    e = html_lib.escape
+    st.markdown(f'<div class="rq-hero"><div><div class="rq-eyebrow">REQUISITION</div><div class="rq-title">{e(req_no or "-")}</div>'
+                f'<div class="rq-meta"><span>📅 {e(req_date_s)}</span><span>🏭 {e(str(fac_name))}</span><span>🏷 {e(depts)}</span>'
+                f'<span>📦 {len(lines)} item</span></div></div><div class="rq-badge {cls}">{stt}</div></div>', unsafe_allow_html=True)
+
+    def kpi(label, val, color):
+        return f'<div class="rq-kpi" style="--c:{color}"><small>{label}</small><b>{val}</b></div>'
+    st.markdown('<div class="rq-kpis">' + kpi("Requested", _rq_n(req_t), "#0f766e") + kpi("Audit Approved", _rq_n(aud_t), "#7c3aed")
+                + kpi("Received", _rq_n(rec_t), "#16a34a") + kpi("Pending", _rq_n(pend_t), "#dc2626")
+                + kpi("Items", f"{n_full}/{len(lines)} <span style='font-size:12px;color:#64748b;font-weight:600'>complete</span>", "#f97316")
+                + '</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="rq-prog"><div class="rq-prog-h"><span>📥 Receiving progress</span><span>{pct:.0f}%</span></div>'
+                f'<div class="rq-bar"><div style="width:{pct:.1f}%"></div></div></div>', unsafe_allow_html=True)
+
+    def step(no, title, sub, state):
+        return (f'<div class="rq-step {state}"><div class="rq-dot">{"✓" if state == "done" else no}</div>'
+                f'<div class="rq-st-t">{title}</div><div class="rq-st-s">{sub}</div></div>')
+    s_aud = "done" if n_aud == len(lines) else ("part" if n_aud else "")
+    s_ho = "done" if n_ho == n_aud and n_ho > 0 else ("part" if n_ho else "")
+    s_or = "done" if n_ord == n_aud and n_ord > 0 else ("part" if n_ord else "")
+    s_rc = "done" if n_full == len(lines) else ("part" if rec_t > 0 else "")
+    st.markdown('<div class="rq-steps">'
+                + step(1, "Requisition", e(req_date_s), "done")
+                + step(2, "Audit Approved", f"{n_aud}/{len(lines)} item", s_aud)
+                + step(3, "Sourcing Handover", e(", ".join(mgrs)) if mgrs else "Baki", s_ho)
+                + step(4, "Supplier Order", e(", ".join(sups)) if sups else "Baki", s_or)
+                + step(5, "Received", f"{_rq_n(rec_t)} / {_rq_n(base_t)}", s_rc) + '</div>', unsafe_allow_html=True)
+    st.markdown('<div class="rq-ho">'
+                f'<div><small>🤝 Sourcing Manager</small><b>{e(", ".join(mgrs)) or "— ekhono hand over hoy ni"}</b></div>'
+                f'<div><small>📆 Hand over date</small><b>{e(", ".join(hdates)) or "—"}</b></div>'
+                f'<div><small>🏭 Supplier (order deya)</small><b>{e(", ".join(sups)) or "— order hoy ni"}</b></div>'
+                f'<div><small>🧾 Order date</small><b>{e(", ".join(odates)) or "—"}</b></div></div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="rq-h2">📋 Item-wise details</div>', unsafe_allow_html=True)
+    df = pd.DataFrame([{"Item": r["item_name"], "Size": r.get("size") or "", "ERP Code": r["prod_id"], "Req Qty": r["req_qty"],
+                        "Audit Approved": r["aud_qty"], "Received": r["rec_qty"], "Pending": r["pending"],
+                        "Received %": (min(r["rec_qty"] / r["base"] * 100.0, 100.0) if r["base"] > 0 else 0.0),
+                        "Status": r["calc_status"], "Sourcing Manager": r["sourcing_manager"], "Handed Over": r["handover_date"],
+                        "Supplier": r["supplier_name"], "Order Date": r["order_date"], "PO Date": r["po_date"] or ""} for r in lines])
+    st.dataframe(df, hide_index=True, use_container_width=True, height=min(80 + 36 * len(df), 460),
+                 column_config={"Received %": st.column_config.ProgressColumn("Received %", min_value=0, max_value=100, format="%.0f%%"),
+                                "Req Qty": st.column_config.NumberColumn(format="%.2f"),
+                                "Audit Approved": st.column_config.NumberColumn(format="%.2f"),
+                                "Received": st.column_config.NumberColumn(format="%.2f"),
+                                "Pending": st.column_config.NumberColumn(format="%.2f")})
+    export_buttons(df, f"requisition_{kk}")
+
+    role = st.session_state.get("role")
+    st.markdown('<div class="rq-h2">✔️ Audit Approved Qty</div>', unsafe_allow_html=True)
+    if role not in ("Executive", "Store Manager"):
+        st.caption("Audit Approved Qty shudhu Executive ba Store Manager change korte parben.")
+    elif guard():
+        with st.form(f"rqt_aud_{kk}"):
+            new_q = {}
+            for r in lines:
+                a, b = st.columns([3, 1.2])
+                a.markdown(f"**{r['item_name']}**  \n<span style='color:#64748b;font-size:12px'>{(r.get('size') or '').strip() or 'size nei'} · Requested {_rq_n(r['req_qty'])} · Received {_rq_n(r['rec_qty'])}</span>",
+                           unsafe_allow_html=True)
+                new_q[r["id"]] = b.number_input("Approved", 0.0, float(r["req_qty"]), float(r["aud_qty"]), key=f"rqt_a_{r['id']}",
+                                               label_visibility="collapsed")
+            if st.form_submit_button("💾 Save approved qty", type="primary"):
+                changed = [r for r in lines if abs(new_q[r["id"]] - r["aud_qty"]) > 1e-9]
+                if not changed:
+                    st.info("Kono poriborton nei.")
+                else:
+                    ok = True
+                    for r in changed:
+                        if not set_audit_qty(r["id"], new_q[r["id"]], r["aud_qty"], r["item_name"], r["req_no"]):
+                            ok = False
+                    if ok:
+                        done(f"Audit approved qty updated ({len(changed)} item).")
+
+    st.markdown('<div class="rq-h2">🤝 Sourcing Handover &amp; Supplier Order</div>', unsafe_allow_html=True)
+    if not guard():
+        return
+    if n_aud == 0:
+        st.warning("Ei requisition-e ekhono Audit Approved Qty nei. Age upore approve korun, tarpor Sourcing Manager-ke hand over lekhun.")
+    lab = {f"{r['item_name']}" + (f" [{r['size']}]" if r.get("size") else "") + f" · approved {_rq_n(r['aud_qty'])}": r for r in lines}
+    sup_rows = q_c(f"""SELECT DISTINCT supplier_name AS s FROM transactions WHERE COALESCE(supplier_name,'')<>''{FSQL}
+                    UNION SELECT DISTINCT supplier_name FROM requisition_tracking WHERE COALESCE(supplier_name,'')<>''{FSQL}
+                    ORDER BY 1 LIMIT 300""", FP + FP)
+    sup_list = [x["s"] for x in sup_rows if x.get("s")]
+    first = lines[0]
+    with st.form(f"rqt_ho_{kk}"):
+        picked = st.multiselect("Kon item gulo-r jonno? (blank = shob Audit-Approved item)", list(lab), key=f"rqt_sel_{kk}")
+        a, b = st.columns(2)
+        mgr = a.text_input("Sourcing Manager-er nam (jake hand over korlam)", value=first["sourcing_manager"] or "", key=f"rqt_mgr_{kk}")
+        hd = b.date_input("Hand over date", value=(parse_date(first["handover_date"]).date() if parse_date(first["handover_date"]) else date.today()),
+                          key=f"rqt_hd_{kk}")
+        a, b = st.columns(2)
+        sup_pick = a.selectbox("Supplier (ager list theke)", ["—"] + sup_list,
+                               index=(["—"] + sup_list).index(first["supplier_name"]) if first["supplier_name"] in sup_list else 0,
+                               key=f"rqt_sp_{kk}")
+        sup_new = b.text_input("...ba notun Supplier-er nam", key=f"rqt_sn_{kk}")
+        a, b = st.columns(2)
+        placed = a.checkbox("Supplier-ke order deya hoyeche", value=bool(first["order_date"]), key=f"rqt_pl_{kk}")
+        od = b.date_input("Order date", value=(parse_date(first["order_date"]).date() if parse_date(first["order_date"]) else date.today()),
+                          key=f"rqt_od_{kk}")
+        mark_po = st.checkbox("Order date-ke HO PO Date hishebeo set korun (status 'PO Issued' hobe, Sourcing Email-e pending theke jabe)",
+                              value=False, key=f"rqt_po_{kk}")
+        note = st.text_input("PO no / Note (optional)", value=first["order_note"] or "", key=f"rqt_nt_{kk}")
+        if st.form_submit_button("💾 Save Handover / Order info", type="primary"):
+            sup = sup_new.strip() or (sup_pick if sup_pick != "—" else "")
+            ids = [lab[x]["id"] for x in picked] if picked else [r["id"] for r in lines if r["aud_qty"] > 0]
+            if not ids:
+                st.error("Audit approved item nei - age Audit Approved Qty din.")
+            elif not mgr.strip() and not sup and not placed:
+                st.error("Sourcing Manager-er nam ba Supplier-er nam (ba order date) - kom-pokkhe akta din.")
+            elif placed and not sup:
+                st.error("Order deya hole Supplier-er nam din.")
+            elif set_req_handover(ids, mgr.strip(), hd.strftime(DATE_FMT) if mgr.strip() else "", sup,
+                                  od.strftime(DATE_FMT) if placed else "", note.strip(), mark_po and placed, req_no):
+                done(f"Handover / order info saved ({len(ids)} item).")
+
+
 def tab_requisition():
-    _top = lazy_tab_select(["📋 Requisition list", "🧾 Audit Reconciliation (item search)"], "lz_reqtop")
-    if _top == 1:
+    _lbls = ["📋 Requisition list", "🎯 Req Tracker (Premium)", "🧾 Audit Reconciliation (item search)"]
+    _top = _lbls[lazy_tab_select(_lbls, "lz_reqtop")]
+    if _top == _lbls[2]:
         try:
             audit_manual_view()
         except Exception as e:
             st.error(f"Audit Reconciliation load kora jayni: {e}")
+        return
+    if _top == _lbls[1]:
+        try:
+            req_tracker_view()
+        except Exception as e:
+            st.error(f"Req Tracker load kora jayni: {e}")
         return
     with st.expander("📥 Import requisition (Excel / CSV)"):
         if guard():
@@ -7017,10 +7292,11 @@ def tab_requisition():
         _req_item_summary(rows)
         return
     df = pd.DataFrame([{"ID": r["id"], "Factory": r["factory_name"], "Req No": r["req_no"], "Department": r["department"],
-                        "Req Date": r["req_date"], "Item": r["item_name"], "ERP Code": r["prod_id"], "Req Qty": r["req_qty"],
+                        "Req Date": r["req_date"], "Item": r["item_name"], "Size": r.get("size") or "", "ERP Code": r["prod_id"], "Req Qty": r["req_qty"],
                         "Audit Approved": r["aud_qty"], "Received": r["rec_qty"], "Pending": r["pending"],
                         "PO Date": r["po_date"] or "Pending PO", "Status": r["calc_status"],
-                        "Delay (days)": r["delay"]} for r in rows])
+                        "Delay (days)": r["delay"], "Sourcing Mgr": r.get("sourcing_manager") or "",
+                        "Supplier": r.get("supplier_name") or ""} for r in rows])
 
     def hl(row):
         late = (row["PO Date"] == "Pending PO") and row["Delay (days)"] > PO_ALERT_DAYS and row["Audit Approved"] > 0
@@ -7037,9 +7313,9 @@ def tab_requisition():
     k = str(r["id"])
     _tab = lazy_tab_select(["✔️ Audit Approved Qty (Executive)", "🚚 PO / Receiving", "✏️ Edit", "📧 Sourcing Email", "🧾 Audit Reconciliation"], "lz_req")
     if _tab == 0:
-        if st.session_state.get("role") != "Executive":
-            st.caption("Audit Approved Qty shudhu Executive (Mr. Sattar) change korte parben.")
-        else:
+        if st.session_state.get("role") not in ("Executive", "Store Manager"):
+            st.caption("Audit Approved Qty shudhu Executive (Mr. Sattar) ba Store Manager change korte parben.")
+        elif guard():
             nq = st.number_input("Audit approved qty", 0.0, float(r["req_qty"]), float(r["aud_qty"]), key=f"aud_{k}")
             if st.button("Save approved qty", key=f"aud_btn_{k}") and guard():
                 if set_audit_qty(r["id"], nq, r["aud_qty"], r["item_name"], r["req_no"]):
@@ -17041,6 +17317,9 @@ try:
     if not st.session_state.get("_req_link_table_ready"):
         run_once_per_process("req_link_table", ensure_req_link_table)
         st.session_state["_req_link_table_ready"] = True
+    if not st.session_state.get("_req_tracker_schema_ready"):
+        run_once_per_process("req_tracker_schema", ensure_req_tracker_schema)
+        st.session_state["_req_tracker_schema_ready"] = True
     if not st.session_state.get("_ri_request_table_ready"):
         run_once_per_process("ri_request_table", ensure_ri_request_table)
         st.session_state["_ri_request_table_ready"] = True
@@ -17178,6 +17457,10 @@ def _mc_issue_box(fac, lines, tx_date, ttype):
             if d:
                 by.setdefault(int(h["sl_no"]), []).append((d.date(), float(h["qty"] or 0)))
         ref = tx_date.date() if isinstance(tx_date, datetime) else tx_date
+        try:
+            wr = _wr_for_items(fac, msl)      # warranty lots of these items (supplier-claim reminder)
+        except Exception:
+            wr = {}
         for ln in lines:
             if int(ln["sl"]) not in msl:
                 continue
@@ -17194,6 +17477,8 @@ def _mc_issue_box(fac, lines, tx_date, ttype):
                 t_ += f" · গড় লাইফ ~{life:.0f} দিন"
             if ago <= MC_REPEAT_DAYS:
                 t_ += f" · ⚠️ {MC_REPEAT_DAYS} দিনের মধ্যে আবার নিচ্ছে — Maintenance টিমকে কারণ জিজ্ঞেস করুন"
+            if wr.get(int(ln["sl"])):
+                t_ += _wr_hint(wr[int(ln["sl"])], last_d, ref)
             st.caption(t_)
         return mid, "", msl
     except Exception as e:
@@ -17826,6 +18111,796 @@ def tab_section_budget():
         st.caption("সীমা সেট করতে ওপর থেকে একটি Factory বাছুন।")
 
 
+# ============================================================
+#  WARRANTY TRACKING  +  SCRAP & WASTE REGISTER  +  OLD MATERIALS REGISTER  +  PRICE HISTORY & JUMP ALERT   (ADDITIVE)
+#  Four NEW pages; nothing existing was re-written.
+# ============================================================
+NAV_WARRANTY = "🛡 Warranty"
+NAV_SCRAP = "♻️ Scrap Register"
+NAV_OLDMAT = "🗄 Old Materials"
+NAV_PRICE = "📈 Price History"
+for _nv in (NAV_WARRANTY, NAV_SCRAP, NAV_OLDMAT, NAV_PRICE):
+    if _nv not in TAB_NAMES:
+        TAB_NAMES.append(_nv)
+
+SCRAP_CATS = ["পুরনো যন্ত্রাংশ", "ড্রাম", "কার্টন", "লোহালক্কড়", "প্লাস্টিক", "কাঠ / প্যালেট", "অন্যান্য"]
+SCRAP_UNITS = ["Kg", "Pcs", "Ton", "Bag", "Drum", "Carton"]
+OM_CONDITIONS = ["ভালো", "মোটামুটি", "নষ্ট / স্ক্র্যাপ"]
+OM_STATUSES = ["মজুত আছে", "ইনভেন্টরিতে নেওয়া হয়েছে", "স্ক্র্যাপ করা হয়েছে", "ব্যবহার / নিষ্পত্তি"]
+WR_STATUSES = ["Not claimed", "Claimed", "Recovered", "Rejected"]
+
+
+def ensure_ext_schema():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS warranty_records (id SERIAL PRIMARY KEY, factory_name TEXT, sl_no INTEGER,
+                           prod_id TEXT, item_name TEXT, size TEXT DEFAULT '', qty REAL DEFAULT 0, supplier TEXT DEFAULT '',
+                           challan TEXT DEFAULT '', tx_id INTEGER, purchase_date TEXT, warranty_days INTEGER DEFAULT 0,
+                           expiry_date TEXT, notes TEXT DEFAULT '', claim_status TEXT DEFAULT 'Not claimed', claim_date TEXT,
+                           claim_amount REAL DEFAULT 0, claim_note TEXT DEFAULT '', entered_by TEXT, created_at TEXT)""")
+            cur.execute("CREATE INDEX IF NOT EXISTS ix_warranty_fac_sl ON warranty_records(factory_name, sl_no)")
+            cur.execute("""CREATE TABLE IF NOT EXISTS scrap_entries (id SERIAL PRIMARY KEY, factory_name TEXT, entry_date TEXT,
+                           kind TEXT, category TEXT, item_desc TEXT DEFAULT '', qty REAL DEFAULT 0, unit TEXT DEFAULT 'Kg',
+                           buyer TEXT DEFAULT '', rate REAL DEFAULT 0, amount REAL DEFAULT 0, sl_no INTEGER, notes TEXT DEFAULT '',
+                           entered_by TEXT, created_at TEXT)""")
+            cur.execute("CREATE INDEX IF NOT EXISTS ix_scrap_fac ON scrap_entries(factory_name, id)")
+            cur.execute("""CREATE TABLE IF NOT EXISTS old_materials (id SERIAL PRIMARY KEY, factory_name TEXT, item_name TEXT,
+                           size TEXT DEFAULT '', category TEXT DEFAULT '', location TEXT DEFAULT '', qty REAL DEFAULT 0,
+                           unit TEXT DEFAULT 'Pcs', condition TEXT DEFAULT 'ভালো', est_rate REAL DEFAULT 0,
+                           status TEXT DEFAULT 'মজুত আছে', notes TEXT DEFAULT '', count_date TEXT, counted_by TEXT, created_at TEXT)""")
+            cur.execute("CREATE INDEX IF NOT EXISTS ix_oldmat_fac ON old_materials(factory_name, id)")
+            cur.execute("""CREATE TABLE IF NOT EXISTS old_material_counts (id SERIAL PRIMARY KEY, material_id INTEGER, count_date TEXT,
+                           qty REAL DEFAULT 0, counted_by TEXT, note TEXT DEFAULT '', created_at TEXT)""")
+            cur.execute("CREATE INDEX IF NOT EXISTS ix_oldmat_counts ON old_material_counts(material_id)")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def ext_schema():
+    if not st.session_state.get("_ext_schema_ready"):
+        run_once_per_process("ext_schema_v1", ensure_ext_schema)
+        st.session_state["_ext_schema_ready"] = True
+
+
+def _now_s():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _add_months(d, m):
+    y = d.year + (d.month - 1 + m) // 12
+    mo = (d.month - 1 + m) % 12 + 1
+    return date(y, mo, min(d.day, calendar.monthrange(y, mo)[1]))
+
+
+# ============================================================
+#  PAGE: 🛡 WARRANTY
+# ============================================================
+def _wr_for_items(fac, sls):
+    """{sl_no: [(purchase_date, expiry_date, row)]} - used by the machine-issue slip to remind about a supplier claim."""
+    ext_schema()
+    rows = q_c("""SELECT id, sl_no, supplier, challan, purchase_date, expiry_date, claim_status FROM warranty_records
+                  WHERE factory_name=%s AND sl_no = ANY(%s)""", (fac, [int(x) for x in sls]))
+    out = {}
+    for r in rows:
+        p, e = parse_date(r["purchase_date"]), parse_date(r["expiry_date"])
+        if p and e:
+            out.setdefault(int(r["sl_no"]), []).append((p.date(), e.date(), r))
+    return out
+
+
+def _wr_hint(lots, last_d, ref):
+    """lots of one item; last_d = date the previous part of this item was issued to the machine; ref = today's issue date."""
+    cand = [x for x in lots if x[0] <= last_d]
+    if not cand:
+        return ""
+    p, e, r = sorted(cand, key=lambda x: x[0])[-1]
+    if ref <= e:
+        sup = r.get("supplier") or "-"
+        return (f" · 🛡 আগের মালটি Supplier «{sup}» (Challan {r.get('challan') or '-'}) থেকে কেনা, ওয়ারেন্টি {e:%d-%b-%Y} পর্যন্ত — "
+                f"এখনো মেয়াদে, **supplier-এর কাছে দাবি করা যায়**")
+    return ""
+
+
+@tx
+def wr_add(fac, recs):
+    user = st.session_state.get("user", "")
+    for r in recs:
+        run("""INSERT INTO warranty_records (factory_name, sl_no, prod_id, item_name, size, qty, supplier, challan, tx_id,
+               purchase_date, warranty_days, expiry_date, notes, entered_by, created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (fac, r["sl"], r["code"], r["item"], r["size"], r["qty"], r["supplier"], r["challan"], r["tx_id"],
+             r["pdate"], r["days"], r["expiry"], r["notes"], user, _now_s()))
+    audit("WARRANTY_ADD", f"{fac}: {len(recs)} warranty record(s): " + ", ".join(f"{r['item']} till {r['expiry']}" for r in recs[:10]))
+    return {"n": len(recs)}
+
+
+@tx
+def wr_set_claim(wid, fac, status, cdate, amount, note):
+    run("UPDATE warranty_records SET claim_status=%s, claim_date=%s, claim_amount=%s, claim_note=%s WHERE id=%s",
+        (status, cdate, float(amount or 0), note, wid))
+    audit("WARRANTY_CLAIM", f"{fac}: warranty {wid} -> {status} ({float(amount or 0):g}) {note}")
+    return True
+
+
+@tx
+def wr_delete(wid, fac, label):
+    run("DELETE FROM warranty_records WHERE id=%s", (wid,))
+    audit("WARRANTY_DELETE", f"{fac}: warranty record {label} deleted")
+    return True
+
+
+def _wr_all(units):
+    ext_schema()
+    w = qdf_c("SELECT * FROM warranty_records WHERE factory_name = ANY(%s) ORDER BY id DESC", (list(units),))
+    if not w.empty:
+        w["p"] = _parse_dates(w["purchase_date"])
+        w["e"] = _parse_dates(w["expiry_date"])
+        w["days_left"] = (w["e"] - pd.Timestamp(local_now().date())).dt.days
+    return w
+
+
+def _wr_candidates(units, w):
+    """Same part failed again on the same machine while the earlier lot was still under warranty -> claimable."""
+    if w.empty:
+        return pd.DataFrame()
+    mdf = _mc_tx_df(units, None, None)
+    if mdf.empty:
+        return pd.DataFrame()
+    out = []
+    for (fac, mid, sl), g in mdf.groupby(["factory_name", "machine_id", "sl_no"]):
+        g = g.dropna(subset=["dt"]).sort_values("dt")
+        ws = w[(w["factory_name"] == fac) & (w["sl_no"] == sl)]
+        if len(g) < 2 or ws.empty:
+            continue
+        rows = list(g.itertuples())
+        for a, b in zip(rows, rows[1:]):
+            cand = ws[ws["p"] <= a.dt]
+            if cand.empty:
+                continue
+            lot = cand.sort_values("p").iloc[-1]
+            if pd.notna(lot["e"]) and b.dt <= lot["e"]:
+                out.append({"Machine": a.machine, "Item": f"{a.item} [{a.size or '-'}]", "আগের ইস্যু": a.dt.strftime(DATE_FMT),
+                            "আবার লেগেছে": b.dt.strftime(DATE_FMT), "কত দিনে নষ্ট": int((b.dt - a.dt).days),
+                            "Supplier": lot["supplier"], "Challan": lot["challan"], "ওয়ারেন্টি শেষ": lot["e"].strftime(DATE_FMT),
+                            "দাবির সম্ভাব্য টাকা (৳)": round(float(a.amount), 0), "দাবির অবস্থা": lot["claim_status"], "wid": int(lot["id"])})
+    return pd.DataFrame(out)
+
+
+def _wr_view_claims(units):
+    w = _wr_all(units)
+    if w.empty:
+        st.info("এখনো কোনো ওয়ারেন্টি রেকর্ড নেই — '➕ ওয়ারেন্টি যোগ' থেকে কেনা মালের ওয়ারেন্টি মেয়াদ রাখুন।")
+        return
+    today = local_now().date()
+    active = w[w["days_left"] >= 0]
+    soon = active[active["days_left"] <= 30]
+    cand = _wr_candidates(units, w)
+    open_c = cand[cand["দাবির অবস্থা"] == "Not claimed"] if not cand.empty else cand
+    k = st.columns(4)
+    k[0].metric("চালু ওয়ারেন্টি", len(active))
+    k[1].metric("৩০ দিনে শেষ হবে", len(soon))
+    k[2].metric("🚨 দাবি করা যায় (বাকি)", len(open_c))
+    k[3].metric("দাবির সম্ভাব্য টাকা", f"৳{float(open_c['দাবির সম্ভাব্য টাকা (৳)'].sum()) if not open_c.empty else 0:,.0f}")
+    st.markdown("**🚨 ওয়ারেন্টির মধ্যে আবার নষ্ট — supplier-এর কাছে দাবি করা যায়**")
+    if cand.empty:
+        st.success("এখন এমন কিছু পাওয়া যায়নি।")
+    else:
+        view = cand.drop(columns=["wid"]).sort_values("দাবির অবস্থা", key=lambda s: s.eq("Not claimed").map({True: 0, False: 1}), kind="stable")
+        st.dataframe(view, hide_index=True, use_container_width=True, height=min(90 + 35 * len(view), 420))
+        st.caption("নিয়ম: একই মেশিনে একই মাল আবার ইস্যু হয়েছে, আর আগের ইস্যুর আগে কেনা লটের ওয়ারেন্টি তখনো চালু ছিল। "
+                   "দাবি করলে '📋 সব ওয়ারেন্টি' ট্যাবে অবস্থা বদলে রাখুন, যাতে টাকা আদায় হলো কি না ট্র্যাক হয়।")
+        export_buttons(view, "warranty_claim_candidates", "Warranty claim candidates")
+    if not soon.empty:
+        st.markdown("**⏳ ৩০ দিনের মধ্যে ওয়ারেন্টি শেষ**")
+        s = soon.sort_values("days_left")
+        st.dataframe(pd.DataFrame({"Item": s["item_name"] + " [" + s["size"].replace("", "-") + "]", "Supplier": s["supplier"],
+                                   "Challan": s["challan"], "শেষ তারিখ": s["expiry_date"], "বাকি (দিন)": s["days_left"]}),
+                     hide_index=True, use_container_width=True)
+
+
+def _wr_view_add(fac):
+    st.caption("সাম্প্রতিক Supplier Receipt থেকে লাইন বেছে ওয়ারেন্টি মেয়াদ বসান (একই মেয়াদ সবগুলোতে)।")
+    days_back = st.selectbox("কত দিন আগের Receipt", [30, 90, 180, 365], index=1, key="wr_back")
+    rows = q("""SELECT t.id, t.sl_no, t.date, COALESCE(t.qty,0) AS qty, COALESCE(t.supplier_name,'') AS supplier,
+                       COALESCE(t.challan_no,'') AS challan, COALESCE(NULLIF(t.item_name,''), i.item_name,'') AS item,
+                       COALESCE(i.size,'') AS size, COALESCE(NULLIF(t.prod_id,''), i.prod_id,'') AS code,
+                       (SELECT COUNT(*) FROM warranty_records w WHERE w.tx_id=t.id) AS has
+                FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                WHERE t.factory_name=%s AND t.trans_type='Supplier. Rec' ORDER BY t.id DESC LIMIT 600""", (fac,))
+    cutoff = local_now().date() - timedelta(days=int(days_back))
+    opts = {}
+    for r in rows:
+        d = parse_date(r["date"])
+        if r["has"] or not d or d.date() < cutoff:
+            continue
+        opts[f"{r['date']} · {r['item']} [{r['size'] or '-'}] · {float(r['qty']):g} · {r['supplier'] or '-'} · Challan {r['challan'] or '-'}"] = r
+    if not opts:
+        st.info("এই সময়ে ওয়ারেন্টি-ছাড়া কোনো Supplier Receipt নেই।")
+        return
+    picks = st.multiselect(f"Receipt লাইন ({len(opts)}টি)", list(opts), key="wr_pick")
+    c1, c2, c3 = st.columns([1, 1, 2])
+    val = int(c1.number_input("ওয়ারেন্টি মেয়াদ", min_value=1, value=6, step=1, key="wr_val"))
+    unit = c2.selectbox("একক", ["মাস", "দিন"], key="wr_unit")
+    note = c3.text_input("নোট (যেমন: serial / শর্ত)", key="wr_note")
+    if st.button("💾 ওয়ারেন্টি সেভ করুন", type="primary", key="wr_save", disabled=not picks) and guard():
+        recs = []
+        for p in picks:
+            r = opts[p]
+            d0 = parse_date(r["date"]).date()
+            exp = _add_months(d0, val) if unit == "মাস" else d0 + timedelta(days=val)
+            recs.append({"sl": int(r["sl_no"]), "code": r["code"], "item": r["item"], "size": r["size"], "qty": float(r["qty"]),
+                         "supplier": r["supplier"], "challan": r["challan"], "tx_id": int(r["id"]), "pdate": r["date"],
+                         "days": (exp - d0).days, "expiry": exp.strftime(DATE_FMT), "notes": note.strip()})
+        if wr_add(fac, recs):
+            for k in ("wr_pick", "wr_note"):
+                st.session_state.pop(k, None)
+            done(f"✅ {len(recs)}টি ওয়ারেন্টি রেকর্ড সেভ হয়েছে।")
+
+
+def _wr_view_all(units, fac_ok):
+    w = _wr_all(units)
+    if w.empty:
+        st.info("কোনো রেকর্ড নেই।")
+        return
+    f = st.radio("দেখান", ["সব", "চালু", "মেয়াদ শেষ", "দাবি করা হয়েছে / আদায়"], horizontal=True, key="wr_filter")
+    v = w
+    if f == "চালু":
+        v = w[w["days_left"] >= 0]
+    elif f == "মেয়াদ শেষ":
+        v = w[w["days_left"] < 0]
+    elif f.startswith("দাবি"):
+        v = w[w["claim_status"] != "Not claimed"]
+    out = pd.DataFrame({"ID": v["id"], "Unit": v["factory_name"].map(short_fac), "Item": v["item_name"] + " [" + v["size"].replace("", "-") + "]",
+                        "Qty": v["qty"], "Supplier": v["supplier"], "Challan": v["challan"], "ক্রয়": v["purchase_date"],
+                        "ওয়ারেন্টি শেষ": v["expiry_date"], "বাকি (দিন)": v["days_left"], "দাবির অবস্থা": v["claim_status"],
+                        "আদায় (৳)": v["claim_amount"], "নোট": v["claim_note"].fillna("")})
+    if len(units) == 1:
+        out = out.drop(columns=["Unit"])
+    st.dataframe(out, hide_index=True, use_container_width=True, height=min(90 + 35 * len(out), 480))
+    export_buttons(out, "warranty_register", "Warranty register")
+    if not fac_ok:
+        return
+    with st.expander("✏️ দাবির অবস্থা আপডেট করুন / মুছুন"):
+        wf = w[w["factory_name"] == FAC]
+        if wf.empty:
+            st.info("এই Unit-এ রেকর্ড নেই।")
+            return
+        labs = {f"#{r['id']} · {r['item_name']} · {r['supplier'] or '-'} · শেষ {r['expiry_date']}": r for _, r in wf.iterrows()}
+        pick = st.selectbox("রেকর্ড", list(labs), key="wr_edit_pick")
+        r = labs[pick]
+        k = f"wre_{int(r['id'])}"
+        a, b, c = st.columns(3)
+        st_ = a.selectbox("অবস্থা", WR_STATUSES, index=WR_STATUSES.index(r["claim_status"]) if r["claim_status"] in WR_STATUSES else 0, key=k + "s")
+        amt = b.number_input("আদায় / দাবির টাকা (৳)", min_value=0.0, step=100.0, value=float(r["claim_amount"] or 0), key=k + "a")
+        nt = c.text_input("নোট", value=r["claim_note"] or "", key=k + "n")
+        x1, x2 = st.columns(2)
+        if x1.button("💾 সেভ", key=k + "b") and guard():
+            if wr_set_claim(int(r["id"]), FAC, st_, local_now().strftime(DATE_FMT) if st_ != "Not claimed" else None, amt, nt.strip()):
+                done("✅ আপডেট হয়েছে।")
+        if st.session_state.get("role") == "Store Manager" and x2.button("🗑 মুছুন", key=k + "d") and guard():
+            if wr_delete(int(r["id"]), FAC, pick):
+                done("✅ মোছা হয়েছে।")
+
+
+def tab_warranty():
+    st.markdown("#### 🛡 ওয়ারেন্টি ট্র্যাকিং")
+    try:
+        ext_schema()
+        mc_schema()
+    except Exception as e:
+        st.error(f"Warranty setup failed: {e}")
+        return
+    units = list(FACTORIES) if is_cons_view else [FAC]
+    t = lazy_tab_select(["🚨 দাবির সুযোগ", "➕ ওয়ারেন্টি যোগ", "📋 সব ওয়ারেন্টি"], "lz_wr")
+    if t == 0:
+        _wr_view_claims(units)
+    elif t == 1:
+        if is_cons_view:
+            st.info("ওপর থেকে একটি Factory বাছুন।")
+        else:
+            _wr_view_add(FAC)
+    else:
+        _wr_view_all(units, not is_cons_view)
+
+
+# ============================================================
+#  PAGE: ♻️ SCRAP REGISTER
+# ============================================================
+@tx
+def scrap_add(fac, d):
+    user = st.session_state.get("user", "")
+    run("""INSERT INTO scrap_entries (factory_name, entry_date, kind, category, item_desc, qty, unit, buyer, rate, amount, sl_no, notes,
+           entered_by, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (fac, d["date"], d["kind"], d["cat"], d["desc"], d["qty"], d["unit"], d["buyer"], d["rate"], d["amount"], d["sl"], d["notes"], user, _now_s()))
+    audit("SCRAP_" + d["kind"].upper(), f"{fac}: {d['kind']} {d['qty']:g} {d['unit']} {d['cat']} {d['desc']}"
+          + (f" to {d['buyer']} @ {d['rate']:g} = {d['amount']:g}" if d["kind"] == "Sold" else ""))
+    return True
+
+
+@tx
+def scrap_delete(sid, fac, label):
+    run("DELETE FROM scrap_entries WHERE id=%s", (sid,))
+    audit("SCRAP_DELETE", f"{fac}: scrap entry {label} deleted")
+    return True
+
+
+def _scrap_df(units):
+    ext_schema()
+    df = qdf_c("SELECT * FROM scrap_entries WHERE factory_name = ANY(%s) ORDER BY id", (list(units),))
+    if not df.empty:
+        for c in ("qty", "rate", "amount"):
+            df[c] = df[c].astype(float)
+        df["dt"] = _parse_dates(df["entry_date"])
+    return df
+
+
+def _scrap_balance(df):
+    if df.empty:
+        return {}
+    b = {}
+    for (cat, unit), g in df.groupby(["category", "unit"]):
+        b[(cat, unit)] = float(g[g["kind"] == "Collected"]["qty"].sum() - g[g["kind"] == "Sold"]["qty"].sum())
+    return b
+
+
+def _scrap_entry(fac):
+    df = _scrap_df([fac])
+    bal = _scrap_balance(df)
+    kind_l = st.radio("কী এন্ট্রি?", ["📥 জমা (Collected)", "💰 বিক্রি (Sold)"], horizontal=True, key="sc_kind")
+    kind = "Collected" if kind_l.startswith("📥") else "Sold"
+    a, b, c = st.columns([1, 1.3, 1.3])
+    d = a.date_input("তারিখ", value=local_now().date(), max_value=local_now().date(), key="sc_date")
+    cat = b.selectbox("ধরন / Category", SCRAP_CATS, key="sc_cat")
+    custom = c.text_input("নতুন Category (ঐচ্ছিক — লিখলে এটাই ধরা হবে)", key="sc_cat_new").strip()
+    cat_f = custom or cat
+    e1, e2, e3, e4 = st.columns([2, 1, 1, 1])
+    desc = e1.text_input("বিবরণ (যেমন: পুরনো bearing, লোহার পাত)", key="sc_desc").strip()
+    qty = e2.number_input("পরিমাণ", min_value=0.0, step=1.0, format="%g", key="sc_qty")
+    unit = e3.selectbox("একক", SCRAP_UNITS, key="sc_unit")
+    rate = e4.number_input("দর/ইউনিট (৳)", min_value=0.0, step=1.0, format="%g", key="sc_rate") if kind == "Sold" else 0.0
+    buyer, sl, confirm = "", None, True
+    if kind == "Sold":
+        known = sorted({x for x in df[df["kind"] == "Sold"]["buyer"].tolist() if x}) if not df.empty else []
+        f1, f2 = st.columns(2)
+        pick = f1.selectbox("ক্রেতা (Buyer)", ["— নতুন নাম লিখুন —"] + known, key="sc_buyer_pick")
+        newb = f2.text_input("নতুন ক্রেতার নাম", key="sc_buyer_new").strip() if pick.startswith("—") else ""
+        buyer = newb or ("" if pick.startswith("—") else pick)
+        have = bal.get((cat_f, unit), 0.0)
+        st.caption(f"হাতে জমা ({cat_f}, {unit}): {have:g}")
+        if qty > have + 1e-9:
+            st.warning("বিক্রির পরিমাণ জমার চেয়ে বেশি — আগের জমা এন্ট্রি বাকি থাকলে সেগুলো দিন।")
+            confirm = st.checkbox("তবুও সেভ করব", key="sc_conf")
+    else:
+        g1, g2 = st.columns(2)
+        term = g1.text_input("🔗 কোন Issue-করা আইটেম থেকে এই স্ক্র্যাপ? (ঐচ্ছিক, নাম/code লিখুন)", key="sc_link_term").strip()
+        cands = search_items(fac, term)[:30] if len(term) >= 2 else []
+        labs = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']}": int(r["sl_no"]) for r in cands}
+        lp = g2.selectbox("আইটেম লিংক", ["— লিংক নেই —"] + list(labs), key="sc_link_pick")
+        sl = labs.get(lp)
+    notes = st.text_input("নোট", key="sc_notes").strip()
+    if st.button("💾 সেভ করুন", type="primary", key="sc_save") and guard():
+        if qty <= 0:
+            st.error("পরিমাণ ০-র বেশি দিন।")
+        elif kind == "Sold" and (rate <= 0 or not buyer):
+            st.error("বিক্রির জন্য ক্রেতার নাম ও দর দিন।")
+        elif not confirm:
+            st.error("নিশ্চিত করার টিক দিন।")
+        elif scrap_add(fac, {"date": d.strftime(DATE_FMT), "kind": kind, "cat": cat_f, "desc": desc, "qty": float(qty), "unit": unit,
+                             "buyer": buyer, "rate": float(rate), "amount": float(qty) * float(rate), "sl": sl, "notes": notes}):
+            for k in ("sc_desc", "sc_qty", "sc_rate", "sc_notes", "sc_cat_new", "sc_buyer_new", "sc_link_term"):
+                st.session_state.pop(k, None)
+            done("✅ স্ক্র্যাপ এন্ট্রি সেভ হয়েছে।")
+
+
+def _scrap_summary(units):
+    df = _scrap_df(units)
+    if df.empty:
+        st.info("এখনো কোনো স্ক্র্যাপ এন্ট্রি নেই।")
+        return
+    d1, d2, plabel = report_period("sc_sum", default="এই মাস")
+    pdf = period_filter_df(df, "entry_date", d1, d2)
+    rows = []
+    for (cat, unit), g in df.groupby(["category", "unit"]):
+        gp = pdf[(pdf["category"] == cat) & (pdf["unit"] == unit)] if not pdf.empty else pdf
+        col = float(gp[gp["kind"] == "Collected"]["qty"].sum()) if not gp.empty else 0.0
+        sold_q = float(gp[gp["kind"] == "Sold"]["qty"].sum()) if not gp.empty else 0.0
+        amt = float(gp[gp["kind"] == "Sold"]["amount"].sum()) if not gp.empty else 0.0
+        rows.append({"Category": cat, "একক": unit, f"জমা ({plabel})": col, f"বিক্রি ({plabel})": sold_q, f"বিক্রির টাকা (৳)": round(amt, 0),
+                     "গড় দর (৳)": round(amt / sold_q, 2) if sold_q else None,
+                     "হাতে আছে (সব সময়)": float(g[g["kind"] == "Collected"]["qty"].sum() - g[g["kind"] == "Sold"]["qty"].sum())})
+    out = pd.DataFrame(rows)
+    st.metric(f"বিক্রি থেকে আয় ({plabel})", f"৳{float(out['বিক্রির টাকা (৳)'].sum()):,.0f}")
+    st.dataframe(out, hide_index=True, use_container_width=True, height=min(90 + 35 * len(out), 420))
+    export_buttons(out, "scrap_summary", f"Scrap summary {plabel}")
+
+
+def _scrap_buyers(units):
+    df = _scrap_df(units)
+    s = df[df["kind"] == "Sold"] if not df.empty else df
+    if s.empty:
+        st.info("বিক্রির এন্ট্রি নেই।")
+        return
+    rows = []
+    for (cat, unit, buyer), g in s.groupby(["category", "unit", "buyer"]):
+        q_ = float(g["qty"].sum())
+        last = g.sort_values("dt").iloc[-1]
+        rows.append({"Category": cat, "একক": unit, "Buyer": buyer, "মোট বিক্রি": q_, "গড় দর (৳)": round(float(g["amount"].sum()) / q_, 2) if q_ else 0,
+                     "শেষ দর (৳)": float(last["rate"]), "শেষ বিক্রি": last["entry_date"], "বার": len(g)})
+    out = pd.DataFrame(rows).sort_values(["Category", "গড় দর (৳)"], ascending=[True, False])
+    out["সেরা?"] = out.groupby(["Category", "একক"])["গড় দর (৳)"].transform("max").eq(out["গড় দর (৳)"]).map({True: "⭐ সেরা", False: ""})
+    st.dataframe(out, hide_index=True, use_container_width=True, height=min(90 + 35 * len(out), 480))
+    st.caption("একই Category-র ক্রেতাদের গড় দর তুলনা — ⭐ যিনি সবচেয়ে বেশি দাম দিয়েছেন। পরের বার ওনার কাছে (বা ওই দরের কম নয় এমন) বিক্রির চেষ্টা করুন।")
+    export_buttons(out, "scrap_buyer_compare", "Scrap buyer comparison")
+
+
+def _scrap_vs_issue(units):
+    df = _scrap_df(units)
+    c = df[(df["kind"] == "Collected") & df["sl_no"].notna()] if not df.empty else df
+    if c.empty:
+        st.info("কোনো জমা এন্ট্রিতে Issue-করা আইটেমের লিংক দেওয়া নেই। জমা এন্ট্রির সময় '🔗 আইটেম লিংক' বাছুন।")
+        return
+    d1, d2, plabel = report_period("sc_iss", default="এই মাস")
+    thr = st.number_input("স্ক্র্যাপ/ইস্যু % এর নিচে হলে সতর্কতা", min_value=1, max_value=100, value=50, step=5, key="sc_thr")
+    cp = period_filter_df(c, "entry_date", d1, d2)
+    rows = []
+    for fac in units:
+        cf = cp[cp["factory_name"] == fac] if not cp.empty else cp
+        sls = sorted({int(x) for x in c[c["factory_name"] == fac]["sl_no"]})
+        if not sls:
+            continue
+        psql, pp = period_sql("t.date", d1, d2)
+        iss = qdf_c(f"""SELECT t.sl_no, SUM(t.qty) AS qty, MAX(COALESCE(NULLIF(t.item_name,''), i.item_name,'')) AS item
+                        FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                        WHERE t.factory_name=%s AND t.sl_no = ANY(%s) AND t.trans_type = ANY(%s){psql} GROUP BY t.sl_no""",
+                    tuple([fac, sls, list(ISSUE_TYPES)] + pp))
+        for sl in sls:
+            ir = iss[iss["sl_no"] == sl]
+            iq = float(ir["qty"].iloc[0]) if not ir.empty else 0.0
+            sq = float(cf[cf["sl_no"] == sl]["qty"].sum()) if not cf.empty else 0.0
+            name = ir["item"].iloc[0] if not ir.empty else (c[(c["factory_name"] == fac) & (c["sl_no"] == sl)]["item_desc"].iloc[0] or f"SL {sl}")
+            ratio = (sq / iq * 100) if iq else None
+            rows.append({"Unit": short_fac(fac), "Issue-করা আইটেম": name, f"ইস্যু ({plabel})": iq, f"স্ক্র্যাপ জমা ({plabel})": sq,
+                         "স্ক্র্যাপ / ইস্যু %": round(ratio, 1) if ratio is not None else None,
+                         "অবস্থা": "⚠️ স্ক্র্যাপ কম — জিনিস কোথায় যাচ্ছে?" if (ratio is not None and ratio < thr) else ("—" if ratio is None else "✅")})
+    out = pd.DataFrame(rows)
+    if len(units) == 1 and not out.empty:
+        out = out.drop(columns=["Unit"])
+    st.dataframe(out, hide_index=True, use_container_width=True, height=min(90 + 35 * max(len(out), 1), 420))
+    st.caption("ইস্যু আর স্ক্র্যাপের একক মিলিয়ে দেখুন (যেমন Pcs-এ ইস্যু, Pcs-এই স্ক্র্যাপ)। সব মাল স্ক্র্যাপ হয় না (consumable) — তাই শুধু যে আইটেমগুলো লিংক করেছেন সেগুলোই তুলনা হয়।")
+
+
+def _scrap_list(units, fac_ok):
+    df = _scrap_df(units)
+    if df.empty:
+        st.info("কোনো এন্ট্রি নেই।")
+        return
+    v = df.sort_values("id", ascending=False)
+    out = pd.DataFrame({"ID": v["id"], "Unit": v["factory_name"].map(short_fac), "তারিখ": v["entry_date"], "ধরন": v["kind"].map({"Collected": "📥 জমা", "Sold": "💰 বিক্রি"}),
+                        "Category": v["category"], "বিবরণ": v["item_desc"], "পরিমাণ": v["qty"], "একক": v["unit"], "Buyer": v["buyer"],
+                        "দর (৳)": v["rate"], "টাকা (৳)": v["amount"], "এন্ট্রি করেছেন": v["entered_by"]})
+    if len(units) == 1:
+        out = out.drop(columns=["Unit"])
+    st.dataframe(out, hide_index=True, use_container_width=True, height=min(90 + 35 * len(out), 520))
+    export_buttons(out, "scrap_register", "Scrap register")
+    if fac_ok and st.session_state.get("role") == "Store Manager":
+        with st.expander("🗑 ভুল এন্ট্রি মুছুন (Store Manager)"):
+            vf = v[v["factory_name"] == FAC].head(60)
+            labs = {f"#{r['id']} · {r['entry_date']} · {r['kind']} · {r['category']} · {r['qty']:g} {r['unit']}": r for _, r in vf.iterrows()}
+            if labs:
+                p = st.selectbox("এন্ট্রি", list(labs), key="sc_del_pick")
+                if st.button("🗑 মুছুন", key="sc_del_btn") and guard():
+                    if scrap_delete(int(labs[p]["id"]), FAC, p):
+                        done("✅ মোছা হয়েছে।")
+
+
+def tab_scrap():
+    st.markdown("#### ♻️ স্ক্র্যাপ ও বর্জ্যের রেজিস্টার")
+    try:
+        ext_schema()
+    except Exception as e:
+        st.error(f"Scrap setup failed: {e}")
+        return
+    units = list(FACTORIES) if is_cons_view else [FAC]
+    t = lazy_tab_select(["➕ এন্ট্রি", "📊 জমা ও বিক্রি", "🏷 Buyer তুলনা", "⚖️ ইস্যু বনাম স্ক্র্যাপ", "📜 সব এন্ট্রি"], "lz_sc")
+    if t == 0:
+        if is_cons_view:
+            st.info("ওপর থেকে একটি Factory বাছুন।")
+        else:
+            _scrap_entry(FAC)
+    elif t == 1:
+        _scrap_summary(units)
+    elif t == 2:
+        _scrap_buyers(units)
+    elif t == 3:
+        _scrap_vs_issue(units)
+    else:
+        _scrap_list(units, not is_cons_view)
+
+
+# ============================================================
+#  PAGE: 🗄 OLD MATERIALS (stock that exists physically but was never in the software)
+# ============================================================
+@tx
+def om_add(fac, rows):
+    user = st.session_state.get("user", "")
+    today_s = local_now().strftime(DATE_FMT)
+    for r in rows:
+        got = run("""INSERT INTO old_materials (factory_name, item_name, size, category, location, qty, unit, condition, est_rate, status,
+                     notes, count_date, counted_by, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                  (fac, r["name"], r["size"], r["cat"], r["loc"], r["qty"], r["unit"], r["cond"], r["rate"], r["status"], r["notes"],
+                   today_s, user, _now_s()))
+        run("INSERT INTO old_material_counts (material_id, count_date, qty, counted_by, note, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
+            (got[0][0], today_s, r["qty"], user, "প্রথম গণনা", _now_s()))
+    audit("OLD_MATERIAL_ADD", f"{fac}: {len(rows)} old material line(s): " + ", ".join(r["name"] for r in rows[:10]))
+    return {"n": len(rows)}
+
+
+@tx
+def om_update(mid, fac, name, qty, status, cond, rate, loc, note):
+    user = st.session_state.get("user", "")
+    old = q("SELECT qty FROM old_materials WHERE id=%s", (mid,))
+    run("""UPDATE old_materials SET qty=%s, status=%s, condition=%s, est_rate=%s, location=%s, count_date=%s, counted_by=%s WHERE id=%s""",
+        (qty, status, cond, rate, loc, local_now().strftime(DATE_FMT), user, mid))
+    run("INSERT INTO old_material_counts (material_id, count_date, qty, counted_by, note, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
+        (mid, local_now().strftime(DATE_FMT), qty, user, note, _now_s()))
+    audit("OLD_MATERIAL_UPDATE", f"{fac}: {name}: qty {float(old[0]['qty'] or 0):g} -> {qty:g}, status {status} {note}" if old else f"{fac}: {name} updated")
+    return True
+
+
+@tx
+def om_delete(mid, fac, name):
+    run("DELETE FROM old_material_counts WHERE material_id=%s", (mid,))
+    run("DELETE FROM old_materials WHERE id=%s", (mid,))
+    audit("OLD_MATERIAL_DELETE", f"{fac}: old material {name} deleted")
+    return True
+
+
+def _om_df(units):
+    ext_schema()
+    df = qdf_c("SELECT * FROM old_materials WHERE factory_name = ANY(%s) ORDER BY id DESC", (list(units),))
+    if not df.empty:
+        for c in ("qty", "est_rate"):
+            df[c] = df[c].astype(float)
+        df["value"] = df["qty"] * df["est_rate"]
+    return df
+
+
+def _om_entry(fac):
+    st.caption("কোম্পানির সফটওয়্যারে নেই এমন পুরনো মাল গুনে এখানে রেকর্ড করুন। এগুলো মূল Inventory / Stock / Budget-এ যোগ হয় না।")
+    with st.form("om_form", clear_on_submit=True):
+        a, b, c, d = st.columns([2, 1, 1, 1])
+        name = a.text_input("মালের নাম *")
+        size = b.text_input("সাইজ / মডেল")
+        qty = c.number_input("গণনা করা পরিমাণ *", min_value=0.0, step=1.0, format="%g")
+        unit = d.text_input("একক", value="Pcs")
+        e, f, g, h = st.columns([1.2, 1.2, 1, 1])
+        cat = e.text_input("ধরন (যেমন: Motor, Bearing)")
+        loc = f.text_input("কোথায় আছে (জায়গা)")
+        cond = g.selectbox("অবস্থা", OM_CONDITIONS)
+        rate = h.number_input("আনুমানিক দর (৳)", min_value=0.0, step=1.0, format="%g")
+        notes = st.text_input("নোট")
+        if st.form_submit_button("💾 সেভ করুন") and guard():
+            if not name.strip() or qty <= 0:
+                st.error("নাম ও পরিমাণ (০-র বেশি) দিন।")
+            elif om_add(fac, [{"name": name.strip(), "size": size.strip(), "cat": cat.strip(), "loc": loc.strip(), "qty": float(qty), "unit": unit.strip() or "Pcs",
+                               "cond": cond, "rate": float(rate), "status": OM_STATUSES[0], "notes": notes.strip()}]):
+                done(f"✅ রেকর্ড হয়েছে: {name.strip()}")
+    with st.expander("📋 একসাথে অনেক লাইন (Excel থেকে paste)"):
+        st.caption("প্রতি লাইনে:  `নাম | সাইজ | পরিমাণ | একক | জায়গা | আনুমানিক দর | ধরন`  (নাম ও পরিমাণ লাগবেই, বাকি ঐচ্ছিক)")
+        bulk = st.text_area("Bulk", height=140, key="om_bulk", placeholder="Motor 5HP | 5HP | 3 | Pcs | পুরনো গুদাম | 8000 | Motor")
+        if st.button("💾 Bulk সেভ", key="om_bulk_btn") and guard():
+            rows, bad = [], []
+            for i, ln in enumerate(bulk.splitlines(), 1):
+                if not ln.strip():
+                    continue
+                p = [x.strip() for x in ln.split("|")] + [""] * 7
+                qv = num(p[2])
+                if not p[0] or not qv or qv <= 0:
+                    bad.append(i)
+                    continue
+                rows.append({"name": p[0], "size": p[1], "qty": float(qv), "unit": p[3] or "Pcs", "loc": p[4], "rate": float(num(p[5], 0.0)), "cat": p[6],
+                             "cond": OM_CONDITIONS[0], "status": OM_STATUSES[0], "notes": ""})
+            if bad:
+                st.error("এই লাইনগুলোতে নাম/পরিমাণ ঠিক নেই: " + ", ".join(map(str, bad)) + " — কিছুই সেভ হয়নি।")
+            elif not rows:
+                st.error("কোনো লাইন নেই।")
+            elif om_add(fac, rows):
+                st.session_state.pop("om_bulk", None)
+                done(f"✅ {len(rows)}টি লাইন সেভ হয়েছে।")
+
+
+def _om_list(units):
+    df = _om_df(units)
+    if df.empty:
+        st.info("এখনো কোনো পুরনো মাল রেকর্ড করা হয়নি।")
+        return
+    c1, c2, c3 = st.columns([2, 1.3, 1.3])
+    term = c1.text_input("🔍 খুঁজুন (নাম / ধরন / জায়গা)", key="om_term").strip().lower()
+    stt = c2.selectbox("অবস্থা (Status)", ["সব"] + OM_STATUSES, index=1, key="om_st")
+    cnd = c3.selectbox("মালের অবস্থা", ["সব"] + OM_CONDITIONS, key="om_cnd")
+    v = df
+    if term:
+        m = (v["item_name"].str.lower().str.contains(term, regex=False) | v["category"].fillna("").str.lower().str.contains(term, regex=False)
+             | v["location"].fillna("").str.lower().str.contains(term, regex=False))
+        v = v[m]
+    if stt != "সব":
+        v = v[v["status"] == stt]
+    if cnd != "সব":
+        v = v[v["condition"] == cnd]
+    k = st.columns(3)
+    k[0].metric("লাইন", len(v))
+    k[1].metric("মোট পরিমাণ (সব এককের যোগ)", f"{float(v['qty'].sum()):g}")
+    k[2].metric("আনুমানিক মূল্য", f"৳{float(v['value'].sum()):,.0f}")
+    out = pd.DataFrame({"ID": v["id"], "Unit": v["factory_name"].map(short_fac), "নাম": v["item_name"], "সাইজ": v["size"], "ধরন": v["category"],
+                        "জায়গা": v["location"], "পরিমাণ": v["qty"], "একক": v["unit"], "অবস্থা": v["condition"], "দর (৳)": v["est_rate"],
+                        "মূল্য (৳)": v["value"].round(0), "Status": v["status"], "শেষ গণনা": v["count_date"], "গুনেছেন": v["counted_by"], "নোট": v["notes"]})
+    if len(units) == 1:
+        out = out.drop(columns=["Unit"])
+    st.dataframe(out, hide_index=True, use_container_width=True, height=min(90 + 35 * len(out), 520))
+    export_buttons(out, "old_materials", "Old materials register")
+
+
+def _om_manage(fac):
+    df = _om_df([fac])
+    if df.empty:
+        st.info("কোনো রেকর্ড নেই।")
+        return
+    labs = {f"#{r['id']} · {r['item_name']} [{r['size'] or '-'}] · {r['qty']:g} {r['unit']} · {r['status']}": r for _, r in df.iterrows()}
+    pick = st.selectbox("কোন মাল", list(labs), key="om_pick")
+    r = labs[pick]
+    k = f"omm_{int(r['id'])}"
+    a, b, c, d = st.columns(4)
+    nq = a.number_input("নতুন গণনা (পরিমাণ)", min_value=0.0, step=1.0, format="%g", value=float(r["qty"]), key=k + "q")
+    ns = b.selectbox("Status", OM_STATUSES, index=OM_STATUSES.index(r["status"]) if r["status"] in OM_STATUSES else 0, key=k + "s")
+    nc = c.selectbox("মালের অবস্থা", OM_CONDITIONS, index=OM_CONDITIONS.index(r["condition"]) if r["condition"] in OM_CONDITIONS else 0, key=k + "c")
+    nr = d.number_input("আনুমানিক দর (৳)", min_value=0.0, step=1.0, format="%g", value=float(r["est_rate"]), key=k + "r")
+    e, f = st.columns(2)
+    nl = e.text_input("জায়গা", value=r["location"] or "", key=k + "l")
+    nn = f.text_input("পুনর্গণনার নোট", key=k + "n")
+    x1, x2 = st.columns(2)
+    if x1.button("💾 সেভ (পুনর্গণনা সহ)", key=k + "b") and guard():
+        if om_update(int(r["id"]), fac, r["item_name"], float(nq), ns, nc, float(nr), nl.strip(), nn.strip()):
+            done("✅ আপডেট হয়েছে।")
+    if st.session_state.get("role") == "Store Manager" and x2.button("🗑 মুছুন", key=k + "d") and guard():
+        if om_delete(int(r["id"]), fac, r["item_name"]):
+            done("✅ মোছা হয়েছে।")
+    hist = q("SELECT count_date, qty, counted_by, note FROM old_material_counts WHERE material_id=%s ORDER BY id DESC", (int(r["id"]),))
+    if hist:
+        st.markdown("**🕘 গণনার ইতিহাস**")
+        st.dataframe(pd.DataFrame([{"তারিখ": h["count_date"], "পরিমাণ": h["qty"], "গুনেছেন": h["counted_by"], "নোট": h["note"]} for h in hist]),
+                     hide_index=True, use_container_width=True)
+
+
+def tab_old_materials():
+    st.markdown("#### 🗄 পুরনো মালামাল (সফটওয়্যারে নেই — গুনে রেকর্ড)")
+    try:
+        ext_schema()
+    except Exception as e:
+        st.error(f"Old material setup failed: {e}")
+        return
+    units = list(FACTORIES) if is_cons_view else [FAC]
+    t = lazy_tab_select(["➕ নতুন এন্ট্রি", "📋 তালিকা", "🔄 পুনর্গণনা / Status"], "lz_om")
+    if t == 1:
+        _om_list(units)
+    elif is_cons_view:
+        st.info("ওপর থেকে একটি Factory বাছুন।")
+    elif t == 0:
+        _om_entry(FAC)
+    else:
+        _om_manage(FAC)
+
+
+# ============================================================
+#  PAGE: 📈 PRICE HISTORY & SUDDEN-JUMP ALERT  (purchase rates typed on Supplier Receipts)
+# ============================================================
+def _ph_df(units):
+    df = qdf_c("""SELECT t.factory_name, t.sl_no, COALESCE(NULLIF(t.item_name,''), i.item_name,'') AS item, COALESCE(i.size,'') AS size,
+                         t.date, COALESCE(t.qty,0) AS qty, t.unit_price_at_tx AS rate, COALESCE(NULLIF(TRIM(t.supplier_name),''),'-') AS supplier,
+                         COALESCE(t.challan_no,'') AS challan
+                  FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                  WHERE t.factory_name = ANY(%s) AND t.trans_type='Supplier. Rec' AND COALESCE(t.unit_price_at_tx,0) > 0""", (list(units),))
+    if df.empty:
+        return df
+    df["qty"] = df["qty"].astype(float)
+    df["rate"] = df["rate"].astype(float)
+    df["dt"] = _parse_dates(df["date"])
+    df = df.dropna(subset=["dt"])
+    df["key"] = df["factory_name"] + "|" + df["sl_no"].astype(str)
+    return df
+
+
+def _ph_item_view(df, multi):
+    items = df.drop_duplicates("key")[["key", "item", "size", "factory_name"]]
+    term = st.text_input("🔍 আইটেম খুঁজুন (নাম / সাইজ)", key="ph_term").strip().lower()
+    if term:
+        items = items[(items["item"].str.lower().str.contains(term, regex=False)) | (items["size"].str.lower().str.contains(term, regex=False))]
+    if items.empty:
+        st.info("মিলছে না।")
+        return
+    labs = {(short_fac(r.factory_name) + " | " if multi else "") + f"{r.item} [{r.size or '-'}]": r.key for r in items.sort_values("item").itertuples()}
+    pick = st.selectbox(f"আইটেম ({len(labs)}টি)", list(labs), key="ph_pick")
+    g = df[df["key"] == labs[pick]].sort_values("dt")
+    g = g.assign(month=g["dt"].dt.strftime("%Y-%m"))
+    mon = g.groupby("month").apply(lambda x: float((x["qty"] * x["rate"]).sum() / x["qty"].sum()) if x["qty"].sum() else float(x["rate"].mean()))
+    mon = mon.rename("গড় দাম (৳)")
+    first, last = float(g.iloc[0]["rate"]), float(g.iloc[-1]["rate"])
+    k = st.columns(4)
+    k[0].metric("সর্বশেষ দাম", f"৳{last:g}", f"{(last / first - 1) * 100:+.1f}% (প্রথম থেকে)" if first else None)
+    k[1].metric("সবচেয়ে কম", f"৳{float(g['rate'].min()):g}")
+    k[2].metric("সবচেয়ে বেশি", f"৳{float(g['rate'].max()):g}")
+    k[3].metric("কেনার সংখ্যা", len(g))
+    if len(mon) >= 2:
+        st.line_chart(mon, use_container_width=True)
+    else:
+        st.caption("চার্টের জন্য অন্তত দুই মাসের কেনা দরকার।")
+    sup = g.groupby("supplier").apply(lambda x: pd.Series({"গড় দাম (৳)": round(float((x["qty"] * x["rate"]).sum() / x["qty"].sum()), 2) if x["qty"].sum() else None,
+                                                           "শেষ দাম (৳)": float(x.sort_values("dt").iloc[-1]["rate"]), "কেনা (বার)": len(x)})).reset_index()
+    st.markdown("**Supplier অনুযায়ী**")
+    st.dataframe(sup.sort_values("গড় দাম (৳)"), hide_index=True, use_container_width=True)
+    st.markdown("**কেনার ইতিহাস**")
+    h = g.sort_values("dt", ascending=False)
+    st.dataframe(pd.DataFrame({"তারিখ": h["date"], "Supplier": h["supplier"], "Challan": h["challan"], "পরিমাণ": h["qty"], "দাম (৳)": h["rate"]}),
+                 hide_index=True, use_container_width=True, height=min(90 + 35 * len(h), 320))
+
+
+def _ph_alerts(df, multi):
+    c1, c2, c3 = st.columns(3)
+    thr = float(c1.number_input("কত % বাড়লে চিহ্ন", min_value=1, max_value=500, value=15, step=1, key="ph_thr"))
+    win = int(c2.number_input("তুলনার আগের সময় (দিন)", min_value=30, max_value=730, value=180, step=30, key="ph_win"))
+    recent = int(c3.number_input("শুধু শেষ N দিনের কেনা", min_value=7, max_value=730, value=90, step=7, key="ph_recent"))
+    today = pd.Timestamp(local_now().date())
+    rows = []
+    for key, g in df.groupby("key"):
+        g = g.sort_values("dt")
+        if len(g) < 2:
+            continue
+        last = g.iloc[-1]
+        if (today - last["dt"]).days > recent:
+            continue
+        prev = g.iloc[:-1]
+        prev = prev[prev["dt"] >= last["dt"] - pd.Timedelta(days=win)]
+        if prev.empty or prev["qty"].sum() <= 0:
+            continue
+        base = float((prev["qty"] * prev["rate"]).sum() / prev["qty"].sum())
+        if base <= 0:
+            continue
+        jump = (float(last["rate"]) / base - 1) * 100
+        if jump >= thr:
+            cheap = prev.sort_values("rate").iloc[0]
+            rows.append({"Item": f"{last['item']} [{last['size'] or '-'}]", "Unit": short_fac(last["factory_name"]), "সর্বশেষ কেনা": last["date"],
+                         "সর্বশেষ দাম (৳)": float(last["rate"]), "আগের গড় (৳)": round(base, 2), "বাড়ল %": round(jump, 1),
+                         "বাড়তি খরচ (৳)": round((float(last["rate"]) - base) * float(last["qty"]), 0), "Supplier (এবার)": last["supplier"],
+                         "আগে সবচেয়ে কমে পেয়েছিলেন": f"{cheap['supplier']} @ ৳{float(cheap['rate']):g}"})
+    if not rows:
+        st.success(f"শেষ {recent} দিনের কেনায় {thr:g}%-এর বেশি লাফ পাওয়া যায়নি।")
+        return
+    out = pd.DataFrame(rows).sort_values("বাড়ল %", ascending=False)
+    if not multi:
+        out = out.drop(columns=["Unit"])
+    st.error(f"🚨 {len(out)}টি আইটেমের দাম হঠাৎ বেড়েছে — মোট বাড়তি খরচ ৳{float(out['বাড়তি খরচ (৳)'].sum()):,.0f}")
+    st.dataframe(out, hide_index=True, use_container_width=True, height=min(90 + 35 * len(out), 480),
+                 column_config={"বাড়ল %": st.column_config.NumberColumn(format="%.1f")})
+    st.caption("তুলনা: সর্বশেষ কেনার দাম বনাম তার আগের (নির্বাচিত দিনের মধ্যে) কেনার পরিমাণ-ভারিত গড়। শুধু Supplier Receipt-এ Rate দেওয়া কেনাগুলো ধরা হয়।")
+    export_buttons(out, "price_jump_alerts", "Price jump alerts")
+
+
+def tab_price_history():
+    st.markdown("#### 📈 আইটেমের দামের ইতিহাস ও হঠাৎ লাফের সতর্কতা")
+    units = list(FACTORIES) if is_cons_view else [FAC]
+    df = _ph_df(units)
+    if df.empty:
+        st.info("এখনো Rate-সহ কোনো Supplier Receipt নেই। (Supplier Receipt-এ কেনার Rate দিলে এখানে ইতিহাস জমবে।)")
+        return
+    t = lazy_tab_select(["🚨 হঠাৎ লাফ", "📈 আইটেমের দামের ইতিহাস"], "lz_ph")
+    if t == 0:
+        _ph_alerts(df, len(units) > 1)
+    else:
+        _ph_item_view(df, len(units) > 1)
+
+
 # Brand and account/login appear first; Workspace and Management remain clearly grouped below.
 try:   # home-screen shortcut:  <app link>/?page=count  opens Physical Count directly (once per session)
     _pg = str(st.query_params.get("page", "")).strip().lower()
@@ -17890,7 +18965,8 @@ autoset_uom_once()
 RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, tab_global_inventory, tab_physical_count, tab_reports, tab_erp_audit, tab_issue_ledger,
              tab_transfer_history, tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet,
              tab_stock_cover, tab_data_health, tab_log_sheet, tab_high_value, tab_req_issue, tab_gate_pass, tab_hold_bills,
-             tab_monthly_stock_check, tab_machine_cost, tab_shift_handover, tab_section_budget]
+             tab_monthly_stock_check, tab_machine_cost, tab_shift_handover, tab_section_budget,
+             tab_warranty, tab_scrap, tab_old_materials, tab_price_history]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
 RENDERERS[TAB_NAMES.index(active_tab)]()
 render_session_cookie_js()
