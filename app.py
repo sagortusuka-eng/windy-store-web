@@ -7119,6 +7119,59 @@ def set_req_sizes(changes, req_no):
     return True
 
 
+# ------------------------------------------------------------
+#  PROFESSIONAL REPORT for the Requisition screens: same print layout as the Reports page
+#  (company, unit, title, period, filters, generated time, page numbers) with PDF / Excel / Print
+# ------------------------------------------------------------
+_RQ_KIND = {"Requested": "q", "Audit Approved": "q", "Received": "q", "Pending": "q", "Req Qty": "q", "Received %": "p",
+            "Item lines": "i", "Requisitions": "i", "Req Date": "d", "Order Date": "d", "Handed Over": "d", "PO Date": "d"}
+
+
+def _rq_df_section(df, heading=None, note=None):
+    cols = [("SL", "i")] + [(c, _RQ_KIND.get(c, "t")) for c in df.columns]
+    rows = []
+    for n, rec in enumerate(df.itertuples(index=False, name=None), 1):
+        rows.append([n] + [None if (isinstance(v, float) and math.isnan(v)) else v for v in rec])
+    tot = [f"TOTAL ({len(df)})"] + [None] * len(df.columns)
+    for j, c in enumerate(df.columns, 1):
+        if _RQ_KIND.get(c) == "q" or c == "Item lines":
+            tot[j] = float(df[c].sum())
+    return _rp_sec(cols, rows, tot, heading=heading, note=note)
+
+
+def _rq_doc_tracker(df, lines, req_no, fac_name, req_date_s, depts, status_txt, mgrs, sups, hdates, odates):
+    base = sum(r["base"] for r in lines)
+    rec = sum(r["rec_qty"] for r in lines)
+    summ = _rp_sec([("Requisition No", "t"), ("Req Date", "t"), ("Department", "t"), ("Items", "i"), ("Requested", "q"), ("Audit Approved", "q"),
+                    ("Received", "q"), ("Pending", "q"), ("Received %", "p"), ("Status", "t")],
+                   [[req_no, req_date_s, depts, len(lines), sum(r["req_qty"] for r in lines), sum(r["aud_qty"] for r in lines), rec,
+                     sum(r["pending"] for r in lines), (min(rec / base * 100.0, 100.0) if base > 0 else 0.0), status_txt]],
+                   heading="REQUISITION SUMMARY")
+    ho = _rp_sec([("Sourcing Manager (handed over to)", "t"), ("Hand over date", "t"), ("Supplier (order given to)", "t"), ("Order date", "t")],
+                 [[", ".join(mgrs) or "-", ", ".join(hdates) or "-", ", ".join(sups) or "-", ", ".join(odates) or "-"]],
+                 heading="SOURCING HANDOVER & SUPPLIER ORDER")
+    items = _rq_df_section(df, heading="ITEM-WISE DETAILS")
+    return _rp_doc("REQUISITION STATUS REPORT", "Requisition Status Report", [fac_name], f"Requisition date: {req_date_s}",
+                   [("Requisition No", req_no), ("Department", depts)], "L", [{"unit": fac_name, "sections": [summ, ho, items]}],
+                   ["Pending = Audit Approved qty (Requested qty if not yet approved) minus Received qty."])
+
+
+def _rq_doc_dept(df, ddf, units, period, filters, title):
+    secs_for = lambda d: ([_rq_df_section(ddf, heading="DEPARTMENT-WISE SUMMARY")] if ddf is not None else []) + [_rq_df_section(d, heading=title.upper())]
+    if "Unit" in df.columns:
+        blocks = []
+        for u in units:
+            sub = df[df["Unit"] == short_fac(u)].drop(columns=["Unit"])
+            if not sub.empty:
+                blocks.append({"unit": u, "sections": [_rq_df_section(sub, heading=title.upper())]})
+        if ddf is not None and blocks:
+            blocks[0]["sections"].insert(0, _rq_df_section(ddf.drop(columns=[c for c in ("Unit",) if c in ddf.columns]), heading="DEPARTMENT-WISE SUMMARY (ALL UNITS)"))
+    else:
+        blocks = [{"unit": units[0], "sections": secs_for(df)}]
+    return _rp_doc("DEPARTMENT-WISE REQUISITION REPORT", "Requisition Report (Department wise)", units, period, filters, "L", blocks,
+                   ["Pending = Audit Approved qty (Requested qty if not yet approved) minus Received qty."])
+
+
 def req_tracker_view():
     st.markdown(_RQ_CSS, unsafe_allow_html=True)
     rows_all = load_requisitions()
@@ -7216,7 +7269,9 @@ def req_tracker_view():
                                 "Audit Approved": st.column_config.NumberColumn(format="%.2f"),
                                 "Received": st.column_config.NumberColumn(format="%.2f"),
                                 "Pending": st.column_config.NumberColumn(format="%.2f")})
-    export_buttons(df, f"requisition_{kk}")
+    if st.checkbox("📄 Professional Report (Print / PDF / Excel)", key=f"rqt_pro_{kk}"):
+        _rp_show(_rq_doc_tracker(df, lines, req_no, str(fac_name), req_date_s,
+                                 depts, _rq_status_of(lines), mgrs, sups, hdates, odates))
 
     role = st.session_state.get("role")
     if role not in READ_ONLY_ROLES:
@@ -7382,6 +7437,7 @@ def req_dept_report():
     def pc(rec, base):
         return min(rec / base * 100.0, 100.0) if base > 0 else 0.0
 
+    ddf = None
     if dsel == ALL:
         dep = {}
         for r in rows:
@@ -7394,7 +7450,6 @@ def req_dept_report():
                             for k, v in sorted(dep.items(), key=lambda kv: -kv[1]["pend"])])
         st.markdown('<div class="rq-h2">🏷 Department-wise summary</div>', unsafe_allow_html=True)
         st.dataframe(ddf, hide_index=True, use_container_width=True, column_config=pcfg, height=min(80 + 36 * len(ddf), 320))
-        export_buttons(ddf, "department_wise_requisition", "Department-wise requisition summary")
 
     view = st.radio("Dekhan", ["🧾 Requisition-wise", "📦 Item-wise (mot)", "🔎 Item × Requisition (details)"], horizontal=True, key="rqd_view")
     if view.startswith("🧾"):
@@ -7433,7 +7488,11 @@ def req_dept_report():
                             "Order Date": r.get("order_date") or "", "PO Date": r["po_date"] or ""} for r in rows])
         name = "item_requisition_detail"
     st.dataframe(df, hide_index=True, use_container_width=True, column_config=pcfg, height=min(90 + 36 * len(df), 560))
-    export_buttons(df, name, f"{dsel} - {view[2:].strip()} ({plabel})")
+    if st.checkbox("📄 Professional Report (Print / PDF / Excel)", key="rqd_pro"):
+        _units = sorted({r["factory_name"] for r in rows})
+        _fl = [("Department", dsel)] + ([("Status", stf)] if stf != "Shob" else []) + ([("Item / Req No contains", term)] if term else [])
+        _per = f"{d1:%d-%b-%Y} to {d2:%d-%b-%Y}" if d1 and d2 else "All dates"
+        _rp_show(_rq_doc_dept(df, ddf if dsel == ALL else None, _units, _per, _fl, view[2:].strip()))
 
 
 def tab_requisition():
