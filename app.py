@@ -875,7 +875,7 @@ REQ_KEYS = {
     "item": ["itemname", "itemdescription", "productname", "materialdescription", "description", "item", "product"],
     "code": ["erpcode", "itemcode", "productcode", "materialcode", "partno", "code"],
     "qty": ["reqqty", "requisitionqty", "requestedqty", "requiredqty", "quantity", "qty"],
-    "size": ["size", "itemsize", "specification", "spec", "dimension"],
+    "size": ["size", "itemsize", "sizemsr", "msr", "specification", "spec", "dimension"],
     "uom": ["uom", "unit", "unitname", "unitofmeasure", "measure", "um"],
     "dept": ["department", "dept"],
     "date": ["reqdate", "requisitiondate", "date"],
@@ -1063,6 +1063,9 @@ def tx(fn):
     """Database write: commit on success, rollback on any error."""
     @functools.wraps(fn)
     def inner(*a, **k):
+        if st.session_state.get("role") in NEW_RO_ROLES and fn.__name__ not in _RO_TX_ALLOW:
+            st.error("এই role শুধু দেখতে পারে — কোনো তথ্য যোগ / বদল / মোছা যাবে না।")
+            return None
         conn = get_conn()
         try:
             res = fn(*a, **k)
@@ -1560,14 +1563,15 @@ USERNAME_RE = re.compile(r"[A-Za-z0-9_.\-]{3,30}")
 
 
 @tx
-def register_user(username, full_name, pw):
-    """New accounts are always 'Store Officer' and stay Pending until the Store Manager approves them."""
+def register_user(username, full_name, pw, role="Store Officer"):
+    """New accounts stay Pending until the Store Manager approves them (and may change the role there)."""
+    role = role if role in set(REG_ROLE_CHOICES.values()) else "Store Officer"
     if q("SELECT 1 AS x FROM users WHERE LOWER(username)=LOWER(%s)", (username,)):
         st.error("Ei username already ache. Onno username din.")
         return False
-    run("INSERT INTO users (username, password, role, full_name, status, created_at) VALUES (%s,%s,'Store Officer',%s,'Pending',%s)",
-        (username, hash_password(pw), full_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    audit("REGISTER_REQUEST", f"Registration request: {username} ({full_name})")
+    run("INSERT INTO users (username, password, role, full_name, status, created_at) VALUES (%s,%s,%s,%s,'Pending',%s)",
+        (username, hash_password(pw), role, full_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    audit("REGISTER_REQUEST", f"Registration request: {username} ({full_name}) as {role}")
     return True
 
 
@@ -1616,7 +1620,7 @@ def change_password(uname, new_pw):
 
 def user_admin_panel():
     """Store Manager only: approve registrations and answer password-reset requests."""
-    pend = q_c("SELECT id, username, full_name FROM users WHERE COALESCE(status,'Active')='Pending' ORDER BY id")
+    pend = q_c("SELECT id, username, full_name, role FROM users WHERE COALESCE(status,'Active')='Pending' ORDER BY id")
     resets = q_c("SELECT id, username, requested_at FROM password_resets WHERE status='Pending' ORDER BY id")
     with st.expander(f"👥 User Admin ({len(pend) + len(resets)} pending)"):
         st.markdown("**New registrations**")
@@ -1625,7 +1629,9 @@ def user_admin_panel():
         else:
             labels = {f"{r['username']} - {r['full_name']}": r for r in pend}
             sel = labels[st.selectbox("Registration request", list(labels), key="ua_reg_sel")]
-            role = st.selectbox("Assign role", ["Store Officer", "Auditor"], key="ua_reg_role")
+            _ro = ["Store Officer", "Auditor", "Maintenance", "Admin", "Accounts"]
+            role = st.selectbox("Assign role (Auditor = Audit; Maintenance / Admin / Accounts / Auditor shudhu dekhte parbe)", _ro,
+                                index=_ro.index(sel["role"]) if sel.get("role") in _ro else 0, key=f"ua_reg_role_{sel['id']}")
             c1, c2 = st.columns(2)
             if c1.button("✔ Approve", key="ua_reg_ok"):
                 if approve_user(sel["id"], role, sel["username"]):
@@ -1677,6 +1683,13 @@ def create_login_session(username):
 
 
 UNIT_LOCK_ROLES = ("Store Officer",)   # roles that must pick one unit after login; it stays locked until sign-out
+# View-only roles: they can open every page and report but cannot add / edit / delete anything. Only Store Officer, Store Manager
+# and Executive can write.  ("Auditor" is the old name of the Audit role.)
+READ_ONLY_ROLES = ("Auditor", "Maintenance", "Admin", "Accounts")
+NEW_RO_ROLES = ("Maintenance", "Admin", "Accounts")
+_RO_TX_ALLOW = ("create_login_session", "save_session_factory", "end_login_session", "log_event", "change_password",
+                "request_password_reset", "register_user")
+REG_ROLE_CHOICES = {"Store Officer": "Store Officer", "Maintenance": "Maintenance", "Audit": "Auditor", "Admin": "Admin", "Accounts": "Accounts"}
 
 
 @tx
@@ -2532,8 +2545,8 @@ def guard(write=True):
     if not st.session_state.get("user"):
         st.warning("🔑 Sidebar theke login korun.")
         return False
-    if write and st.session_state.get("role") == "Auditor":
-        st.error("Auditor role read-only.")
+    if write and st.session_state.get("role") in READ_ONLY_ROLES:
+        st.error(f"{st.session_state.get('role')} role read-only — shudhu dekhte parben, edit / delete korte parben na.")
         return False
     if write and "CONSOLIDATED" in FAC:
         st.error("CONSOLIDATED view-te edit kora jabe na. Specific factory select korun.")
@@ -3599,7 +3612,7 @@ def tab_transactions():
                         st.error("Stock kom ache.")
                         blocked = True
 
-            can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor" and not is_cons_view
+            can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES and not is_cons_view
             disabled = (item is None or blocked or (qty <= 0 and ttype != OPENING_TYPE)
                         or (need_xfer and not xfer_ok) or not can_write)
             if not can_write:
@@ -6533,8 +6546,7 @@ def load_requisitions():
 def _load_requisition_rows():
     rows = q_c(f"""SELECT id, factory_name, req_no, department, req_date, item_name, req_qty, audit_approved_qty AS aud_qty,
                  actual_received_qty AS rec_qty, po_date, received_date, COALESCE(prod_id,'') AS prod_id,
-                 COALESCE(NULLIF(size,''), (SELECT COALESCE(i.size,'') FROM inventory i
-                          WHERE i.factory_name=requisition_tracking.factory_name AND i.prod_id=requisition_tracking.prod_id LIMIT 1), '') AS size,
+                 COALESCE(size,'') AS size,
                  COALESCE(uom,'') AS uom, COALESCE(sourcing_manager,'') AS sourcing_manager, COALESCE(handover_date,'') AS handover_date,
                  COALESCE(supplier_name,'') AS supplier_name, COALESCE(order_date,'') AS order_date, COALESCE(order_note,'') AS order_note
                  FROM requisition_tracking WHERE 1=1{FSQL} ORDER BY id DESC""", FP)
@@ -6845,8 +6857,9 @@ def req_import_view():
             p["result"] = "Skipped: item description nei"
         elif qty <= 0:
             p["result"] = "Skipped: Req Qty nei"
-        elif q("SELECT 1 AS x FROM requisition_tracking WHERE factory_name=%s AND req_no=%s AND LOWER(item_name)=LOWER(%s)",
-               (FAC, p["req_no"], item)):
+        elif q("SELECT 1 AS x FROM requisition_tracking WHERE factory_name=%s AND req_no=%s AND LOWER(item_name)=LOWER(%s)"
+               + (" AND (COALESCE(size,'')='' OR LOWER(size)=LOWER(%s))" if size_t.strip() else ""),
+               (FAC, p["req_no"], item) + ((size_t.strip(),) if size_t.strip() else ())):
             p["result"] = "Already imported"
         else:
             p["ok"] = True
@@ -7097,6 +7110,15 @@ def set_req_handover(ids, manager, hand_date, supplier, order_date, note, mark_p
     return True
 
 
+@tx
+def set_req_sizes(changes, req_no):
+    """changes = [(row id, new size)] - fixes the Size of already imported requisition lines."""
+    for rid, sz in changes:
+        run("UPDATE requisition_tracking SET size=%s WHERE id=%s", (sz, int(rid)))
+    audit("REQ_SIZE_FIX", f"Req {req_no}: size corrected on {len(changes)} line(s)")
+    return True
+
+
 def req_tracker_view():
     st.markdown(_RQ_CSS, unsafe_allow_html=True)
     rows_all = load_requisitions()
@@ -7197,6 +7219,20 @@ def req_tracker_view():
     export_buttons(df, f"requisition_{kk}")
 
     role = st.session_state.get("role")
+    if role not in READ_ONLY_ROLES:
+        with st.expander("🔧 Size theek korun (ERP requisition-er Size/MSR)"):
+            with st.form(f"rqt_sz_{kk}"):
+                new_sz = {}
+                for r in lines:
+                    a, b = st.columns([3, 1.4])
+                    a.markdown(f"**{r['item_name']}**  \n<span style='color:#64748b;font-size:12px'>Qty {_rq_n(r['req_qty'])}</span>", unsafe_allow_html=True)
+                    new_sz[r["id"]] = b.text_input("Size", value=r.get("size") or "", key=f"rqt_s_{r['id']}", label_visibility="collapsed")
+                if st.form_submit_button("💾 Save size") and guard():
+                    ch = [(r["id"], new_sz[r["id"]].strip()) for r in lines if new_sz[r["id"]].strip() != (r.get("size") or "").strip()]
+                    if not ch:
+                        st.info("Kono poriborton nei.")
+                    elif set_req_sizes(ch, req_no):
+                        done(f"Size updated ({len(ch)} line).")
     st.markdown('<div class="rq-h2">✔️ Audit Approved Qty</div>', unsafe_allow_html=True)
     if role not in ("Executive", "Store Manager"):
         st.caption("Audit Approved Qty shudhu Executive ba Store Manager change korte parben.")
@@ -7264,14 +7300,156 @@ def req_tracker_view():
                 done(f"Handover / order info saved ({len(ids)} item).")
 
 
+# ------------------------------------------------------------
+#  DEPARTMENT REPORT: pick a department (Maintenance / Production ...) -> its requisitions, item-wise received / pending
+#  (made to be shown to the Sourcing Manager)
+# ------------------------------------------------------------
+def _rq_status_of(lines):
+    n_full = sum(1 for r in lines if r["calc_status"] == "Fully Received")
+    if n_full == len(lines):
+        return "Fully Received"
+    if sum(r["rec_qty"] for r in lines) > 0:
+        return "Partially Received"
+    if any(r["has_po"] for r in lines) or any(r.get("supplier_name") for r in lines):
+        return "PO / Order Placed"
+    if any(r["aud_qty"] > 0 for r in lines):
+        return "Audit Approved - PO Pending"
+    return "Audit Pending"
+
+
+def req_dept_report():
+    st.markdown(_RQ_CSS, unsafe_allow_html=True)
+    rows_all = load_requisitions()
+    if not rows_all:
+        st.info("Requisition nei.")
+        return
+    cons = "CONSOLIDATED" in str(FAC)
+    NODEP = "(Department nei)"
+    for r in rows_all:
+        r["_dep"] = (r["department"] or "").strip() or NODEP
+    depts = sorted({r["_dep"] for r in rows_all}, key=str.lower)
+    ALL = "Shob Department"
+    c1, c2, c3 = st.columns([1.3, 1.2, 1.5])
+    dsel = c1.selectbox("🏷 Department", [ALL] + depts, key="rqd_dept")
+    stf = c2.selectbox("Status", ["Shob", "Baki ache (Pending > 0)", "Fully Received", "Audit approve hoy ni"], key="rqd_status")
+    term = c3.text_input("🔍 Item / Req No / Code", key="rqd_term", placeholder="optional").strip().lower()
+    d1, d2, plabel = report_period("rqd", default="সব সময়")
+
+    def keep(r):
+        if dsel != ALL and r["_dep"] != dsel:
+            return False
+        if d1 and d2:
+            d = parse_date(r["req_date"])
+            if not d or not (d1 <= d.date() <= d2):
+                return False
+        if term and term not in f"{r['item_name']} {r['req_no']} {r['prod_id']} {r.get('size', '')}".lower():
+            return False
+        if stf == "Baki ache (Pending > 0)" and r["pending"] <= 1e-9:
+            return False
+        if stf == "Fully Received" and r["calc_status"] != "Fully Received":
+            return False
+        if stf == "Audit approve hoy ni" and not (r["aud_qty"] <= 0 and r["rec_qty"] <= 0):
+            return False
+        return True
+
+    rows = [r for r in rows_all if keep(r)]
+    if not rows:
+        st.info("Ei Department / shorto-e kono requisition paoya jayni.")
+        return
+    groups = {}
+    for r in rows:
+        groups.setdefault((r["factory_name"], str(r["req_no"] or "").strip()), []).append(r)
+    req_t, aud_t = sum(r["req_qty"] for r in rows), sum(r["aud_qty"] for r in rows)
+    rec_t, pend_t = sum(r["rec_qty"] for r in rows), sum(r["pending"] for r in rows)
+    base_t = sum(r["base"] for r in rows)
+    pct = min(rec_t / base_t * 100.0, 100.0) if base_t > 0 else 0.0
+    e = html_lib.escape
+    st.markdown(f'<div class="rq-hero"><div><div class="rq-eyebrow">DEPARTMENT REQUISITION REPORT</div>'
+                f'<div class="rq-title">{e(dsel)}</div><div class="rq-meta"><span>📅 {e(plabel)}</span>'
+                f'<span>🏭 {e("All units" if cons else str(FAC))}</span><span>🧾 {len(groups)} requisition</span>'
+                f'<span>📦 {len(rows)} item line</span></div></div><div class="rq-badge">{pct:.0f}% received</div></div>', unsafe_allow_html=True)
+
+    def kpi(label, val, color):
+        return f'<div class="rq-kpi" style="--c:{color}"><small>{label}</small><b>{val}</b></div>'
+    st.markdown('<div class="rq-kpis">' + kpi("Requisitions", len(groups), "#0f766e") + kpi("Requested", _rq_n(req_t), "#2563eb")
+                + kpi("Audit Approved", _rq_n(aud_t), "#7c3aed") + kpi("Received", _rq_n(rec_t), "#16a34a")
+                + kpi("Pending", _rq_n(pend_t), "#dc2626") + '</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="rq-prog"><div class="rq-prog-h"><span>📥 Receiving progress</span><span>{pct:.0f}%</span></div>'
+                f'<div class="rq-bar"><div style="width:{pct:.1f}%"></div></div></div>', unsafe_allow_html=True)
+
+    pcfg = {"Received %": st.column_config.ProgressColumn("Received %", min_value=0, max_value=100, format="%.0f%%")}
+
+    def pc(rec, base):
+        return min(rec / base * 100.0, 100.0) if base > 0 else 0.0
+
+    if dsel == ALL:
+        dep = {}
+        for r in rows:
+            g = dep.setdefault(r["_dep"], {"reqs": set(), "n": 0, "req": 0.0, "aud": 0.0, "rec": 0.0, "pend": 0.0, "base": 0.0})
+            g["reqs"].add((r["factory_name"], str(r["req_no"] or "").strip()))
+            g["n"] += 1
+            g["req"] += r["req_qty"]; g["aud"] += r["aud_qty"]; g["rec"] += r["rec_qty"]; g["pend"] += r["pending"]; g["base"] += r["base"]
+        ddf = pd.DataFrame([{"Department": k, "Requisitions": len(v["reqs"]), "Item lines": v["n"], "Requested": v["req"],
+                             "Audit Approved": v["aud"], "Received": v["rec"], "Pending": v["pend"], "Received %": pc(v["rec"], v["base"])}
+                            for k, v in sorted(dep.items(), key=lambda kv: -kv[1]["pend"])])
+        st.markdown('<div class="rq-h2">🏷 Department-wise summary</div>', unsafe_allow_html=True)
+        st.dataframe(ddf, hide_index=True, use_container_width=True, column_config=pcfg, height=min(80 + 36 * len(ddf), 320))
+        export_buttons(ddf, "department_wise_requisition", "Department-wise requisition summary")
+
+    view = st.radio("Dekhan", ["🧾 Requisition-wise", "📦 Item-wise (mot)", "🔎 Item × Requisition (details)"], horizontal=True, key="rqd_view")
+    if view.startswith("🧾"):
+        out = []
+        for (fac_n, rn), ls in sorted(groups.items(), key=lambda kv: -max(r["id"] for r in kv[1])):
+            base = sum(r["base"] for r in ls)
+            rec = sum(r["rec_qty"] for r in ls)
+            dts = [parse_date(r["req_date"]) for r in ls if parse_date(r["req_date"])]
+            row = {"Req No": rn, "Req Date": min(dts).strftime(DATE_FMT) if dts else ls[0]["req_date"], "Department": ls[0]["_dep"],
+                   "Item lines": len(ls), "Requested": sum(r["req_qty"] for r in ls), "Audit Approved": sum(r["aud_qty"] for r in ls),
+                   "Received": rec, "Pending": sum(r["pending"] for r in ls), "Received %": pc(rec, base), "Status": _rq_status_of(ls),
+                   "Sourcing Manager": ", ".join(_rq_join(r["sourcing_manager"] for r in ls)),
+                   "Supplier": ", ".join(_rq_join(r["supplier_name"] for r in ls))}
+            if cons:
+                row = {"Unit": short_fac(fac_n), **row}
+            out.append(row)
+        df = pd.DataFrame(out)
+        name = "requisition_wise_status"
+    elif view.startswith("📦"):
+        agg = {}
+        for r in rows:
+            k = (r["item_name"], (r.get("size") or "").strip(), r["prod_id"])
+            g = agg.setdefault(k, {"reqs": set(), "req": 0.0, "aud": 0.0, "rec": 0.0, "pend": 0.0, "base": 0.0})
+            g["reqs"].add((r["factory_name"], str(r["req_no"] or "").strip()))
+            g["req"] += r["req_qty"]; g["aud"] += r["aud_qty"]; g["rec"] += r["rec_qty"]; g["pend"] += r["pending"]; g["base"] += r["base"]
+        df = pd.DataFrame([{"Item": k[0], "Size": k[1], "ERP Code": k[2], "Requisitions": len(v["reqs"]), "Requested": v["req"],
+                            "Audit Approved": v["aud"], "Received": v["rec"], "Pending": v["pend"], "Received %": pc(v["rec"], v["base"])}
+                           for k, v in sorted(agg.items(), key=lambda kv: -kv[1]["pend"])])
+        name = "item_wise_requisition_status"
+    else:
+        df = pd.DataFrame([{**({"Unit": short_fac(r["factory_name"])} if cons else {}), "Req No": r["req_no"], "Req Date": r["req_date"],
+                            "Department": r["_dep"], "Item": r["item_name"], "Size": r.get("size") or "", "ERP Code": r["prod_id"],
+                            "Requested": r["req_qty"], "Audit Approved": r["aud_qty"], "Received": r["rec_qty"], "Pending": r["pending"],
+                            "Received %": pc(r["rec_qty"], r["base"]), "Status": r["calc_status"],
+                            "Sourcing Manager": r.get("sourcing_manager") or "", "Supplier": r.get("supplier_name") or "",
+                            "Order Date": r.get("order_date") or "", "PO Date": r["po_date"] or ""} for r in rows])
+        name = "item_requisition_detail"
+    st.dataframe(df, hide_index=True, use_container_width=True, column_config=pcfg, height=min(90 + 36 * len(df), 560))
+    export_buttons(df, name, f"{dsel} - {view[2:].strip()} ({plabel})")
+
+
 def tab_requisition():
-    _lbls = ["📋 Requisition list", "🎯 Req Tracker (Premium)", "🧾 Audit Reconciliation (item search)"]
+    _lbls = ["📋 Requisition list", "🎯 Req Tracker (Premium)", "🧾 Audit Reconciliation (item search)", "🏷 Department Report"]
     _top = _lbls[lazy_tab_select(_lbls, "lz_reqtop")]
     if _top == _lbls[2]:
         try:
             audit_manual_view()
         except Exception as e:
             st.error(f"Audit Reconciliation load kora jayni: {e}")
+        return
+    if _top == _lbls[3]:
+        try:
+            req_dept_report()
+        except Exception as e:
+            st.error(f"Department Report load kora jayni: {e}")
         return
     if _top == _lbls[1]:
         try:
@@ -9875,7 +10053,7 @@ def get_count_pool(fac):
         except Exception:
             pass
     pool = compute_count_picks(fac, data_stamp(), local_now().date(), n=60)
-    if pool and st.session_state.get("user") and st.session_state.get("role") != "Auditor":
+    if pool and st.session_state.get("user") and st.session_state.get("role") not in READ_ONLY_ROLES:
         _save_extra_picks(key, pool)
     return pool
 
@@ -9904,9 +10082,9 @@ def get_today_picks(fac):
             pass
     pool = compute_count_picks(fac, data_stamp(), today, n=60)
     picks = pool[:5]
-    if pool and st.session_state.get("user") and st.session_state.get("role") != "Auditor":
+    if pool and st.session_state.get("user") and st.session_state.get("role") not in READ_ONLY_ROLES:
         _save_extra_picks(_pool_key(fac), pool)
-    if picks and st.session_state.get("user") and st.session_state.get("role") != "Auditor":
+    if picks and st.session_state.get("user") and st.session_state.get("role") not in READ_ONLY_ROLES:
         if _save_picks(key, picks):
             saved = q_c("SELECT setting_value FROM req_settings WHERE setting_key=%s", (key,))
             if saved:
@@ -10071,7 +10249,7 @@ def count_picks_panel():
             else:
                 c2.button("➕ গুনতে যান", key=f"pick_go_{p['sl_no']}", on_click=_pick_to_search, args=(str(term),),
                           use_container_width=True)
-    if n_done == len(picks) and st.session_state.get("user") and st.session_state.get("role") != "Auditor":
+    if n_done == len(picks) and st.session_state.get("user") and st.session_state.get("role") not in READ_ONLY_ROLES:
         if st.button(f"➕ পরের ৫টি জরুরি আইটেম দেখান ({bn(len(picks) + 1)}–{bn(len(picks) + 5)} নম্বর)", key="pick_more_btn", use_container_width=True):
             _add_more_picks(FAC, [p["sl_no"] for p in picks])
 
@@ -10096,7 +10274,7 @@ def done_dash_note(nid):
 
 
 def _note_can_write():
-    return bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
+    return bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
 
 
 @_fragment
@@ -12081,6 +12259,8 @@ def render_login_page():
                         '<div class="kc-form-sub">New accounts need Store Manager approval before sign-in</div>', unsafe_allow_html=True)
             with st.form("kc_reg_form", clear_on_submit=False):
                 ru = st.text_input("Username", placeholder="Username (3–30: letters, digits, _ . -)", key="kc_reg_user", label_visibility="collapsed")
+                rrole = st.selectbox("Role", list(REG_ROLE_CHOICES), key="kc_reg_role", label_visibility="collapsed",
+                                     help="Apnar role. Store Officer chhara onno role shudhu dekhte pabe (edit / delete noy). Store Manager approve korar por final hobe.")
                 rn = st.text_input("Full name", placeholder="Full name", key="kc_reg_name", label_visibility="collapsed")
                 p1 = st.text_input("Password", type="password", placeholder="Password (min 8 characters)", key="kc_reg_pw1", label_visibility="collapsed")
                 p2 = st.text_input("Confirm password", type="password", placeholder="Confirm password", key="kc_reg_pw2", label_visibility="collapsed")
@@ -12094,7 +12274,7 @@ def render_login_page():
                     st.error("Password must be at least 8 characters.")
                 elif p1 != p2:
                     st.error("The passwords do not match.")
-                elif register_user(ru.strip(), rn.strip(), p1):
+                elif register_user(ru.strip(), rn.strip(), p1, REG_ROLE_CHOICES.get(rrole, "Store Officer")):
                     st.session_state["auth_mode"] = "login"
                     done("Registration request sent. The Store Manager must approve it before you can sign in.")
     st.markdown('<div class="kc-foot">KC &amp; Windy Smart Inventory · Created by MD. Sagor Ali</div>', unsafe_allow_html=True)
@@ -13108,7 +13288,7 @@ def _ri_pending_view():
                             "Status": ("✅ Stock ashche" if r["ready"] else ("🟠 Ongsho stock ache" if r["stock"] > 0 else "⛔ Stock nei"))}
                            for r in rows])
         st.dataframe(df, hide_index=True, use_container_width=True, height=min(80 + 36 * len(df), 360))
-        can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
+        can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
         verified = st.checkbox("Physically verified (issue-er age item gune dekha hoyeche — 3 din par hole lagbe)", key="rip_ver")
         st.markdown("**Issue korun**")
         for r in rows:
@@ -13453,7 +13633,7 @@ def _ri_form():
                         key=f"ri_pick_{gen}")
     qty_in = a3.number_input("পরিমাণ", min_value=0.0, step=1.0, format="%g", key=f"ri_qty_{gen}")
     try:      # Skip Watch: officer has an out-of-stock item in front of him (typed a search / chose it himself)
-        if pick in labels and st.session_state.get("user") and st.session_state.get("role") != "Auditor":
+        if pick in labels and st.session_state.get("user") and st.session_state.get("role") not in READ_ONLY_ROLES:
             _rr = labels[pick]
             if (bool(term) or (cat_sel != ALL_CAT and pick != list(labels)[0])) and float(_rr["stock"] or 0) <= 0:
                 _iw_seen(fac, gen, _rr, term, sr_no)
@@ -13525,7 +13705,7 @@ def _ri_form():
         xfer_flags = {}
         xcache = st.session_state.setdefault("ri_other_cache", {})
         uoms = get_uoms()
-        can_write_ui = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
+        can_write_ui = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
         mc_sel = {}
         try:
             mc_schema()
@@ -13625,7 +13805,7 @@ def _ri_form():
                                key=f"ri_ver_{gen}")
     _mc_map, _mc_err = _mc_lines_check(fac, lines, pflags, mc_sel, _mc_msl, tx_date, ttype, bool(_mc_labs))      # machine (Maintenance items only)
     _sb_issue_warn(fac, section, tx_date, sum(q_ * r_ for q_, r_, pf_ in zip(qtys, rates, pflags) if not pf_), ttype)   # section monthly limit
-    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
+    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
     f1, f2, f3 = st.columns([2, 1.2, 2.2])
     f1.caption(f"মোট আইটেম-লাইন: {len(lines)} · মোট পরিমাণ: {sum(qtys):g}" + (f" · ⏳ Pending: {sum(pflags)}" if any(pflags) else "") + ("" if can_write else " · সংরক্ষণ করতে login লাগবে"))
     po_pending = f2.checkbox("ERP PO pending", key=f"ri_po_{gen}",
@@ -13816,7 +13996,7 @@ def _rr_form():
         col.caption(t)
     remove, qtys, rates, bad = None, [], [], False
     uoms = get_uoms()
-    can_write_ui = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
+    can_write_ui = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
     for i, ln in enumerate(lines):
         r = st.columns([0.4, 2.7, 1.1, 0.8, 1.1, 1.1, 1.1, 1.6, 0.7])
         r[0].write(i + 1)
@@ -13862,7 +14042,7 @@ def _rr_form():
         rate_mode = st.selectbox("Unit Price update (যে item-এ Rate দিয়েছেন)", ["Latest purchase rate", "Weighted average", "Keep current price"],
                                  key=f"rr_ratemode_{gen}")
     po_pending = st.checkbox("ERP PO pending", key=f"rr_po_{gen}", help="এই challan-এর সব লাইন ERP Audit → ERP PO Pending-এ ট্র্যাক হবে।")
-    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
+    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
     if not can_write:
         st.caption("সংরক্ষণ করতে login লাগবে (Auditor role শুধু দেখতে পারে)।")
     if st.button("💾 Challan-er shob item receive korun", type="primary", key=f"rr_save_{gen}", use_container_width=True, disabled=not can_write):
@@ -14367,7 +14547,7 @@ def render_ri_request_notice():
 
 
 def can_write_ri():
-    return bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
+    return bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
 
 
 # ============================================================
@@ -14577,7 +14757,7 @@ def _gp_receive_form():
         except TypeError:
             st.rerun()
     st.caption(f"মোট আইটেম-লাইন: {len(lines)} · মোট পরিমাণ: {sum(qtys):g}")
-    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
+    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
     if not can_write:
         st.caption("সংরক্ষণ করতে login লাগবে (Auditor role শুধু দেখতে পারে)।")
     if st.button("💾 গ্রহণ সংরক্ষণ করুন (স্টক বাড়বে)", type="primary", key=f"gp_save_{gen}", use_container_width=True,
@@ -14807,7 +14987,7 @@ def _gp_manage():
     if p1.toggle("🖨 Print preview দেখান", key=f"gp_prev_{lots[0]['id']}"):
         components.html(html_doc, height=120 + 36 * len(lots) + 220, scrolling=True)
 
-    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor" and f_ == FAC and not is_cons_view
+    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES and f_ == FAC and not is_cons_view
     with st.expander("✏️ Edit (Gate Pass No / source / তারিখ / পরিমাণ)"):
         if not can_write:
             st.caption("Edit করতে login + নির্দিষ্ট Unit নির্বাচন (CONSOLIDATED নয়) + non-Auditor role লাগবে।")
@@ -15130,7 +15310,7 @@ def _hb_entry_form():
             st.dataframe(pd.DataFrame(calc), hide_index=True, use_container_width=True, column_config={
                 "Qty": st.column_config.NumberColumn(format="%g"), "Rate": st.column_config.NumberColumn(format="%.2f"),
                 "Total (Qty × Rate)": st.column_config.NumberColumn(format="%.2f")})
-    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor" and not is_cons_view
+    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES and not is_cons_view
     if is_cons_view:
         st.info("ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ এন্ট্রি দেওয়া যায় না)।")
     elif not can_write:
@@ -15410,7 +15590,7 @@ def _hb_list():
             "Items in Challan": st.column_config.NumberColumn(format="%d")})
         export_buttons(show, "hold_bills")
 
-    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor" and not is_cons_view
+    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES and not is_cons_view
     with st.expander("✏️ Edit / ✅ Resolve / 🗑 Delete"):
         if not can_write:
             st.caption("এর জন্য login + নির্দিষ্ট Unit নির্বাচন (CONSOLIDATED নয়) + non-Auditor role লাগবে।")
@@ -15512,7 +15692,7 @@ def _hb_issues():
         st.dataframe(iss.rename(columns={"id": "ID", "issue_date": "Issue Date", "req_no": "Requisition No", "department": "Department",
                                          "qty": "Qty", "remarks": "Remarks", "erp_issue": "ERP Issue", "entered_by": "Entered by"}),
                      hide_index=True, use_container_width=True)
-    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor" and not is_cons_view
+    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES and not is_cons_view
     if not can_write:
         st.caption("Issue যোগ করতে login + নির্দিষ্ট Unit নির্বাচন (CONSOLIDATED নয়) + non-Auditor role লাগবে।")
         return
@@ -15597,7 +15777,7 @@ def _hb_erp():
         "Qty": st.column_config.NumberColumn(format="%g"), "Rate": st.column_config.NumberColumn(format="%.2f"),
         "Value (৳)": st.column_config.NumberColumn(format="%.0f")})
     export_buttons(show, "hold_bill_erp_issue_data", title="Hold Bill - ERP Issue Data")
-    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor" and not is_cons_view
+    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES and not is_cons_view
     if not can_write:
         return
     with st.expander("✅ ERP স্ট্যাটাস চিহ্নিত করুন"):
@@ -18473,7 +18653,7 @@ def tab_shift_handover():
         st.error(f"Handover setup failed: {e}")
         return
     fac, me, role = FAC, st.session_state.get("user", ""), st.session_state.get("role")
-    can_write = bool(me) and role != "Auditor"
+    can_write = bool(me) and role not in READ_ONLY_ROLES
 
     # 1) handovers waiting for the next officer
     wait = q("SELECT * FROM shift_handovers WHERE factory_name=%s AND ack_by IS NULL ORDER BY id DESC LIMIT 10", (fac,))
