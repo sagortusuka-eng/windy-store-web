@@ -12498,7 +12498,7 @@ def _ri_verif_many(fac, sls, tx_dt):
 
 
 @tx
-def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_pending=False, section=""):
+def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_pending=False, section="", machine=None):
     """lines = [(sl_no, qty, xfer_ok)]. All-or-nothing: stock is re-read and locked, every line is checked first, then
     ONE update + ONE insert (+ one audit insert) write the whole slip. A line whose qty is above stock is covered by an
     auto-transfer from the other unit (same rule as the Transactions tab) when the user confirmed it."""
@@ -12564,6 +12564,7 @@ def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_
             audit("AUTO_TRANSFER", f"{shortage:g} pcs from {other['factory_name']} to {fac} for {info[sl][0]} (size {size_ or '-'}) [SR {sr_no}]")
         line_notes.append(nt)
     po_flag, po_date = ("Pending", date_s) if po_pending else ("", None)
+    _mc_max = int(run("SELECT COALESCE(MAX(id),0) FROM transactions")[0][0]) if machine else 0   # machine tag: only when a machine was picked
     run("""UPDATE inventory SET current_stock = current_stock - v.q
            FROM (SELECT unnest(%s::int[]) AS sl, unnest(%s::float8[]) AS q) v
            WHERE inventory.factory_name=%s AND inventory.sl_no=v.sl""", (sls, qtys, fac))
@@ -12582,6 +12583,12 @@ def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_
                         unnest(%s::float8[]) AS q, unnest(%s::text[]) AS vs, unnest(%s::text[]) AS nt) v""",
         (fac, user, ttype, tx_dt.day, date_s, time_s, po_flag, po_date, sr_no, section or "",
          sls, [info[sl][0] for sl in sls], [info[sl][1] for sl in sls], qtys, vstat, line_notes))
+    if machine and machine[0] and machine[1]:
+        _mc_sl = [int(x) for x in machine[1] if int(x) in info]
+        if _mc_sl:
+            run("UPDATE transactions SET machine_id=%s WHERE id > %s AND factory_name=%s AND req_no=%s AND sl_no = ANY(%s) AND machine_id IS NULL",
+                (int(machine[0]), _mc_max, fac, sr_no, _mc_sl))
+            audit("MACHINE_ISSUE", f"{fac}: SR {sr_no} -> machine id {int(machine[0])} ({len(_mc_sl)} maintenance line(s))")
     details = [f"{fac}: {ttype} {q_:g} of {info[sl][0]} ({info[sl][1]}) [SR {sr_no}]" + (f" [Section {section}]" if section else "") + (" [ERP PO Pending ticked]" if po_pending else "")
                for sl, q_ in zip(sls, qtys)]
     run("""INSERT INTO audit_logs (timestamp, username, action_type, details)
@@ -12932,6 +12939,8 @@ def _ri_form():
     if need_names:
         verified = st.checkbox("Physically verified — এই আইটেমগুলো ফিজিক্যালি গুনে দেখা হয়েছে: " + ", ".join(need_names),
                                key=f"ri_ver_{gen}")
+    _mc_id, _mc_err, _mc_sls = _mc_issue_box(fac, lines, tx_date, ttype)      # machine (Maintenance items only)
+    _sb_issue_warn(fac, section, tx_date, sum(q_ * r_ for q_, r_ in zip(qtys, rates)), ttype)   # section monthly limit
     can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
     f1, f2, f3 = st.columns([2, 1.2, 2.2])
     f1.caption(f"মোট আইটেম-লাইন: {len(lines)} · মোট পরিমাণ: {sum(qtys):g}" + ("" if can_write else " · সংরক্ষণ করতে login লাগবে"))
@@ -12944,13 +12953,16 @@ def _ri_form():
             st.error("এই সপ্তাহের compulsory Physical Count শেষ হয়নি — আগে 📱 Physical Count → 🎯 তালিকার আইটেম গুনুন, তারপর Issue save হবে।")
         elif ttype == "Issued" and not section:
             st.error("Section বাছুন (কোন section-এ গেল) — report / audit-এর জন্য এটা দরকার।")
+        elif _mc_err:
+            st.error(_mc_err)
         elif bad:
             st.error("তালিকায় সমস্যা আছে (পরিমাণ ০ / Rate নেই / স্টক কম / ট্রান্সফার নিশ্চিত করা হয়নি) — ঠিক করে আবার চেষ্টা করুন।")
         elif not confirm_existing:
             st.error("এই SR আগে ব্যবহার হয়েছে — নিশ্চিত করার টিক দিন।")
         elif guard():
             n = save_requisition_issue(fac, [(ln["sl"], q_, xfer_flags.get(ln["sl"], False), rt_) for ln, q_, rt_ in zip(lines, qtys, rates)],
-                                       tx_date, sr_no, ttype, notes.strip(), verified, po_pending, section)
+                                       tx_date, sr_no, ttype, notes.strip(), verified, po_pending, section,
+                                       machine=((_mc_id, _mc_sls) if _mc_id else None))
             if n:
                 _who = st.session_state.get("user", "")
                 st.session_state["last_req_no"] = sr_no
@@ -17047,6 +17059,773 @@ if not st.session_state.get("user"):
 if st.session_state.pop("_just_logged_in", False):   # smooth fade-in of the dashboard right after a successful sign-in
     st.markdown(_KC_APP_IN_CSS, unsafe_allow_html=True)
 
+# ============================================================
+#  MACHINE-WISE ISSUE  +  SHIFT HANDOVER  +  SECTION MONTHLY BUDGET LIMIT   (ADDITIVE)
+#  Three NEW pages (⚙️ Machine Cost, 🤝 Shift Handover, 🚦 Section Budget). No existing page was re-written: the
+#  Requisition Issue slip only gets one extra block (machine + section-limit warning) that reads cached data and stays
+#  completely silent unless the slip holds a Maintenance item / a section with a limit.
+# ============================================================
+NAV_MACHINE = "⚙️ Machine Cost"
+NAV_HANDOVER = "🤝 Shift Handover"
+NAV_SEC_BUDGET = "🚦 Section Budget"
+for _nv in (NAV_MACHINE, NAV_HANDOVER, NAV_SEC_BUDGET):
+    if _nv not in TAB_NAMES:
+        TAB_NAMES.append(_nv)
+
+MC_DEPTS = ("Maintenance",)        # items of these departments must carry a machine when issued
+MC_REPEAT_DAYS = 60                # "same part again within N days" warning
+HANDOVER_SHIFTS = ["Day", "Evening", "Night"]
+SB_YELLOW_PCT, SB_RED_PCT = 80.0, 100.0
+
+
+def ensure_mc_schema():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS machines (id SERIAL PRIMARY KEY, factory_name TEXT, mc_no TEXT,
+                           machine_no TEXT DEFAULT '', machine_name TEXT DEFAULT '', section TEXT DEFAULT '',
+                           active BOOLEAN DEFAULT TRUE, created_by TEXT, created_at TEXT)""")
+            cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS ux_machines_fac_mc
+                           ON machines(factory_name, lower(mc_no), lower(COALESCE(machine_no,'')))""")
+            cur.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS machine_id INTEGER")
+            cur.execute("CREATE INDEX IF NOT EXISTS ix_tx_machine ON transactions(machine_id) WHERE machine_id IS NOT NULL")
+            cur.execute("""CREATE TABLE IF NOT EXISTS section_budget_limits (id SERIAL PRIMARY KEY, factory_name TEXT,
+                           section_name TEXT, monthly_limit REAL DEFAULT 0, updated_by TEXT, updated_at TEXT,
+                           UNIQUE(factory_name, section_name))""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS shift_handovers (id SERIAL PRIMARY KEY, factory_name TEXT,
+                           handover_date TEXT, shift TEXT, from_user TEXT, summary TEXT, pending_work TEXT, problems TEXT,
+                           created_at TEXT, ack_by TEXT, ack_at TEXT, ack_note TEXT)""")
+            cur.execute("CREATE INDEX IF NOT EXISTS ix_handover_fac ON shift_handovers(factory_name, id)")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def mc_schema():
+    if not st.session_state.get("_mc_schema_ready"):
+        run_once_per_process("mc_schema_v1", ensure_mc_schema)
+        st.session_state["_mc_schema_ready"] = True
+
+
+def mc_list(fac, active_only=True):
+    mc_schema()
+    return q_c("SELECT id, mc_no, machine_no, machine_name, section, active FROM machines WHERE factory_name=%s"
+               + (" AND active" if active_only else "") + " ORDER BY lower(mc_no), lower(COALESCE(machine_no,''))", (fac,))
+
+
+def mc_label(r):
+    s = f"M/C {r['mc_no']}"
+    if r.get("machine_no"):
+        s += f" · Machine No. {r['machine_no']}"
+    if r.get("machine_name"):
+        s += f" · {r['machine_name']}"
+    return s
+
+
+def _mc_life(dates):
+    """(average days between two issues, shortest gap) of one part on one machine; (None, None) with fewer than 2 dates."""
+    ds = sorted(set(dates))
+    if len(ds) < 2:
+        return None, None
+    gaps = [(b - a).days for a, b in zip(ds, ds[1:])]
+    return sum(gaps) / len(gaps), min(gaps)
+
+
+def _mc_maint_sls(fac, sls):
+    if not sls:
+        return []
+    rows = q_c("SELECT sl_no FROM inventory WHERE factory_name=%s AND sl_no = ANY(%s) AND department = ANY(%s)",
+               (fac, sorted(int(x) for x in sls), list(MC_DEPTS)))
+    return sorted(int(r["sl_no"]) for r in rows)
+
+
+# ---------------- block shown inside the Requisition Issue slip ----------------
+def _mc_issue_box(fac, lines, tx_date, ttype):
+    """Machine block of the Requisition Issue slip -> (machine_id or None, error text, maintenance sl list).
+    Silent and free unless the slip holds a Maintenance item."""
+    try:
+        if not lines or ttype != "Issued":
+            return None, "", []
+        mc_schema()
+        msl = _mc_maint_sls(fac, [int(ln["sl"]) for ln in lines])
+        if not msl:
+            return None, "", []
+        gen = st.session_state.get("ri_gen", 0)
+        machines = mc_list(fac)
+        st.markdown("**⚙️ মেশিন — এই Maintenance মাল কোন মেশিনের জন্য**")
+        if not machines:
+            st.info("এই Unit-এ এখনো কোনো মেশিন যোগ করা হয়নি — Store Manager ⚙️ Machine Cost → 🛠 মেশিন তালিকা থেকে আগে মেশিন যোগ করুন। (এখন মেশিন ছাড়াই সংরক্ষণ হবে)")
+            return None, "", msl
+        lastd = {int(r["machine_id"]): r["last_d"] for r in q_c(
+            f"SELECT machine_id, MAX({_sql_date('date')}) AS last_d FROM transactions WHERE factory_name=%s AND machine_id IS NOT NULL GROUP BY machine_id", (fac,))}
+        NONE = "— মেশিন বাছুন —"
+        labs = {}
+        for r in machines:
+            ld = lastd.get(int(r["id"]))
+            labs[f"{mc_label(r)}  ·  শেষ মাল নিয়েছে: {ld:%d-%b-%Y}" if ld else f"{mc_label(r)}  ·  এখনো মাল নেয়নি"] = r
+        c1, c2 = st.columns([3.2, 1.2])
+        pick = c1.selectbox("M/C No · Machine No *", [NONE] + list(labs), key=f"mc_pick_{gen}")
+        c2.markdown(f"<div style='padding-top:1.9rem'>📅 আজ: <b>{local_now():%d-%b-%Y}</b></div>", unsafe_allow_html=True)
+        if pick == NONE:
+            return None, "Maintenance মালের জন্য মেশিন (M/C No / Machine No) বাছুন।", msl
+        mid = int(labs[pick]["id"])
+        hist = q_c("""SELECT sl_no, date, qty FROM transactions WHERE factory_name=%s AND machine_id=%s AND sl_no = ANY(%s)
+                      AND trans_type = ANY(%s) ORDER BY id""", (fac, mid, msl, list(ISSUE_TYPES)))
+        by = {}
+        for h in hist:
+            d = parse_date(h["date"])
+            if d:
+                by.setdefault(int(h["sl_no"]), []).append((d.date(), float(h["qty"] or 0)))
+        ref = tx_date.date() if isinstance(tx_date, datetime) else tx_date
+        for ln in lines:
+            if int(ln["sl"]) not in msl:
+                continue
+            ev = sorted(by.get(int(ln["sl"]), []))
+            nm = f"{ln['name']} [{ln['size'] or '-'}]"
+            if not ev:
+                st.caption(f"🔩 {nm}: এই মেশিনে এই মাল আগে কখনো নেওয়া হয়নি।")
+                continue
+            last_d, last_q = ev[-1]
+            ago = (ref - last_d).days
+            life, _mn = _mc_life([d for d, _ in ev])
+            t_ = f"🔩 {nm}: এই মেশিনে শেষ নিয়েছে {last_d:%d-%b-%Y} ({ago} দিন আগে, {last_q:g}) · মোট {len(ev)} বার"
+            if life is not None:
+                t_ += f" · গড় লাইফ ~{life:.0f} দিন"
+            if ago <= MC_REPEAT_DAYS:
+                t_ += f" · ⚠️ {MC_REPEAT_DAYS} দিনের মধ্যে আবার নিচ্ছে — Maintenance টিমকে কারণ জিজ্ঞেস করুন"
+            st.caption(t_)
+        return mid, "", msl
+    except Exception as e:
+        st.caption(f"⚠️ মেশিন অংশ লোড হয়নি ({e}) — মেশিন ছাড়াই সংরক্ষণ হবে।")
+        return None, "", []
+
+
+# ---------------- section monthly budget limit ----------------
+def _sb_level(pct):
+    return "red" if pct >= SB_RED_PCT else ("yellow" if pct >= SB_YELLOW_PCT else "ok")
+
+
+_SB_ICON = {"red": "🔴", "yellow": "🟡", "ok": "🟢", "none": "⚪"}
+
+
+def _sb_limit(fac, section):
+    r = q_c("SELECT monthly_limit FROM section_budget_limits WHERE factory_name=%s AND section_name=%s", (fac, section))
+    return float(r[0]["monthly_limit"] or 0) if r else 0.0
+
+
+def _sb_used_df(units, d1, d2):
+    """Issue cost per (factory, section) in the period: qty x item rate (same basis as the Budget page)."""
+    df = qdf_c(f"""SELECT t.factory_name, TRIM(COALESCE(t.section,'')) AS section,
+                          SUM(COALESCE(t.qty,0) * COALESCE(NULLIF(t.unit_price_at_tx,0), i.unit_price, 0)) AS used, COUNT(*) AS n
+                   FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                   WHERE t.factory_name = ANY(%s) AND t.trans_type = ANY(%s) AND {_sql_date('t.date')} BETWEEN %s AND %s
+                   GROUP BY 1, 2""", (list(units), list(ISSUE_TYPES), d1, d2))
+    if not df.empty:
+        df["used"] = df["used"].astype(float)
+    return df
+
+
+def _sb_issue_warn(fac, section, tx_date, slip_value, ttype):
+    """One line under the slip: this section's limit, usage so far and usage after this slip (yellow >= 80%, red >= 100%)."""
+    try:
+        if not section or ttype != "Issued":
+            return
+        mc_schema()
+        lim = _sb_limit(fac, section)
+        if lim <= 0:
+            return
+        d1 = date(tx_date.year, tx_date.month, 1)
+        d2 = date(tx_date.year, tx_date.month, calendar.monthrange(tx_date.year, tx_date.month)[1])
+        df = _sb_used_df([fac], d1, d2)
+        used = float(df[df["section"] == section]["used"].sum()) if not df.empty else 0.0
+        now_pct, after = used / lim * 100, (used + slip_value) / lim * 100
+        msg = (f"Section «{section}» — {tx_date:%b-%Y} মাসের সীমা ৳{lim:,.0f} · এ পর্যন্ত ৳{used:,.0f} ({now_pct:.0f}%) · "
+               f"এই স্লিপ সহ ৳{used + slip_value:,.0f} ({after:.0f}%)")
+        lv = _sb_level(after)
+        if lv == "red":
+            st.error("🔴 মাসিক সীমা পার হয়ে যাবে! " + msg)
+        elif lv == "yellow":
+            st.warning("🟡 ৮০% পার। " + msg)
+        else:
+            st.caption("🟢 " + msg)
+    except Exception:
+        pass
+
+
+# ============================================================
+#  PAGE 1: ⚙️ MACHINE COST
+# ============================================================
+@tx
+def mc_add(fac, rows):
+    n = 0
+    user = st.session_state.get("user", "")
+    for mc_no, m_no, name, sec in rows:
+        got = run("""INSERT INTO machines (factory_name, mc_no, machine_no, machine_name, section, active, created_by, created_at)
+                     VALUES (%s,%s,%s,%s,%s,TRUE,%s,%s) ON CONFLICT DO NOTHING RETURNING id""",
+                  (fac, mc_no, m_no, name, sec, user, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        n += len(got or [])
+    audit("MACHINE_ADD", f"{fac}: {n} machine(s) added: " + ", ".join(f"{r[0]}/{r[1]}" for r in rows[:20]))
+    return {"n": n}
+
+
+@tx
+def mc_update(mid, fac, mc_no, m_no, name, sec, active):
+    run("UPDATE machines SET mc_no=%s, machine_no=%s, machine_name=%s, section=%s, active=%s WHERE id=%s",
+        (mc_no, m_no, name, sec, bool(active), mid))
+    audit("MACHINE_EDIT", f"{fac}: machine {mid} -> M/C {mc_no} / {m_no} / {name} / {sec} / {'active' if active else 'inactive'}")
+    return True
+
+
+@tx
+def mc_delete(mid, fac, label):
+    run("DELETE FROM machines WHERE id=%s", (mid,))
+    audit("MACHINE_DELETE", f"{fac}: machine {label} deleted")
+    return True
+
+
+@tx
+def mc_set_slip(fac, sr, mid):
+    run("""UPDATE transactions SET machine_id=%s WHERE factory_name=%s AND req_no=%s AND trans_type = ANY(%s)
+           AND sl_no IN (SELECT sl_no FROM inventory WHERE factory_name=%s AND department = ANY(%s))""",
+        (mid, fac, sr, list(ISSUE_TYPES), fac, list(MC_DEPTS)))
+    audit("MACHINE_SLIP_FIX", f"{fac}: SR {sr} -> machine id {mid}")
+    return True
+
+
+def _mc_tx_df(units, d1, d2):
+    mc_schema()
+    psql, pp = period_sql("t.date", d1, d2)
+    df = qdf_c(f"""SELECT t.id, t.factory_name, t.machine_id, t.date, COALESCE(t.qty,0) AS qty, t.sl_no,
+                          COALESCE(NULLIF(t.prod_id,''), i.prod_id, '') AS code, COALESCE(NULLIF(t.item_name,''), i.item_name, '') AS item,
+                          COALESCE(i.size,'') AS size, COALESCE(NULLIF(i.unit_name,''),'Pcs') AS uom,
+                          COALESCE(NULLIF(t.unit_price_at_tx,0), i.unit_price, 0) AS rate, COALESCE(t.req_no,'') AS req_no,
+                          COALESCE(t.officer_name,'') AS officer, m.mc_no, COALESCE(m.machine_no,'') AS machine_no,
+                          COALESCE(m.machine_name,'') AS machine_name, COALESCE(m.section,'') AS msection
+                   FROM transactions t JOIN machines m ON m.id=t.machine_id
+                   LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                   WHERE t.factory_name = ANY(%s) AND t.trans_type = ANY(%s){psql}""",
+                 tuple([list(units), list(ISSUE_TYPES)] + pp))
+    if df.empty:
+        return df
+    for c in ("qty", "rate"):
+        df[c] = df[c].astype(float)
+    df["amount"] = df["qty"] * df["rate"]
+    df["dt"] = _parse_dates(df["date"])
+    df["machine"] = df.apply(lambda r: f"M/C {r['mc_no']}" + (f" · {r['machine_no']}" if r["machine_no"] else "")
+                             + (f" · {r['machine_name']}" if r["machine_name"] else ""), axis=1)
+    if len(set(df["factory_name"])) > 1:
+        df["machine"] = df["factory_name"].map(short_fac) + " | " + df["machine"]
+    return df
+
+
+def _mc_view_cost(units, all_machines):
+    d1, d2, plabel = report_period("mc_cost", default="এই মাস")
+    df = _mc_tx_df(units, d1, d2)
+    if df.empty:
+        st.info(f"{plabel}: মেশিনের নামে কোনো ইস্যু পাওয়া যায়নি।")
+        return
+    g = df.groupby(["machine_id", "machine"]).agg(Lines=("id", "count"), Items=("sl_no", "nunique"), Cost=("amount", "sum"),
+                                                  Last=("dt", "max")).reset_index()
+    top = df.sort_values("amount", ascending=False).drop_duplicates("machine_id").set_index("machine_id")["item"]
+    g["Top item (খরচ বেশি)"] = g["machine_id"].map(top)
+    g = g.sort_values("Cost", ascending=False)
+    total = float(g["Cost"].sum())
+    k1, k2, k3 = st.columns(3)
+    k1.metric(f"মোট খরচ ({plabel})", f"৳{total:,.0f}")
+    k2.metric("মেশিন (খরচ হয়েছে)", f"{len(g)}")
+    k3.metric("সবচেয়ে বেশি খরচ", f"{g.iloc[0]['machine']}", f"৳{float(g.iloc[0]['Cost']):,.0f}")
+    out = pd.DataFrame({"Machine": g["machine"], "ইস্যু লাইন": g["Lines"], "ভিন্ন আইটেম": g["Items"],
+                        "মোট খরচ (৳)": g["Cost"].round(0), "মোট খরচের %": (g["Cost"] / total * 100).round(1) if total else 0.0,
+                        "শেষ মাল নিয়েছে": g["Last"].dt.strftime(DATE_FMT), "সবচেয়ে বেশি খরচের আইটেম": g["Top item (খরচ বেশি)"]})
+    st.dataframe(out, hide_index=True, use_container_width=True, height=min(90 + 35 * len(out), 520),
+                 column_config={"মোট খরচ (৳)": st.column_config.NumberColumn(format="%.0f"),
+                                "মোট খরচের %": st.column_config.NumberColumn(format="%.1f")})
+    try:
+        st.bar_chart(g.set_index("machine")[["Cost"]].head(15), use_container_width=True)
+    except Exception:
+        pass
+    if (df["rate"] <= 0).any():
+        st.caption(f"ℹ️ {int((df['rate'] <= 0).sum())}টি লাইনে item-এর Rate নেই — ওই লাইনের খরচ ০ ধরা হয়েছে।")
+    if all_machines:
+        have = set(g["machine_id"])
+        idle = [mc_label(r) for u in units for r in mc_list(u) if int(r["id"]) not in have]
+        if idle:
+            st.caption("এই সময়ে কোনো মাল নেয়নি: " + " | ".join(idle[:40]))
+    export_buttons(out, "machine_wise_cost", f"Machine-wise cost ({plabel})")
+
+
+def _mc_view_detail(units):
+    opts = {}
+    for u in units:
+        for r in mc_list(u, active_only=False):
+            opts[(short_fac(u) + " | " if len(units) > 1 else "") + mc_label(r)] = int(r["id"])
+    if not opts:
+        st.info("কোনো মেশিন নেই।")
+        return
+    pick = st.selectbox("মেশিন বাছুন", list(opts), key="mc_det_pick")
+    d1, d2, plabel = report_period("mc_det", default="সব সময়")
+    df = _mc_tx_df(units, d1, d2)
+    df = df[df["machine_id"] == opts[pick]] if not df.empty else df
+    if df.empty:
+        st.info("এই মেশিন ও সময়ে কোনো ইস্যু নেই।")
+        return
+    today = local_now().date()
+    rows = []
+    for (sl, item, size), g in df.groupby(["sl_no", "item", "size"]):
+        ds = [d.date() for d in g["dt"].dropna()]
+        life, mn = _mc_life(ds)
+        last = max(ds) if ds else None
+        rows.append({"Item": f"{item} [{size or '-'}]", "কতবার নিয়েছে": len(g), "মোট পরিমাণ": g["qty"].sum(),
+                     "মোট খরচ (৳)": round(g["amount"].sum(), 0), "প্রথম": min(ds).strftime(DATE_FMT) if ds else "-",
+                     "শেষ": last.strftime(DATE_FMT) if last else "-", "শেষের পর (দিন)": (today - last).days if last else None,
+                     "গড় লাইফ (দিন)": round(life, 0) if life is not None else None,
+                     "সবচেয়ে কম গ্যাপ (দিন)": mn,
+                     "সতর্কতা": "⚠️ বারবার" if (mn is not None and mn <= MC_REPEAT_DAYS) else ""})
+    out = pd.DataFrame(rows).sort_values("মোট খরচ (৳)", ascending=False)
+    st.metric(f"এই মেশিনের মোট খরচ ({plabel})", f"৳{float(df['amount'].sum()):,.0f}")
+    st.markdown("**🔩 আইটেম-ভিত্তিক (কোন পার্টস কতবার, গড় লাইফ কত)**")
+    st.dataframe(out, hide_index=True, use_container_width=True, height=min(90 + 35 * len(out), 420))
+    hist = df.sort_values("dt", ascending=False)
+    hout = pd.DataFrame({"তারিখ": hist["date"], "SR": hist["req_no"], "Item": hist["item"] + " [" + hist["size"].replace("", "-") + "]",
+                         "পরিমাণ": hist["qty"], "Rate (৳)": hist["rate"], "Amount (৳)": hist["amount"].round(0), "Issued by": hist["officer"]})
+    st.markdown("**📜 ইস্যুর ইতিহাস**")
+    st.dataframe(hout, hide_index=True, use_container_width=True, height=min(90 + 35 * len(hout), 420))
+    export_buttons(out, "machine_item_life", "Machine item life")
+
+
+def _mc_view_life(units):
+    c1, c2, c3 = st.columns(3)
+    days = int(c1.number_input("সময়সীমা (দিন)", min_value=7, max_value=365, value=MC_REPEAT_DAYS, step=1, key="mc_life_days"))
+    times = int(c2.number_input("এই সময়ে কতবার বা বেশি", min_value=2, max_value=20, value=3, step=1, key="mc_life_times"))
+    c3.caption("যেমন: ৬০ দিনে ৩ বার বা বেশি একই মেশিনে একই মাল গেলে এখানে দেখাবে।")
+    df = _mc_tx_df(units, None, None)
+    if df.empty:
+        st.info("মেশিন-ট্যাগ করা কোনো ইস্যু এখনো নেই।")
+        return
+    today = pd.Timestamp(local_now().date())
+    rows = []
+    for (mid, sl), g in df.groupby(["machine_id", "sl_no"]):
+        ds = sorted({d.date() for d in g["dt"].dropna()})
+        life, mn = _mc_life(ds)
+        recent = g[g["dt"] >= today - pd.Timedelta(days=days)]
+        rows.append({"Machine": g["machine"].iloc[0], "Item": f"{g['item'].iloc[0]} [{g['size'].iloc[0] or '-'}]",
+                     f"শেষ {days} দিনে (বার)": len(recent), "মোট বার": len(g), "গড় লাইফ (দিন)": round(life, 0) if life is not None else None,
+                     "সবচেয়ে কম গ্যাপ (দিন)": mn, "শেষ নিয়েছে": max(ds).strftime(DATE_FMT) if ds else "-",
+                     "মোট খরচ (৳)": round(g["amount"].sum(), 0)})
+    out = pd.DataFrame(rows)
+    hot = out[out[f"শেষ {days} দিনে (বার)"] >= times].sort_values(f"শেষ {days} দিনে (বার)", ascending=False)
+    st.markdown(f"**🚨 গত {days} দিনে {times} বার বা বেশি একই মাল একই মেশিনে ({len(hot)}টি)**")
+    if hot.empty:
+        st.success("এই শর্তে কিছু নেই।")
+    else:
+        st.dataframe(hot, hide_index=True, use_container_width=True, height=min(90 + 35 * len(hot), 380))
+    with st.expander("সব পার্টসের লাইফ (গড় গ্যাপ অনুযায়ী, কম লাইফ আগে)"):
+        life_df = out[out["গড় লাইফ (দিন)"].notna()].sort_values("গড় লাইফ (দিন)")
+        st.dataframe(life_df, hide_index=True, use_container_width=True, height=min(90 + 35 * len(life_df), 420))
+    export_buttons(out, "parts_life", "Parts life")
+
+
+def _mc_manage(fac, is_mgr):
+    rows = mc_list(fac, active_only=False)
+    if rows:
+        st.dataframe(pd.DataFrame([{"M/C No": r["mc_no"], "Machine No": r["machine_no"] or "", "নাম / ধরন": r["machine_name"] or "",
+                                    "Section": r["section"] or "", "অবস্থা": "চালু" if r["active"] else "বন্ধ"} for r in rows]),
+                     hide_index=True, use_container_width=True, height=min(90 + 35 * len(rows), 360))
+    else:
+        st.info(f"{fac}-এ এখনো কোনো মেশিন নেই।")
+    if not is_mgr:
+        st.caption("মেশিন যোগ / বদল করতে পারেন শুধু Store Manager।")
+        return
+    secs = ["—"] + _ri_section_names(fac)
+    with st.expander("➕ নতুন মেশিন যোগ করুন", expanded=not rows):
+        with st.form("mc_add_form", clear_on_submit=True):
+            a, b, c, d = st.columns([1, 1, 1.4, 1.2])
+            f_mc = a.text_input("M/C No *")
+            f_mn = b.text_input("Machine No")
+            f_nm = c.text_input("নাম / ধরন (ঐচ্ছিক)")
+            f_sec = d.selectbox("Section (ঐচ্ছিক)", secs)
+            if st.form_submit_button("💾 যোগ করুন") and guard():
+                if not f_mc.strip():
+                    st.error("M/C No লিখুন।")
+                else:
+                    res = mc_add(fac, [(f_mc.strip(), f_mn.strip(), f_nm.strip(), "" if f_sec == "—" else f_sec)])
+                    if res and res.get("n"):
+                        done(f"✅ মেশিন যোগ হয়েছে: M/C {f_mc.strip()}")
+                    elif res:
+                        st.warning("এই M/C No + Machine No আগেই আছে।")
+        st.caption("একসাথে অনেক মেশিন: প্রতি লাইনে  `M/C No | Machine No | নাম | Section`  (শেষের দুটো ঐচ্ছিক)")
+        bulk = st.text_area("Bulk মেশিন", height=120, key="mc_bulk", placeholder="M-01 | 1234 | Washing Machine 1 | Washing\nM-02 | 1235 | Hydro Extractor | Washing")
+        if st.button("💾 Bulk যোগ করুন", key="mc_bulk_btn") and guard():
+            parsed = []
+            for ln in bulk.splitlines():
+                p = [x.strip() for x in ln.split("|")]
+                if p and p[0]:
+                    parsed.append((p[0], p[1] if len(p) > 1 else "", p[2] if len(p) > 2 else "", p[3] if len(p) > 3 else ""))
+            if not parsed:
+                st.error("অন্তত একটি লাইন লিখুন।")
+            else:
+                res = mc_add(fac, parsed)
+                if res:
+                    st.session_state.pop("mc_bulk", None)
+                    done(f"✅ {res['n']}টি মেশিন যোগ হয়েছে ({len(parsed) - res['n']}টি আগে থেকেই ছিল)।")
+    if rows:
+        with st.expander("✏️ মেশিন বদলান / বন্ধ করুন / মুছুন"):
+            opts = {mc_label(r) + ("" if r["active"] else " (বন্ধ)"): r for r in rows}
+            pick = st.selectbox("মেশিন", list(opts), key="mc_edit_pick")
+            r = opts[pick]
+            k = f"mce_{r['id']}"
+            a, b, c, d = st.columns([1, 1, 1.4, 1.2])
+            e_mc = a.text_input("M/C No", value=r["mc_no"] or "", key=k + "a")
+            e_mn = b.text_input("Machine No", value=r["machine_no"] or "", key=k + "b")
+            e_nm = c.text_input("নাম / ধরন", value=r["machine_name"] or "", key=k + "c")
+            cur_sec = r["section"] if r["section"] in secs else "—"
+            e_sec = d.selectbox("Section", secs, index=secs.index(cur_sec), key=k + "d")
+            e_act = st.checkbox("চালু (Issue-র dropdown-এ দেখাবে)", value=bool(r["active"]), key=k + "e")
+            x1, x2 = st.columns(2)
+            if x1.button("💾 সেভ", key=k + "s") and guard():
+                if not e_mc.strip():
+                    st.error("M/C No খালি রাখা যাবে না।")
+                elif mc_update(int(r["id"]), fac, e_mc.strip(), e_mn.strip(), e_nm.strip(), "" if e_sec == "—" else e_sec, e_act):
+                    done("✅ মেশিন আপডেট হয়েছে।")
+            used = q("SELECT COUNT(*) AS n FROM transactions WHERE machine_id=%s", (int(r["id"]),))[0]["n"]
+            if used:
+                x2.caption(f"এই মেশিনে {used}টি ইস্যু আছে — মোছা যাবে না, শুধু 'চালু' টিক তুলে বন্ধ করুন।")
+            elif x2.button("🗑 মুছুন", key=k + "d_btn") and guard():
+                if mc_delete(int(r["id"]), fac, mc_label(r)):
+                    done("✅ মেশিন মোছা হয়েছে।")
+
+
+def _mc_fix_slip(fac, is_mgr):
+    st.caption("ভুল মেশিনে ট্যাগ হলে, বা আগের SR-এ মেশিন বসাতে: SR নম্বর দিয়ে ওই স্লিপের Maintenance লাইনগুলোর মেশিন বদলান।")
+    if not is_mgr:
+        st.info("শুধু Store Manager এটা করতে পারেন।")
+        return
+    machines = mc_list(fac)
+    if not machines:
+        st.info("আগে মেশিন যোগ করুন।")
+        return
+    sr = st.text_input("SR নম্বর", key="mc_fix_sr").strip()
+    labs = {mc_label(r): int(r["id"]) for r in machines}
+    pick = st.selectbox("নতুন মেশিন", list(labs), key="mc_fix_m")
+    if sr:
+        rows = q("""SELECT t.date, t.item_name, t.qty, COALESCE(m.mc_no,'') AS mc, COALESCE(m.machine_no,'') AS mn
+                    FROM transactions t LEFT JOIN machines m ON m.id=t.machine_id
+                    WHERE t.factory_name=%s AND t.req_no=%s AND t.trans_type = ANY(%s) ORDER BY t.id""", (fac, sr, list(ISSUE_TYPES)))
+        if not rows:
+            st.warning("এই SR-এ কোনো ইস্যু নেই।")
+        else:
+            st.dataframe(pd.DataFrame([{"তারিখ": r["date"], "Item": r["item_name"], "Qty": r["qty"],
+                                        "এখনকার মেশিন": (f"M/C {r['mc']} {r['mn']}".strip() if r["mc"] else "—")} for r in rows]),
+                         hide_index=True, use_container_width=True)
+            if st.button("💾 এই SR-এর Maintenance লাইনে মেশিন বসান", key="mc_fix_btn") and guard():
+                if mc_set_slip(fac, sr, labs[pick]):
+                    done(f"✅ SR {sr}: মেশিন বসানো হয়েছে।")
+
+
+def tab_machine_cost():
+    st.markdown("#### ⚙️ মেশিন-ভিত্তিক খরচ ও পার্টস লাইফ")
+    try:
+        mc_schema()
+    except Exception as e:
+        st.error(f"Machine setup failed: {e}")
+        return
+    units = list(FACTORIES) if is_cons_view else [FAC]
+    is_mgr = st.session_state.get("role") == "Store Manager"
+    labels = ["💰 মেশিন-ভিত্তিক খরচ", "🔎 মেশিন ডিটেইল", "🔩 Parts Life / বারবার", "🛠 মেশিন তালিকা", "🔧 SR-এর মেশিন ঠিক করুন"]
+    t = lazy_tab_select(labels, "lz_mc")
+    if t == 0:
+        _mc_view_cost(units, True)
+    elif t == 1:
+        _mc_view_detail(units)
+    elif t == 2:
+        _mc_view_life(units)
+    elif is_cons_view:
+        st.info("ওপর থেকে একটি Factory বাছুন (মেশিন তালিকা Unit-ভিত্তিক)।")
+    elif t == 3:
+        _mc_manage(FAC, is_mgr)
+    else:
+        _mc_fix_slip(FAC, is_mgr)
+
+
+# ============================================================
+#  PAGE 2: 🤝 SHIFT HANDOVER
+# ============================================================
+def _ho_top(rows, n=15):
+    agg = {}
+    for r in rows:
+        k = f"{r['item']} [{r['size'] or '-'}]"
+        agg[k] = agg.get(k, 0.0) + float(r["qty"] or 0)
+    return [f"{k} × {v:g}" for k, v in sorted(agg.items(), key=lambda kv: -kv[1])[:n]]
+
+
+def _ho_build(fac, d):
+    """Everything that happened on date d in this unit - taken from the live data, nothing typed."""
+    mc_schema()
+    ds = d.strftime(DATE_FMT)
+    rows = q("""SELECT t.trans_type, COALESCE(NULLIF(t.item_name,''), i.item_name,'') AS item, COALESCE(i.size,'') AS size,
+                       COALESCE(t.qty,0) AS qty, COALESCE(NULLIF(t.unit_price_at_tx,0), i.unit_price, 0) AS rate,
+                       COALESCE(t.req_no,'') AS req_no, COALESCE(TRIM(t.section),'') AS section, COALESCE(t.challan_no,'') AS challan,
+                       COALESCE(t.officer_name,'') AS officer, COALESCE(i.department,'') AS dept, t.machine_id
+                FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                WHERE t.factory_name=%s AND t.date=%s""", (fac, ds))
+    iss = [r for r in rows if r["trans_type"] in ISSUE_TYPES]
+    rec = [r for r in rows if r["trans_type"] == "Supplier. Rec"]
+    try:
+        trf = int(q("SELECT COUNT(*) AS n FROM inter_factory_transfers WHERE transfer_date=%s AND (source_factory=%s OR dest_factory=%s)",
+                    (ds, fac, fac))[0]["n"])
+    except Exception:
+        trf = 0
+    return {"date": ds, "officers": sorted({r["officer"] for r in rows if r["officer"]}),
+            "issue_lines": len(iss), "issue_slips": len({r["req_no"] for r in iss if r["req_no"]}),
+            "issue_value": round(sum(float(r["qty"]) * float(r["rate"]) for r in iss), 2), "issues": _ho_top(iss),
+            "recv_lines": len(rec), "recv_challans": len({r["challan"] for r in rec if r["challan"]}), "recv": _ho_top(rec),
+            "other_tx": len(rows) - len(iss) - len(rec), "transfers": trf,
+            "chk_no_section": sum(1 for r in iss if r["trans_type"] == "Issued" and not r["section"]),
+            "chk_no_rate": sum(1 for r in iss if float(r["rate"]) <= 0),
+            "chk_no_machine": sum(1 for r in iss if r["trans_type"] == "Issued" and r["dept"] in MC_DEPTS and not r["machine_id"])}
+
+
+def _ho_pending(fac):
+    """Open work in this unit right now (each source is optional: a missing table never breaks the page)."""
+    P = {}
+    try:
+        P["po_pending"] = int(po_pending_counts()["total"])
+    except Exception:
+        pass
+    for key, sql in (("open_tasks", "SELECT COUNT(*) AS n FROM audit_correction_tasks WHERE factory_name=%s AND COALESCE(status,'Open') <> 'Closed'"),
+                     ("repair_pending", "SELECT COUNT(*) AS n FROM repair_returns WHERE factory_name=%s AND status='Pending Return'"),
+                     ("hold_open", "SELECT COUNT(*) AS n FROM hold_bills WHERE factory_name=%s AND COALESCE(status,'Open')='Open'")):
+        try:
+            P[key] = int(q_c(sql, (fac,))[0]["n"])
+        except Exception:
+            pass
+    try:
+        g = count_gate_status(fac)
+        if g:
+            P["count_left"] = max(int(g["need"]) - int(g["done"]), 0)
+    except Exception:
+        pass
+    return P
+
+
+_HO_PEND_LABEL = {"po_pending": "ERP PO / GRN pending", "open_tasks": "খোলা Audit correction task", "repair_pending": "Repair থেকে ফেরত বাকি",
+                  "hold_open": "Hold Bill (খোলা)", "count_left": "এ সপ্তাহের Physical Count বাকি (আইটেম)"}
+
+
+def _ho_show(S, P, key):
+    c = st.columns(4)
+    c[0].metric("ইস্যু লাইন", S.get("issue_lines", 0), f"{S.get('issue_slips', 0)}টি SR")
+    c[1].metric("ইস্যু মূল্য", f"৳{float(S.get('issue_value', 0)):,.0f}")
+    c[2].metric("রিসিভ লাইন", S.get("recv_lines", 0), f"{S.get('recv_challans', 0)}টি Challan")
+    c[3].metric("Transfer / অন্যান্য", f"{S.get('transfers', 0)} / {S.get('other_tx', 0)}")
+    if S.get("officers"):
+        st.caption("এই দিনে যারা এন্ট্রি করেছেন: " + ", ".join(S["officers"]))
+    warns = []
+    if S.get("chk_no_section"):
+        warns.append(f"{S['chk_no_section']}টি Issue লাইনে Section নেই")
+    if S.get("chk_no_rate"):
+        warns.append(f"{S['chk_no_rate']}টি Issue লাইনে Rate নেই")
+    if S.get("chk_no_machine"):
+        warns.append(f"{S['chk_no_machine']}টি Maintenance Issue-তে মেশিন নেই")
+    if warns:
+        st.warning("⚠️ যাচাই করুন: " + " · ".join(warns))
+    if S.get("issues"):
+        with st.expander(f"📤 যা যা ইস্যু হয়েছে ({len(S['issues'])})"):
+            st.write("\n".join(f"- {x}" for x in S["issues"]))
+    if S.get("recv"):
+        with st.expander(f"📥 যা যা রিসিভ হয়েছে ({len(S['recv'])})"):
+            st.write("\n".join(f"- {x}" for x in S["recv"]))
+    pend = [f"**{_HO_PEND_LABEL[k]}:** {v}" for k, v in (P or {}).items() if v and k in _HO_PEND_LABEL]
+    if pend:
+        st.markdown("🕒 **এখনো বাকি:** " + " · ".join(pend))
+
+
+@tx
+def ho_save(fac, d, shift, pending_work, problems, payload):
+    user = st.session_state.get("user", "")
+    run("""INSERT INTO shift_handovers (factory_name, handover_date, shift, from_user, summary, pending_work, problems, created_at)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (fac, d.strftime(DATE_FMT), shift, user, json.dumps(payload, ensure_ascii=False), pending_work, problems,
+         local_now().strftime("%d-%b-%Y %I:%M %p")))
+    audit("SHIFT_HANDOVER", f"{fac}: {shift} shift handover ({d:%d-%b-%Y}) by {user}")
+    return True
+
+
+@tx
+def ho_ack(hid, note):
+    user = st.session_state.get("user", "")
+    got = run("UPDATE shift_handovers SET ack_by=%s, ack_at=%s, ack_note=%s WHERE id=%s AND ack_by IS NULL RETURNING id",
+              (user, local_now().strftime("%d-%b-%Y %I:%M %p"), note, hid))
+    if got:
+        audit("SHIFT_HANDOVER_ACK", f"Handover {hid} acknowledged by {user}")
+    return {"ok": bool(got)}
+
+
+def tab_shift_handover():
+    st.markdown("#### 🤝 শিফট হ্যান্ডওভার")
+    if is_cons_view:
+        st.info("ওপর থেকে একটি Factory বাছুন।")
+        return
+    try:
+        mc_schema()
+    except Exception as e:
+        st.error(f"Handover setup failed: {e}")
+        return
+    fac, me, role = FAC, st.session_state.get("user", ""), st.session_state.get("role")
+    can_write = bool(me) and role != "Auditor"
+
+    # 1) handovers waiting for the next officer
+    wait = q("SELECT * FROM shift_handovers WHERE factory_name=%s AND ack_by IS NULL ORDER BY id DESC LIMIT 10", (fac,))
+    st.markdown(f"**📥 বুঝে নেওয়া বাকি ({len(wait)})**")
+    if not wait:
+        st.success("কোনো handover অপেক্ষায় নেই — সব বুঝে নেওয়া হয়েছে।")
+    for h in wait:
+        with st.container(border=True):
+            st.markdown(f"**{h['handover_date']} · {h['shift']} শিফট** — দিয়েছেন: **{h['from_user']}** ({h['created_at']})")
+            try:
+                snap = json.loads(h["summary"] or "{}")
+            except Exception:
+                snap = {}
+            _ho_show(snap.get("s", {}), snap.get("p", {}), f"w{h['id']}")
+            if h["pending_work"]:
+                st.markdown("🧰 **বাকি কাজ:** " + h["pending_work"])
+            if h["problems"]:
+                st.markdown("🚧 **সমস্যা:** " + h["problems"])
+            own = (h["from_user"] == me and role != "Store Manager")
+            note = st.text_input("আপনার নোট (ঐচ্ছিক)", key=f"ho_note_{h['id']}")
+            if own:
+                st.caption("নিজের দেওয়া handover নিজে বুঝে নেওয়া যাবে না — পরের শিফটের অফিসার নেবেন।")
+            elif st.button("✅ বুঝে নিলাম", key=f"ho_ack_{h['id']}", disabled=not can_write) and guard():
+                res = ho_ack(int(h["id"]), note.strip())
+                if res and res.get("ok"):
+                    done("✅ Handover বুঝে নেওয়া হয়েছে।")
+                elif res:
+                    st.warning("এটা আগেই কেউ বুঝে নিয়েছে।")
+
+    # 2) give a new handover
+    st.markdown("---")
+    st.markdown("**📤 শিফট শেষ — নতুন Handover দিন**")
+    a, b = st.columns([1, 1])
+    shift = a.selectbox("শিফট", HANDOVER_SHIFTS, key="ho_shift")
+    d = b.date_input("কোন দিনের সারাংশ", value=local_now().date(), max_value=local_now().date(), key="ho_date")
+    S, P = _ho_build(fac, d), _ho_pending(fac)
+    _ho_show(S, P, "new")
+    pw = st.text_area("🧰 কোন কাজ বাকি (পরের শিফট করবে)", key="ho_pw", height=90)
+    pr = st.text_area("🚧 কোন সমস্যা / লক্ষ্য করার বিষয়", key="ho_pr", height=90)
+    if st.button("📤 Handover সংরক্ষণ করুন", type="primary", key="ho_save_btn", disabled=not can_write) and guard():
+        if ho_save(fac, d, shift, pw.strip(), pr.strip(), {"s": S, "p": P}):
+            for k in ("ho_pw", "ho_pr"):
+                st.session_state.pop(k, None)
+            done("✅ Handover সংরক্ষণ হয়েছে — পরের শিফটের অফিসার ঢুকে 'বুঝে নিলাম' দেবেন।")
+
+    # 3) history
+    st.markdown("---")
+    hist = q("""SELECT id, handover_date, shift, from_user, created_at, ack_by, ack_at, ack_note, pending_work, problems
+                FROM shift_handovers WHERE factory_name=%s ORDER BY id DESC LIMIT 40""", (fac,))
+    if hist:
+        with st.expander(f"📚 আগের Handover ({len(hist)})"):
+            out = pd.DataFrame([{"তারিখ": h["handover_date"], "শিফট": h["shift"], "দিয়েছেন": h["from_user"], "সময়": h["created_at"],
+                                 "বুঝে নিয়েছেন": h["ack_by"] or "⏳ বাকি", "কখন": h["ack_at"] or "", "বাকি কাজ": h["pending_work"] or "",
+                                 "সমস্যা": h["problems"] or "", "নোট": h["ack_note"] or ""} for h in hist])
+            st.dataframe(out, hide_index=True, use_container_width=True)
+            export_buttons(out, "shift_handovers", "Shift handovers")
+
+
+# ============================================================
+#  PAGE 3: 🚦 SECTION BUDGET (monthly limit per section, yellow >= 80%, red >= 100%)
+# ============================================================
+@tx
+def sb_save_limits(fac, limits):
+    user = st.session_state.get("user", "")
+    for sec, v in limits.items():
+        run("""INSERT INTO section_budget_limits (factory_name, section_name, monthly_limit, updated_by, updated_at)
+               VALUES (%s,%s,%s,%s,%s) ON CONFLICT (factory_name, section_name)
+               DO UPDATE SET monthly_limit=EXCLUDED.monthly_limit, updated_by=EXCLUDED.updated_by, updated_at=EXCLUDED.updated_at""",
+            (fac, sec, float(v), user, local_now().strftime("%d-%b-%Y %I:%M %p")))
+    audit("SECTION_LIMIT_SET", f"{fac}: " + ", ".join(f"{k}={v:g}" for k, v in limits.items()))
+    return True
+
+
+def tab_section_budget():
+    st.markdown("#### 🚦 Section-ভিত্তিক মাসিক বাজেট সীমা")
+    try:
+        mc_schema()
+    except Exception as e:
+        st.error(f"Section budget setup failed: {e}")
+        return
+    units = list(FACTORIES) if is_cons_view else [FAC]
+    is_mgr = st.session_state.get("role") == "Store Manager"
+    today = local_now().date()
+    c = st.columns([1, 1, 2])
+    mnames = list(calendar.month_name)[1:]
+    mm = c[0].selectbox("মাস", mnames, index=today.month - 1, key="sb_m")
+    yy = int(c[1].selectbox("বছর", list(range(today.year - 3, today.year + 1))[::-1], key="sb_y"))
+    mi = mnames.index(mm) + 1
+    d1, d2 = date(yy, mi, 1), date(yy, mi, calendar.monthrange(yy, mi)[1])
+    used_df = _sb_used_df(units, d1, d2)
+    lims = qdf_c("SELECT factory_name, section_name, monthly_limit FROM section_budget_limits WHERE factory_name = ANY(%s)", (list(units),))
+    lim_map = {(r["factory_name"], r["section_name"]): float(r["monthly_limit"] or 0) for _, r in lims.iterrows()} if not lims.empty else {}
+    used_map = {(r["factory_name"], r["section"]): float(r["used"]) for _, r in used_df.iterrows()} if not used_df.empty else {}
+    rows = []
+    for u in units:
+        names = set(_ri_section_names(u)) | {s for (f, s) in lim_map if f == u} | {s for (f, s) in used_map if f == u and s}
+        for s in sorted(names, key=str.lower):
+            lim, used = lim_map.get((u, s), 0.0), used_map.get((u, s), 0.0)
+            pct = (used / lim * 100) if lim > 0 else None
+            lv = _sb_level(pct) if pct is not None else "none"
+            rows.append({"Unit": short_fac(u), "Section": s, "মাসিক সীমা (৳)": lim, "ব্যবহার (৳)": round(used, 0),
+                         "বাকি (৳)": round(lim - used, 0) if lim > 0 else None, "ব্যবহার %": round(pct, 1) if pct is not None else None,
+                         "অবস্থা": {"red": "🔴 সীমা পার", "yellow": "🟡 ৮০%+", "ok": "🟢 ঠিক আছে", "none": "⚪ সীমা সেট নেই"}[lv], "_lv": lv})
+        nos = used_map.get((u, ""), 0.0)
+        if nos > 0:
+            rows.append({"Unit": short_fac(u), "Section": "(Section দেওয়া নেই)", "মাসিক সীমা (৳)": 0.0, "ব্যবহার (৳)": round(nos, 0),
+                         "বাকি (৳)": None, "ব্যবহার %": None, "অবস্থা": "⚪ সীমা সেট নেই", "_lv": "none"})
+    if not rows:
+        st.info("কোনো Section নেই — Requisition Issue পেজে Store Manager আগে Section list সেভ করুন।")
+    else:
+        red = sum(1 for r in rows if r["_lv"] == "red")
+        yel = sum(1 for r in rows if r["_lv"] == "yellow")
+        k1, k2, k3 = st.columns(3)
+        k1.metric(f"🔴 সীমা পার ({mm[:3]}-{yy})", red)
+        k2.metric("🟡 ৮০% পার", yel)
+        k3.metric("মোট ব্যবহার", f"৳{sum(r['ব্যবহার (৳)'] for r in rows):,.0f}")
+        out = pd.DataFrame(rows).drop(columns=["_lv"])
+        if not is_cons_view:
+            out = out.drop(columns=["Unit"])
+        order = {"🔴 সীমা পার": 0, "🟡 ৮০%+": 1, "🟢 ঠিক আছে": 2, "⚪ সীমা সেট নেই": 3}
+        out = out.sort_values("অবস্থা", key=lambda s: s.map(order), kind="stable")
+        st.dataframe(out, hide_index=True, use_container_width=True, height=min(90 + 35 * len(out), 560),
+                     column_config={"মাসিক সীমা (৳)": st.column_config.NumberColumn(format="%.0f"),
+                                    "ব্যবহার (৳)": st.column_config.NumberColumn(format="%.0f"),
+                                    "বাকি (৳)": st.column_config.NumberColumn(format="%.0f"),
+                                    "ব্যবহার %": st.column_config.NumberColumn(format="%.1f")})
+        st.caption("ব্যবহার = ওই মাসে ঐ Section-এ Issue হওয়া মালের পরিমাণ × item-এর Rate (Budget পেজের একই হিসাব)। "
+                   "🟡 = সীমার ৮০% পার, 🔴 = ১০০% পার। Requisition Issue স্লিপে Section বাছলেই এই সতর্কতা দেখা যায় (সংরক্ষণ আটকায় না)।")
+        export_buttons(out, f"section_budget_{mm}_{yy}", f"Section budget {mm} {yy}")
+    if is_mgr and not is_cons_view:
+        with st.expander("⚙️ সীমা সেট করুন (শুধু Store Manager)"):
+            secs = sorted(set(_ri_section_names(FAC)) | {s for (f, s) in lim_map if f == FAC}, key=str.lower)
+            if not secs:
+                st.info("আগে Requisition Issue পেজে Section list তৈরি করুন।")
+            else:
+                st.caption(f"{FAC} — প্রতি মাসে ঐ Section সর্বোচ্চ কত টাকার মাল নিতে পারবে (০ = সীমা নেই)।")
+                with st.form("sb_limit_form"):
+                    vals = {}
+                    cols = st.columns(3)
+                    for i, s in enumerate(secs):
+                        vals[s] = cols[i % 3].number_input(s, min_value=0.0, step=1000.0, format="%.0f",
+                                                           value=float(lim_map.get((FAC, s), 0.0)), key=f"sb_lim_{s}")
+                    if st.form_submit_button("💾 সীমা সেভ করুন") and guard():
+                        changed = {s: v for s, v in vals.items() if abs(v - lim_map.get((FAC, s), 0.0)) > 1e-9}
+                        if not changed:
+                            st.info("কিছু বদলায়নি।")
+                        elif sb_save_limits(FAC, changed):
+                            done("✅ Section সীমা সেভ হয়েছে।")
+    elif is_cons_view:
+        st.caption("সীমা সেট করতে ওপর থেকে একটি Factory বাছুন।")
+
+
 # Brand and account/login appear first; Workspace and Management remain clearly grouped below.
 try:   # home-screen shortcut:  <app link>/?page=count  opens Physical Count directly (once per session)
     _pg = str(st.query_params.get("page", "")).strip().lower()
@@ -17111,7 +17890,7 @@ autoset_uom_once()
 RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, tab_global_inventory, tab_physical_count, tab_reports, tab_erp_audit, tab_issue_ledger,
              tab_transfer_history, tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet,
              tab_stock_cover, tab_data_health, tab_log_sheet, tab_high_value, tab_req_issue, tab_gate_pass, tab_hold_bills,
-             tab_monthly_stock_check]
+             tab_monthly_stock_check, tab_machine_cost, tab_shift_handover, tab_section_budget]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
 RENDERERS[TAB_NAMES.index(active_tab)]()
 render_session_cookie_js()
