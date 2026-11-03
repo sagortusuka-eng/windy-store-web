@@ -6521,6 +6521,16 @@ def req_calc(r):
 
 
 def load_requisitions():
+    try:
+        rows = _load_requisition_rows()
+    except psycopg2.errors.UndefinedColumn:    # new Tracker columns not created yet: create them now (additive), then retry
+        ensure_req_tracker_schema()
+        _bump_data_version()
+        rows = _load_requisition_rows()
+    return [req_calc(r) for r in rows]
+
+
+def _load_requisition_rows():
     rows = q_c(f"""SELECT id, factory_name, req_no, department, req_date, item_name, req_qty, audit_approved_qty AS aud_qty,
                  actual_received_qty AS rec_qty, po_date, received_date, COALESCE(prod_id,'') AS prod_id,
                  COALESCE(NULLIF(size,''), (SELECT COALESCE(i.size,'') FROM inventory i
@@ -6528,7 +6538,7 @@ def load_requisitions():
                  COALESCE(uom,'') AS uom, COALESCE(sourcing_manager,'') AS sourcing_manager, COALESCE(handover_date,'') AS handover_date,
                  COALESCE(supplier_name,'') AS supplier_name, COALESCE(order_date,'') AS order_date, COALESCE(order_note,'') AS order_note
                  FROM requisition_tracking WHERE 1=1{FSQL} ORDER BY id DESC""", FP)
-    return [req_calc(r) for r in rows]
+    return rows
 
 
 @tx
@@ -7272,6 +7282,7 @@ def tab_requisition():
     with st.expander("📥 Import requisition (Excel / CSV)"):
         if guard():
             req_import_view()
+            _uom_adder("reqimp")
 
     rows = load_requisitions()
     _d1, _d2, _lbl = report_period("req", label="📅 Req Date সময়কাল (মাস / তারিখ)")
@@ -12989,6 +13000,173 @@ def ri_set_section(fac, sr, section):
     return True
 
 
+# ------------------------------------------------------------
+#  PENDING ISSUE: a slip line with no stock is NOT saved as a transaction; it waits here until stock arrives
+# ------------------------------------------------------------
+def ensure_ri_pending_table():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS ri_pending_issues (
+                id SERIAL PRIMARY KEY, factory_name TEXT, sr_no TEXT, sl_no INTEGER, prod_id TEXT, item_name TEXT, size TEXT,
+                unit TEXT, qty REAL, issued_qty REAL DEFAULT 0, rate REAL DEFAULT 0, section TEXT, issue_type TEXT, slip_date TEXT,
+                notes TEXT, created_by TEXT, created_at TEXT, status TEXT DEFAULT 'Pending', closed_by TEXT, closed_at TEXT, close_note TEXT)""")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_ri_pend_fac ON ri_pending_issues (factory_name, status)")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+@tx
+def ri_save_pending(fac, sr_no, tx_dt, ttype, section, notes, items):
+    """items = [(sl_no, prod_id, name, size, unit, qty, rate)]. No stock / transaction is touched - only the waiting list."""
+    user = st.session_state.get("user", "")
+    now_s = local_now().strftime("%d-%b-%Y %I:%M %p")
+    for sl, pid, nm, size, unit, qty, rate in items:
+        ex = q("SELECT id FROM ri_pending_issues WHERE factory_name=%s AND sr_no=%s AND sl_no=%s AND status='Pending'", (fac, sr_no, int(sl)))
+        if ex:
+            run("UPDATE ri_pending_issues SET qty=qty+%s WHERE id=%s", (float(qty), ex[0]["id"]))
+        else:
+            run("""INSERT INTO ri_pending_issues (factory_name, sr_no, sl_no, prod_id, item_name, size, unit, qty, issued_qty, rate, section,
+                   issue_type, slip_date, notes, created_by, created_at, status)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s,%s,%s,%s,%s,%s,'Pending')""",
+                (fac, sr_no, int(sl), pid, nm, size or "", unit or "Pcs", float(qty), float(rate or 0), section or "", ttype,
+                 tx_dt.strftime(DATE_FMT), notes or "", user, now_s))
+    audit("RI_PENDING_ADD", f"{fac}: SR {sr_no} - no stock, kept pending (no transaction): "
+                            + ", ".join(f"{i[1]} x {float(i[5]):g}" for i in items))
+    return len(items)
+
+
+@tx
+def _ri_pending_mark(pid, qty, who_note):
+    run("""UPDATE ri_pending_issues SET issued_qty=COALESCE(issued_qty,0)+%s,
+           status=CASE WHEN COALESCE(issued_qty,0)+%s >= qty-0.000001 THEN 'Issued' ELSE 'Pending' END,
+           closed_by=%s, closed_at=%s WHERE id=%s""",
+        (float(qty), float(qty), st.session_state.get("user", ""), local_now().strftime("%d-%b-%Y %I:%M %p"), int(pid)))
+    audit("RI_PENDING_ISSUED", f"Pending line {pid}: issued {float(qty):g} {who_note}")
+    return True
+
+
+@tx
+def _ri_pending_cancel(pid, note, label):
+    run("UPDATE ri_pending_issues SET status='Cancelled', closed_by=%s, closed_at=%s, close_note=%s WHERE id=%s",
+        (st.session_state.get("user", ""), local_now().strftime("%d-%b-%Y %I:%M %p"), note, int(pid)))
+    audit("RI_PENDING_CANCEL", f"Pending line {pid} cancelled: {label}. {note}")
+    return True
+
+
+def ri_issue_pending(row, qty, rate, verified):
+    n = save_requisition_issue(row["factory_name"], [(int(row["sl_no"]), float(qty), False, float(rate or 0))], date.today(),
+                               row["sr_no"], row["issue_type"] or "Issued",
+                               f"[Pending issue theke - slip date {row['slip_date']}] {row['notes'] or ''}".strip(),
+                               verified, False, row["section"] or "")
+    if not n:
+        return False
+    return bool(_ri_pending_mark(row["id"], qty, f"of {row['prod_id']} (SR {row['sr_no']})"))
+
+
+def _ri_pending_count(fac):
+    try:
+        r = q_c("SELECT COUNT(*) AS n FROM ri_pending_issues WHERE factory_name=%s AND status='Pending'", (fac,))
+        return int(r[0]["n"]) if r else 0
+    except Exception:
+        return 0
+
+
+def _ri_pending_view():
+    fac = FAC
+    is_mgr = st.session_state.get("role") == "Store Manager"
+    st.markdown("##### ⏳ Pending Issue — stock nei bole je item save hoy ni")
+    st.caption("Slip save-er somoy stock na thakle oi item-er kono transaction hoy ni, stock-o kome ni — ekhane pending thake. "
+               "Stock ashle (Supplier Receipt-er por) niche theke 'Issue korun' chapun, tokhon-i transaction hobe.")
+    rows = q("""SELECT p.id, p.factory_name, p.sr_no, p.sl_no, p.prod_id, p.item_name, p.size, p.unit, p.qty, COALESCE(p.issued_qty,0) AS issued_qty,
+                COALESCE(p.rate,0) AS rate, p.section, p.issue_type, p.slip_date, p.notes, p.created_by, p.created_at,
+                COALESCE(i.current_stock,0) AS stock, COALESCE(i.unit_price,0) AS price
+                FROM ri_pending_issues p LEFT JOIN inventory i ON i.factory_name=p.factory_name AND i.sl_no=p.sl_no
+                WHERE p.factory_name=%s AND p.status='Pending' ORDER BY p.id""", (fac,))
+    for r in rows:
+        r["left"] = max(float(r["qty"] or 0) - float(r["issued_qty"] or 0), 0.0)
+        r["stock"] = float(r["stock"] or 0)
+        r["ready"] = r["stock"] >= r["left"] - 1e-9 and r["left"] > 0
+    ready_n = sum(1 for r in rows if r["ready"])
+    if not rows:
+        st.success("✅ Kono pending issue nei.")
+    else:
+        st.info(f"Pending: **{len(rows)}** ti line · Stock ashche (issue kora jabe): **{ready_n}** ti")
+        df = pd.DataFrame([{"SR No": r["sr_no"], "Item": r["item_name"], "Size": r["size"] or "", "ERP Code": r["prod_id"],
+                            "Pending Qty": r["left"], "Stock ekhon": r["stock"], "Section": r["section"] or "", "Slip Date": r["slip_date"],
+                            "Entry by": r["created_by"],
+                            "Status": ("✅ Stock ashche" if r["ready"] else ("🟠 Ongsho stock ache" if r["stock"] > 0 else "⛔ Stock nei"))}
+                           for r in rows])
+        st.dataframe(df, hide_index=True, use_container_width=True, height=min(80 + 36 * len(df), 360))
+        can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
+        verified = st.checkbox("Physically verified (issue-er age item gune dekha hoyeche — 3 din par hole lagbe)", key="rip_ver")
+        st.markdown("**Issue korun**")
+        for r in rows:
+            k = str(r["id"])
+            with st.container(border=True):
+                c = st.columns([3.2, 1.1, 1.1, 1.2])
+                c[0].markdown(f"**{r['item_name']}** [{r['size'] or '-'}] · {r['prod_id']}  \n"
+                              f"<span style='color:#64748b;font-size:12px'>SR {r['sr_no']} · Pending {r['left']:g} {r['unit'] or ''} · "
+                              f"Stock ekhon {r['stock']:g} · Section {r['section'] or '-'}</span>", unsafe_allow_html=True)
+                dflt = float(min(r["left"], r["stock"])) if r["stock"] > 0 else 0.0
+                qv = c[1].number_input("Qty", 0.0, float(r["left"]), dflt, step=1.0, format="%g", key=f"rip_q_{k}", disabled=r["stock"] <= 0)
+                rate_known = float(r["price"]) if float(r["price"]) > 0 else float(r["rate"])
+                if float(r["price"]) > 0:
+                    c[2].caption(f"Rate ৳{float(r['price']):g}")
+                    rv = float(r["price"])
+                else:
+                    rv = float(c[2].number_input("Rate", 0.0, step=1.0, value=rate_known, format="%g", key=f"rip_r_{k}"))
+                c[3].markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
+                if c[3].button("✅ Issue korun", key=f"rip_b_{k}", disabled=(not can_write) or r["stock"] <= 0, use_container_width=True):
+                    if qv <= 0:
+                        st.error("Qty 0-r beshi din.")
+                    elif qv > r["stock"] + 1e-9:
+                        st.error(f"Stock matro {r['stock']:g} — tar beshi issue kora jabe na.")
+                    elif rv <= 0:
+                        st.error("Ei item-er Rate nei — Rate din.")
+                    elif (count_gate_status(fac) or {}).get("blocked"):
+                        st.error("Ei saptahe-r compulsory Physical Count shesh hoy ni — age 📱 Physical Count korun.")
+                    elif guard():
+                        if ri_issue_pending(r, qv, rv, verified):
+                            _who = st.session_state.get("user", "")
+                            st.session_state["ri_saved"] = {"user": _who, "sr": r["sr_no"], "n": 1, "qty": float(qv), "section": r["section"] or "",
+                                                            "time": local_now().strftime("%d-%b-%Y %I:%M %p"), "kind": "save"}
+                            done(f"✅ {_who}, pending issue save hoyeche - SR {r['sr_no']}: {r['item_name']} × {qv:g} issue hoyeche, stock komeche.")
+        if is_mgr:
+            with st.expander("🗑 Pending cancel (Store Manager)"):
+                lab = {f"SR {r['sr_no']} · {r['item_name']} [{r['size'] or '-'}] · pending {r['left']:g}": r for r in rows}
+                pick = st.selectbox("Kon pending line cancel korben?", list(lab), key="rip_cx_pick")
+                why = st.text_input("Karon (optional)", key="rip_cx_why")
+                sure = st.checkbox("Ami confirm korchi - ei pending line cancel hobe (kono stock/transaction poriborton hobe na).", key="rip_cx_ok")
+                if st.button("Cancel pending", key="rip_cx_btn") and guard():
+                    if not sure:
+                        st.error("Confirm tick korun.")
+                    elif _ri_pending_cancel(lab[pick]["id"], why.strip(), pick):
+                        done("Pending line cancel hoyeche.")
+    with st.expander("🕘 Ager shesh howa / cancel howa pending (last 30)"):
+        h = qdf("""SELECT sr_no AS "SR No", item_name AS "Item", size AS "Size", qty AS "Qty", issued_qty AS "Issued", status AS "Status",
+                   slip_date AS "Slip Date", closed_by AS "By", closed_at AS "When", close_note AS "Note"
+                   FROM ri_pending_issues WHERE factory_name=%s AND status<>'Pending' ORDER BY id DESC LIMIT 30""", (fac,))
+        if h.empty:
+            st.caption("Kichu nei.")
+        else:
+            st.dataframe(h, hide_index=True, use_container_width=True)
+
+
+def _uom_adder(key):
+    """Same 'Add new UOM' box as Inventory > Add Item, so a UOM can be added from the Requisition screens too."""
+    with st.expander("➕ Add new UOM"):
+        ensure_master_tables()
+        nu1, nu2 = st.columns([3, 1])
+        v = nu1.text_input("New UOM (e.g. DOZEN, MTR, SET)", key=f"{key}_uom_name")
+        st.caption("Notun UOM ekbar add korle sob jaiga-r UOM list-e (Inventory, Requisition Issue, Supplier Receipt) dekha jabe.")
+        if nu2.button("Add UOM", key=f"{key}_uom_btn") and guard():
+            if v.strip() and add_uom(v.strip()):
+                done(f"UOM '{_clean(v).upper()}' added.")
+
+
 def tab_req_issue():
     st.markdown("#### 🧾 Requisition Issue & Supplier Receipt")
     if is_cons_view:
@@ -13001,18 +13179,32 @@ def tab_req_issue():
         if not st.session_state.get("_section_schema_ready"):
             run_once_per_process("section_schema_v1", ensure_section_schema)
             st.session_state["_section_schema_ready"] = True
+        if not st.session_state.get("_ri_pending_table_ready"):
+            run_once_per_process("ri_pending_table", ensure_ri_pending_table)
+            st.session_state["_ri_pending_table_ready"] = True
     except Exception as e:
         st.error(f"req_no column setup failed: {e}")
         return
     is_mgr = st.session_state.get("role") == "Store Manager"
-    mode = st.radio("Ki korben?", ["📤 Issue (SR slip)", "📥 Supplier Receipt (Challan)"], horizontal=True, key="ri_mode",
-                    label_visibility="collapsed")
-    if not mode.startswith("📥"):
+    mode = st.radio("Ki korben?", ["📤 Issue (SR slip)", "📥 Supplier Receipt (Challan)", "⏳ Pending Issue (stock nei)"], horizontal=True,
+                    key="ri_mode", label_visibility="collapsed")
+    if mode.startswith("📤"):
         try:
             render_count_gate_banner()
         except Exception:
             pass
     _ri_saved_banner()
+    if not mode.startswith("⏳"):
+        _np = _ri_pending_count(FAC)
+        if _np:
+            st.warning(f"⏳ {_np} ti item stock nei bole Pending Issue-te ache — stock ashle '⏳ Pending Issue' option theke issue korun.")
+    if mode.startswith("⏳"):
+        try:
+            _ri_pending_view()
+        except Exception as e:
+            st.error(f"Pending Issue load kora jayni: {e}")
+        _uom_adder("rip")
+        return
     if mode.startswith("📥"):
         st.caption(f"📍 Ei receipt **{FAC}**-e save hobe · Ek challan-er shob item (sorbocho {RR_MAX_LINES} ti) ek sathe · "
                    "Supplier ar Challan No. bad-dhomulok · Dekhben: 🔍 ERP Audit → 📥 Product Received.")
@@ -13022,6 +13214,7 @@ def tab_req_issue():
         _ri_form()
         _ri_fix_panel()
         st.caption(f"ℹ️ এক SR-এ সর্বোচ্চ {RI_MAX_LINES}টি আইটেম · SR নম্বর ও Section বাধ্যতামূলক · স্টক কম হলে অন্য Unit থেকে অটো-ট্রান্সফার (নিশ্চিত করলে); না হলে কিছুই সংরক্ষণ হয় না।")
+    _uom_adder("ri")
     if is_mgr:                      # Store Manager only - officers never see these two
         if not mode.startswith("📥"):
             _ri_section_manager()
@@ -13140,6 +13333,7 @@ def _ri_form():
                 pass
         remove = None
         qtys, rates, bad = [], [], False
+        pflags = []          # True = no stock for this line -> goes to Pending Issue, not saved as a transaction
         xfer_flags = {}
         xcache = st.session_state.setdefault("ri_other_cache", {})
         uoms = get_uoms()
@@ -13166,8 +13360,7 @@ def _ri_form():
                                               label_visibility="collapsed", help="এই আইটেমের Rate আগে দেওয়া হয়নি — Rate দিন, এটাই আইটেমের Rate হিসেবে সেভ হবে।"))
             rates.append(rt_)
             miss_rate = rt_ <= 0
-            if miss_rate:
-                bad = True
+            is_pend = False
             q_ = r[6].number_input("q", min_value=0.0, step=1.0, format="%g", key=f"ri_q_{gen}_{ln['sl']}", label_visibility="collapsed")
             qtys.append(float(q_))
             if q_ <= 0:
@@ -13186,21 +13379,27 @@ def _ri_form():
                     ok_x = r[7].checkbox("🔁 ট্রান্সফার নিশ্চিত", key=f"ri_x_{gen}_{ln['sl']}")
                     xfer_flags[ln["sl"]] = ok_x
                     if not ok_x:
-                        bad = True
+                        is_pend = True
                     note_x = (f"⚠️ {ln['name']}: স্টক কম {shortage:g}। {other['factory_name']} থেকে অটো-ট্রান্সফার হবে "
                               f"({other['item_name']} [{other['prod_id']}], size {other['size'] or '-'}, স্টক {float(other['stock']):g}, "
                               f"মিল: {other['level']} {int(round(float(other.get('score', 1.0)) * 100))}%)।")
                     if other["level"] == "fuzzy":
                         note_x += " নাম হুবহু এক নয় — দুটো একই আইটেম কিনা দেখে নিশ্চিত করুন।"
+                    if not ok_x:
+                        note_x += " ⏳ Tick na dile ei item Pending Issue-te thakbe (transaction hobe na)."
                     st.caption(note_x)
                 else:
-                    r[7].write("⛔ স্টক কম")
-                    st.caption(f"⛔ {ln['name']}: শর্টেজ {shortage:g} — অন্য Unit-এ যথেষ্ট স্টক / একই আইটেম নেই।")
-                    bad = True
+                    r[7].write("⏳ Pending-e jabe")
+                    st.caption(f"⏳ {ln['name']}: stock kom (shortage {shortage:g}) — save korle ei item **Pending Issue**-te thakbe, "
+                               "transaction hobe na; stock ashle pore issue korben.")
+                    is_pend = True
             elif ln["need"]:
                 r[7].write(f"🔎 যাচাই লাগবে ({ln['days']} দিন)")
             else:
                 r[7].write("⚠️ Rate দিন" if miss_rate else "✅")
+            pflags.append(is_pend)
+            if miss_rate and not is_pend:
+                bad = True
             if r[8].button("✖", key=f"ri_rm_{gen}_{ln['sl']}", help="সারি মুছুন"):
                 remove = i
     if remove is not None:
@@ -13210,16 +13409,17 @@ def _ri_form():
             st.rerun(scope="fragment")
         except TypeError:
             st.rerun()
-    need_names = [ln["name"] for ln in lines if ln["need"]]
+    need_names = [ln["name"] for ln, pf_ in zip(lines, pflags) if ln["need"] and not pf_]
+    _iss_lines = [ln for ln, pf_ in zip(lines, pflags) if not pf_]
     verified = False
     if need_names:
         verified = st.checkbox("Physically verified — এই আইটেমগুলো ফিজিক্যালি গুনে দেখা হয়েছে: " + ", ".join(need_names),
                                key=f"ri_ver_{gen}")
-    _mc_id, _mc_err, _mc_sls = _mc_issue_box(fac, lines, tx_date, ttype)      # machine (Maintenance items only)
-    _sb_issue_warn(fac, section, tx_date, sum(q_ * r_ for q_, r_ in zip(qtys, rates)), ttype)   # section monthly limit
+    _mc_id, _mc_err, _mc_sls = _mc_issue_box(fac, _iss_lines, tx_date, ttype)      # machine (Maintenance items only)
+    _sb_issue_warn(fac, section, tx_date, sum(q_ * r_ for q_, r_, pf_ in zip(qtys, rates, pflags) if not pf_), ttype)   # section monthly limit
     can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
     f1, f2, f3 = st.columns([2, 1.2, 2.2])
-    f1.caption(f"মোট আইটেম-লাইন: {len(lines)} · মোট পরিমাণ: {sum(qtys):g}" + ("" if can_write else " · সংরক্ষণ করতে login লাগবে"))
+    f1.caption(f"মোট আইটেম-লাইন: {len(lines)} · মোট পরিমাণ: {sum(qtys):g}" + (f" · ⏳ Pending: {sum(pflags)}" if any(pflags) else "") + ("" if can_write else " · সংরক্ষণ করতে login লাগবে"))
     po_pending = f2.checkbox("ERP PO pending", key=f"ri_po_{gen}",
                              help="এই স্লিপের সব লাইন ERP Audit → ERP PO Pending-এ ট্র্যাক হবে।")
     if f3.button("💾 সব সংরক্ষণ করুন", type="primary", key=f"ri_save_{gen}", use_container_width=True, disabled=not can_write):
@@ -13236,17 +13436,30 @@ def _ri_form():
         elif not confirm_existing:
             st.error("এই SR আগে ব্যবহার হয়েছে — নিশ্চিত করার টিক দিন।")
         elif guard():
-            n = save_requisition_issue(fac, [(ln["sl"], q_, xfer_flags.get(ln["sl"], False), rt_) for ln, q_, rt_ in zip(lines, qtys, rates)],
-                                       tx_date, sr_no, ttype, notes.strip(), verified, po_pending, section,
-                                       machine=((_mc_id, _mc_sls) if _mc_id else None))
-            if n:
+            _iss = [(ln, q_, rt_) for ln, q_, rt_, pf_ in zip(lines, qtys, rates, pflags) if not pf_]
+            _pen = [(ln, q_, rt_) for ln, q_, rt_, pf_ in zip(lines, qtys, rates, pflags) if pf_]
+            n, ok_all = 0, True
+            if _iss:
+                n = save_requisition_issue(fac, [(ln["sl"], q_, xfer_flags.get(ln["sl"], False), rt_) for ln, q_, rt_ in _iss],
+                                           tx_date, sr_no, ttype, notes.strip(), verified, po_pending, section,
+                                           machine=((_mc_id, _mc_sls) if _mc_id else None))
+                ok_all = bool(n)
+            if ok_all and _pen:
+                ok_all = bool(ri_save_pending(fac, sr_no, tx_date, ttype, section, notes.strip(),
+                                              [(ln["sl"], ln["pid"], ln["name"], ln["size"],
+                                                st.session_state.get(f"ri_u_{gen}_{ln['sl']}") or ln.get("unit") or "Pcs", q_, rt_)
+                                               for ln, q_, rt_ in _pen]))
+            if ok_all:
                 _who = st.session_state.get("user", "")
                 st.session_state["last_req_no"] = sr_no
-                st.session_state["ri_saved"] = {"user": _who, "sr": sr_no, "n": int(n), "qty": float(sum(qtys)), "section": section,
-                                                "time": local_now().strftime("%d-%b-%Y %I:%M %p"), "kind": "save"}
+                if n:
+                    st.session_state["ri_saved"] = {"user": _who, "sr": sr_no, "n": int(n), "qty": float(sum(q_ for _, q_, _ in _iss)),
+                                                    "section": section, "time": local_now().strftime("%d-%b-%Y %I:%M %p"), "kind": "save"}
                 st.session_state["ri_lines"] = []
                 st.session_state["ri_gen"] = gen + 1
-                done(f"✅ {_who}, apnar data sofolbhabe save hoyeche - SR {sr_no}: {n}টি আইটেম ইস্যু হয়েছে" + (f" · Section: {section}" if section else "") + ", স্টক কমেছে।")
+                done(f"✅ {_who}, apnar data sofolbhabe save hoyeche - SR {sr_no}"
+                     + (f": {n}টি আইটেম ইস্যু হয়েছে" + (f" · Section: {section}" if section else "") + ", স্টক কমেছে।" if n else ".")
+                     + (f" ⏳ {len(_pen)}টি আইটেমে stock nei — Pending Issue-te rakha holo (transaction hoy ni)." if _pen else ""))
 
 
 RR_MAX_LINES = 30
