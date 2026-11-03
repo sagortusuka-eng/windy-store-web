@@ -12870,12 +12870,17 @@ def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_
                         unnest(%s::float8[]) AS q, unnest(%s::text[]) AS vs, unnest(%s::text[]) AS nt) v""",
         (fac, user, ttype, tx_dt.day, date_s, time_s, po_flag, po_date, sr_no, section or "",
          sls, [info[sl][0] for sl in sls], [info[sl][1] for sl in sls], qtys, vstat, line_notes))
-    if machine and machine[0] and machine[1]:
-        _mc_sl = [int(x) for x in machine[1] if int(x) in info]
-        if _mc_sl:
+    if machine:
+        _pairs = (list(machine.items()) if isinstance(machine, dict)
+                  else ([(x, machine[0]) for x in (machine[1] or [])] if machine[0] else []))
+        _by_mid = {}
+        for _s, _m in _pairs:
+            if _m and int(_s) in info:
+                _by_mid.setdefault(int(_m), []).append(int(_s))
+        for _m, _sl_list in _by_mid.items():
             run("UPDATE transactions SET machine_id=%s WHERE id > %s AND factory_name=%s AND req_no=%s AND sl_no = ANY(%s) AND machine_id IS NULL",
-                (int(machine[0]), _mc_max, fac, sr_no, _mc_sl))
-            audit("MACHINE_ISSUE", f"{fac}: SR {sr_no} -> machine id {int(machine[0])} ({len(_mc_sl)} maintenance line(s))")
+                (_m, _mc_max, fac, sr_no, _sl_list))
+            audit("MACHINE_ISSUE", f"{fac}: SR {sr_no} -> machine id {_m} ({len(_sl_list)} line(s))")
     details = [f"{fac}: {ttype} {q_:g} of {info[sl][0]} ({info[sl][1]}) [SR {sr_no}]" + (f" [Section {section}]" if section else "") + (" [ERP PO Pending ticked]" if po_pending else "")
                for sl, q_ in zip(sls, qtys)]
     run("""INSERT INTO audit_logs (timestamp, username, action_type, details)
@@ -13011,6 +13016,7 @@ def ensure_ri_pending_table():
                 id SERIAL PRIMARY KEY, factory_name TEXT, sr_no TEXT, sl_no INTEGER, prod_id TEXT, item_name TEXT, size TEXT,
                 unit TEXT, qty REAL, issued_qty REAL DEFAULT 0, rate REAL DEFAULT 0, section TEXT, issue_type TEXT, slip_date TEXT,
                 notes TEXT, created_by TEXT, created_at TEXT, status TEXT DEFAULT 'Pending', closed_by TEXT, closed_at TEXT, close_note TEXT)""")
+            cur.execute("ALTER TABLE ri_pending_issues ADD COLUMN IF NOT EXISTS machine_id INTEGER")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_ri_pend_fac ON ri_pending_issues (factory_name, status)")
         conn.commit()
     except Exception:
@@ -13020,19 +13026,19 @@ def ensure_ri_pending_table():
 
 @tx
 def ri_save_pending(fac, sr_no, tx_dt, ttype, section, notes, items):
-    """items = [(sl_no, prod_id, name, size, unit, qty, rate)]. No stock / transaction is touched - only the waiting list."""
+    """items = [(sl_no, prod_id, name, size, unit, qty, rate, machine_id)]. No stock / transaction is touched - only the waiting list."""
     user = st.session_state.get("user", "")
     now_s = local_now().strftime("%d-%b-%Y %I:%M %p")
-    for sl, pid, nm, size, unit, qty, rate in items:
+    for sl, pid, nm, size, unit, qty, rate, mid in items:
         ex = q("SELECT id FROM ri_pending_issues WHERE factory_name=%s AND sr_no=%s AND sl_no=%s AND status='Pending'", (fac, sr_no, int(sl)))
         if ex:
             run("UPDATE ri_pending_issues SET qty=qty+%s WHERE id=%s", (float(qty), ex[0]["id"]))
         else:
             run("""INSERT INTO ri_pending_issues (factory_name, sr_no, sl_no, prod_id, item_name, size, unit, qty, issued_qty, rate, section,
-                   issue_type, slip_date, notes, created_by, created_at, status)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s,%s,%s,%s,%s,%s,'Pending')""",
+                   issue_type, slip_date, notes, created_by, created_at, status, machine_id)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s,%s,%s,%s,%s,%s,'Pending',%s)""",
                 (fac, sr_no, int(sl), pid, nm, size or "", unit or "Pcs", float(qty), float(rate or 0), section or "", ttype,
-                 tx_dt.strftime(DATE_FMT), notes or "", user, now_s))
+                 tx_dt.strftime(DATE_FMT), notes or "", user, now_s, int(mid) if mid else None))
     audit("RI_PENDING_ADD", f"{fac}: SR {sr_no} - no stock, kept pending (no transaction): "
                             + ", ".join(f"{i[1]} x {float(i[5]):g}" for i in items))
     return len(items)
@@ -13060,7 +13066,8 @@ def ri_issue_pending(row, qty, rate, verified):
     n = save_requisition_issue(row["factory_name"], [(int(row["sl_no"]), float(qty), False, float(rate or 0))], date.today(),
                                row["sr_no"], row["issue_type"] or "Issued",
                                f"[Pending issue theke - slip date {row['slip_date']}] {row['notes'] or ''}".strip(),
-                               verified, False, row["section"] or "")
+                               verified, False, row["section"] or "",
+                               machine=({int(row["sl_no"]): int(row["machine_id"])} if row.get("machine_id") else None))
     if not n:
         return False
     return bool(_ri_pending_mark(row["id"], qty, f"of {row['prod_id']} (SR {row['sr_no']})"))
@@ -13082,8 +13089,9 @@ def _ri_pending_view():
                "Stock ashle (Supplier Receipt-er por) niche theke 'Issue korun' chapun, tokhon-i transaction hobe.")
     rows = q("""SELECT p.id, p.factory_name, p.sr_no, p.sl_no, p.prod_id, p.item_name, p.size, p.unit, p.qty, COALESCE(p.issued_qty,0) AS issued_qty,
                 COALESCE(p.rate,0) AS rate, p.section, p.issue_type, p.slip_date, p.notes, p.created_by, p.created_at,
-                COALESCE(i.current_stock,0) AS stock, COALESCE(i.unit_price,0) AS price
+                COALESCE(i.current_stock,0) AS stock, COALESCE(i.unit_price,0) AS price, p.machine_id, COALESCE(m.mc_no,'') AS mc_no
                 FROM ri_pending_issues p LEFT JOIN inventory i ON i.factory_name=p.factory_name AND i.sl_no=p.sl_no
+                LEFT JOIN machines m ON m.id=p.machine_id
                 WHERE p.factory_name=%s AND p.status='Pending' ORDER BY p.id""", (fac,))
     for r in rows:
         r["left"] = max(float(r["qty"] or 0) - float(r["issued_qty"] or 0), 0.0)
@@ -13109,7 +13117,7 @@ def _ri_pending_view():
                 c = st.columns([3.2, 1.1, 1.1, 1.2])
                 c[0].markdown(f"**{r['item_name']}** [{r['size'] or '-'}] · {r['prod_id']}  \n"
                               f"<span style='color:#64748b;font-size:12px'>SR {r['sr_no']} · Pending {r['left']:g} {r['unit'] or ''} · "
-                              f"Stock ekhon {r['stock']:g} · Section {r['section'] or '-'}</span>", unsafe_allow_html=True)
+                              f"Stock ekhon {r['stock']:g} · Section {r['section'] or '-'}" + (f" · M/C {r['mc_no']}" if r.get("mc_no") else "") + "</span>", unsafe_allow_html=True)
                 dflt = float(min(r["left"], r["stock"])) if r["stock"] > 0 else 0.0
                 qv = c[1].number_input("Qty", 0.0, float(r["left"]), dflt, step=1.0, format="%g", key=f"rip_q_{k}", disabled=r["stock"] <= 0)
                 rate_known = float(r["price"]) if float(r["price"]) > 0 else float(r["rate"])
@@ -13167,6 +13175,164 @@ def _uom_adder(key):
                 done(f"UOM '{_clean(v).upper()}' added.")
 
 
+# ------------------------------------------------------------
+#  SKIP WATCH (manager only): items an officer looked at with NO stock and then skipped / dropped / never issued
+# ------------------------------------------------------------
+IW_VIEW_ROLES = ("Store Manager", "Executive")
+
+
+def ensure_ri_watch_table():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS ri_item_watch (
+                id SERIAL PRIMARY KEY, factory_name TEXT, event_date DATE, created_at TEXT, officer TEXT, role TEXT, sr_no TEXT,
+                sl_no INTEGER, prod_id TEXT, item_name TEXT, size TEXT, stock_at_time REAL, search_term TEXT, qty REAL DEFAULT 0,
+                added BOOLEAN DEFAULT FALSE, outcome TEXT DEFAULT 'Open', outcome_at TEXT, reason TEXT DEFAULT '',
+                reviewed_by TEXT, reviewed_at TEXT)""")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_ri_watch_fac ON ri_item_watch (factory_name, event_date)")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _iw_exec(sql, params):
+    """Silent write for the watch log: it must never break or slow the officer's slip."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            out = cur.fetchone() if cur.description else None
+        conn.commit()
+        return out
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+
+
+def _iw_seen(fac, gen, r, term, sr_no):
+    """Officer has an out-of-stock item in front of him (searched / picked). One row per slip session + item."""
+    rows = st.session_state.setdefault("iw_rows", {})
+    k = f"{gen}:{int(r['sl_no'])}"
+    if k in rows:
+        return
+    now = local_now()
+    out = _iw_exec("""INSERT INTO ri_item_watch (factory_name, event_date, created_at, officer, role, sr_no, sl_no, prod_id, item_name, size,
+                      stock_at_time, search_term) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (fac, now.date(), now.strftime("%d-%b-%Y %I:%M %p"), st.session_state.get("user", ""), st.session_state.get("role", ""),
+                     sr_no or "", int(r["sl_no"]), r.get("prod_id") or "", r.get("item_name") or "", r.get("size") or "",
+                     float(r.get("stock") or 0), term or ""))
+    rows[k] = int(out[0]) if out else 0
+
+
+def _iw_added(fac, gen, r, qty, sr_no):
+    try:
+        if float(r.get("stock") or 0) > 0:
+            return
+        _iw_seen(fac, gen, r, "", sr_no)
+        i = st.session_state.get("iw_rows", {}).get(f"{gen}:{int(r['sl_no'])}")
+        if i:
+            _iw_exec("UPDATE ri_item_watch SET added=TRUE, qty=%s, sr_no=COALESCE(NULLIF(%s,''), sr_no) WHERE id=%s", (float(qty), sr_no or "", i))
+    except Exception:
+        pass
+
+
+def _iw_outcome(gen, sl, outcome, sr_no=""):
+    try:
+        i = st.session_state.get("iw_rows", {}).get(f"{gen}:{int(sl)}")
+        if i:
+            _iw_exec("UPDATE ri_item_watch SET outcome=%s, outcome_at=%s, sr_no=COALESCE(NULLIF(%s,''), sr_no) WHERE id=%s",
+                     (outcome, local_now().strftime("%d-%b-%Y %I:%M %p"), sr_no or "", i))
+    except Exception:
+        pass
+
+
+def _iw_status(r):
+    if r["outcome"] == "Issued":
+        return "✅ Issue hoyeche (transfer / stock peye)"
+    if r["outcome"] == "Pending":
+        return "⏳ Pending Issue-te rakha hoyeche"
+    if r["outcome"] == "Removed":
+        return "✖ Slip theke bad diyeche"
+    if r["added"]:
+        return "📝 Slip-e add kore save kore ni"
+    return "🙈 Dekhe skip korse (add / issue kore ni)"
+
+
+@tx
+def _iw_review(wid, reason):
+    run("UPDATE ri_item_watch SET reason=%s, reviewed_by=%s, reviewed_at=%s WHERE id=%s",
+        (reason, st.session_state.get("user", ""), local_now().strftime("%d-%b-%Y %I:%M %p"), int(wid)))
+    audit("RI_WATCH_REVIEW", f"Skip-watch #{wid} reviewed: {reason}")
+    return True
+
+
+def _iw_view():
+    fac = FAC
+    st.markdown("##### 🕵️ Skip Watch — officer item dekhlo kintu issue korlo na")
+    st.caption("Officer Requisition Issue-te kono item search kore dekhlo **stock nei**, tarpor oita skip kore onno item issue korlo (ba add kore bad dilo, "
+               "ba save-i korlo na) — shob ekhane jomma hoy. Head Office theke ashche kintu Gate Pass receive hoy ni emon item dhorte egulo kaje lage. "
+               "Ei tab shudhu Store Manager / Executive dekhte pare.")
+    d1, d2, plabel = report_period("iw", default="এই মাস")
+    sql = """SELECT w.id, w.created_at, w.officer, w.sr_no, w.sl_no, w.prod_id, w.item_name, w.size, w.stock_at_time, w.search_term, w.qty,
+                    w.added, w.outcome, COALESCE(w.reason,'') AS reason, w.reviewed_by, COALESCE(i.current_stock,0) AS stock_now
+             FROM ri_item_watch w LEFT JOIN inventory i ON i.factory_name=w.factory_name AND i.sl_no=w.sl_no
+             WHERE w.factory_name=%s"""
+    prm = [fac]
+    if d1 and d2:
+        sql += " AND w.event_date BETWEEN %s AND %s"
+        prm += [d1, d2]
+    rows = q(sql + " ORDER BY w.id DESC LIMIT 1500", tuple(prm))
+    for r in rows:
+        r["status"] = _iw_status(r)
+    f1, f2 = st.columns([1.2, 1.8])
+    officers = ["All"] + sorted({r["officer"] for r in rows if r["officer"]})
+    of = f1.selectbox("Officer", officers, key="iw_off")
+    view = f2.radio("Dekhan", ["Shudhu skip / adhura (Issue howa baade)", "Shob"], horizontal=True, key="iw_view")
+    show = [r for r in rows if (of == "All" or r["officer"] == of) and (view == "Shob" or r["outcome"] != "Issued")]
+    sk = sum(1 for r in show if not r["added"] and r["outcome"] == "Open")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Mot record", len(show))
+    k2.metric("Dekhe skip korse", sk)
+    k3.metric("Slip theke bad / save hoy ni", sum(1 for r in show if r["added"] and r["outcome"] in ("Open", "Removed")))
+    k4.metric("Alada item", len({r["sl_no"] for r in show}))
+    if not show:
+        st.success(f"{plabel}: kono skip / adhura record nei.")
+        return
+    df = pd.DataFrame([{"ID": r["id"], "Kokhon": r["created_at"], "Officer": r["officer"], "Item": r["item_name"], "Size": r["size"] or "",
+                        "ERP Code": r["prod_id"], "Stock (tokhon)": r["stock_at_time"], "Stock (ekhon)": float(r["stock_now"] or 0),
+                        "Search likhechhilo": r["search_term"] or "", "Ki hoyeche": r["status"], "SR No": r["sr_no"] or "",
+                        "Officer-er jobab / karon": r["reason"], "Dekhse": r["reviewed_by"] or ""} for r in show])
+    st.dataframe(df, hide_index=True, use_container_width=True, height=min(90 + 36 * len(df), 520))
+    agg = {}
+    for r in show:
+        a = agg.setdefault(r["sl_no"], {"Item": f"{r['item_name']} [{r['size'] or '-'}]", "ERP Code": r["prod_id"], "Koybar": 0, "Officer": set(),
+                                        "Shesh": r["created_at"], "Stock (ekhon)": float(r["stock_now"] or 0)})
+        a["Koybar"] += 1
+        if r["officer"]:
+            a["Officer"].add(r["officer"])
+    top = pd.DataFrame([{**{k: v for k, v in a.items() if k != "Officer"}, "Koyjon officer": len(a["Officer"]),
+                         "Notes": "✅ Ekhon stock ache — receive hoyeche" if a["Stock (ekhon)"] > 0 else "⛔ Ekhono stock nei — Gate Pass / Receipt check korun"}
+                        for a in agg.values()]).sort_values("Koybar", ascending=False)
+    st.markdown("**📌 Kon item bar bar stock-nei hishebe dekha hocche (Gate Pass receive hoy ni ki?)**")
+    st.dataframe(top, hide_index=True, use_container_width=True, height=min(90 + 36 * len(top), 360))
+    export_buttons(df, "skip_watch", f"Skip Watch ({plabel})")
+    with st.expander("✍️ Officer-er jobab / karon likhe rakhun"):
+        lab = {f"#{r['id']} · {r['created_at']} · {r['officer']} · {r['item_name']} [{r['size'] or '-'}]": r for r in show[:150]}
+        with st.form("iw_review_form"):
+            pk = st.selectbox("Kon record", list(lab), key="iw_rev_pick")
+            why = st.text_input("Officer ki jobab dilo / karon", value="", key="iw_rev_why")
+            if st.form_submit_button("💾 Save") and guard():
+                if not why.strip():
+                    st.error("Karon likhun.")
+                elif _iw_review(lab[pk]["id"], why.strip()):
+                    done("Jobab save hoyeche.")
+
+
 def tab_req_issue():
     st.markdown("#### 🧾 Requisition Issue & Supplier Receipt")
     if is_cons_view:
@@ -13179,25 +13345,39 @@ def tab_req_issue():
         if not st.session_state.get("_section_schema_ready"):
             run_once_per_process("section_schema_v1", ensure_section_schema)
             st.session_state["_section_schema_ready"] = True
-        if not st.session_state.get("_ri_pending_table_ready"):
-            run_once_per_process("ri_pending_table", ensure_ri_pending_table)
-            st.session_state["_ri_pending_table_ready"] = True
+        if not st.session_state.get("_ri_watch_table_ready"):
+            run_once_per_process("ri_watch_table", ensure_ri_watch_table)
+            st.session_state["_ri_watch_table_ready"] = True
+        if not st.session_state.get("_ri_pending_table_ready_v2"):
+            run_once_per_process("ri_pending_table_v2", ensure_ri_pending_table)
+            st.session_state["_ri_pending_table_ready_v2"] = True
     except Exception as e:
         st.error(f"req_no column setup failed: {e}")
         return
     is_mgr = st.session_state.get("role") == "Store Manager"
-    mode = st.radio("Ki korben?", ["📤 Issue (SR slip)", "📥 Supplier Receipt (Challan)", "⏳ Pending Issue (stock nei)"], horizontal=True,
-                    key="ri_mode", label_visibility="collapsed")
+    _modes = ["📤 Issue (SR slip)", "📥 Supplier Receipt (Challan)", "⏳ Pending Issue (stock nei)"]
+    if st.session_state.get("role") in IW_VIEW_ROLES:
+        _modes.append("🕵️ Skip Watch (Manager)")
+    mode = st.radio("Ki korben?", _modes, horizontal=True, key="ri_mode", label_visibility="collapsed")
     if mode.startswith("📤"):
         try:
             render_count_gate_banner()
         except Exception:
             pass
     _ri_saved_banner()
-    if not mode.startswith("⏳"):
+    if mode.startswith("📤") or mode.startswith("📥"):
         _np = _ri_pending_count(FAC)
         if _np:
             st.warning(f"⏳ {_np} ti item stock nei bole Pending Issue-te ache — stock ashle '⏳ Pending Issue' option theke issue korun.")
+    if mode.startswith("🕵️"):
+        if st.session_state.get("role") not in IW_VIEW_ROLES:
+            st.error("Ei tab shudhu Store Manager / Executive dekhte pare.")
+            return
+        try:
+            _iw_view()
+        except Exception as e:
+            st.error(f"Skip Watch load kora jayni: {e}")
+        return
     if mode.startswith("⏳"):
         try:
             _ri_pending_view()
@@ -13272,6 +13452,13 @@ def _ri_form():
     pick = a2.selectbox(f"আইটেম ({len(labels)}টি)" if labels else "আইটেম", list(labels) if labels else ["— আগে Category বা নাম খুঁজুন —"],
                         key=f"ri_pick_{gen}")
     qty_in = a3.number_input("পরিমাণ", min_value=0.0, step=1.0, format="%g", key=f"ri_qty_{gen}")
+    try:      # Skip Watch: officer has an out-of-stock item in front of him (typed a search / chose it himself)
+        if pick in labels and st.session_state.get("user") and st.session_state.get("role") != "Auditor":
+            _rr = labels[pick]
+            if (bool(term) or (cat_sel != ALL_CAT and pick != list(labels)[0])) and float(_rr["stock"] or 0) <= 0:
+                _iw_seen(fac, gen, _rr, term, sr_no)
+    except Exception:
+        pass
 
     def _add():
         pick_v = st.session_state.get(f"ri_pick_{gen}")
@@ -13308,6 +13495,7 @@ def _ri_form():
             st.session_state[f"ri_search_{gen}"] = ""
             st.session_state[f"ri_qty_{gen}"] = 0.0
             st.session_state["ri_msg"] = ("ok", f"যোগ হয়েছে: {r['item_name']}")
+            _iw_added(fac, gen, r, qty_v, st.session_state.get(f"ri_sr_{gen}", ""))
     a4.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
     a4.button("➕ যোগ করুন", key=f"ri_add_{gen}", on_click=_add, use_container_width=True)
     msg = st.session_state.pop("ri_msg", None)
@@ -13320,8 +13508,8 @@ def _ri_form():
         st.caption("এখনো কোনো আইটেম যোগ হয়নি।")
         return
     with _ri_box(min(70 + 52 * len(lines), 280)):
-        h = st.columns([0.35, 2.5, 1.1, 0.8, 1.0, 1.0, 1.0, 1.4, 0.6])
-        for col, t in zip(h, ["#", "আইটেম", "ERP Code", "স্টক", "Unit", "Rate (৳)", "ইস্যু পরিমাণ", "অবস্থা", ""]):
+        h = st.columns([0.3, 2.1, 1.6, 1.0, 0.7, 0.9, 0.9, 0.9, 1.4, 0.5])
+        for col, t in zip(h, ["#", "আইটেম", "M/C No.", "ERP Code", "স্টক", "Unit", "Rate (৳)", "ইস্যু পরিমাণ", "অবস্থা", ""]):
             col.caption(t)
         if any(ln.get("vdate") != tx_date for ln in lines):   # date changed after the item was added -> re-check the 3-day rule (1 query)
             try:
@@ -13338,33 +13526,52 @@ def _ri_form():
         xcache = st.session_state.setdefault("ri_other_cache", {})
         uoms = get_uoms()
         can_write_ui = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
+        mc_sel = {}
+        try:
+            mc_schema()
+            _mc_all = mc_list(fac)
+            _mc_msl = set(_mc_maint_sls(fac, [int(x["sl"]) for x in lines]))
+        except Exception:
+            _mc_all, _mc_msl = [], set()
+        _mc_labs = {f"{m['mc_no']}" + (f" · {m['machine_no']}" if m.get("machine_no") else "")
+                    + (f" · {m['machine_name']}" if m.get("machine_name") else ""): int(m["id"]) for m in _mc_all}
         for i, ln in enumerate(lines):
-            r = st.columns([0.35, 2.5, 1.1, 0.8, 1.0, 1.0, 1.0, 1.4, 0.6])
+            r = st.columns([0.3, 2.1, 1.6, 1.0, 0.7, 0.9, 0.9, 0.9, 1.4, 0.5])
             r[0].write(i + 1)
             r[1].write(f"{ln['name']} [{ln['size'] or '-'}]")
-            r[2].write(ln["pid"])
-            r[3].write(f"{ln['stock']:g}")
+            _need_mc = int(ln["sl"]) in _mc_msl
+            if _mc_labs:
+                _none = "— M/C —"
+                _pk = r[2].selectbox("mc", [_none] + list(_mc_labs), key=f"ri_mc_{gen}_{ln['sl']}", label_visibility="collapsed",
+                                     disabled=not can_write_ui,
+                                     help="কোন মেশিনের জন্য মাল যাচ্ছে — M/C-wise cost report-এ নিজে থেকে যাবে। শুধু যে মাল মেশিনে লাগবে তাতেই বাছুন; Production-এ সরাসরি ইস্যুতে ফাঁকা রাখুন।")
+                if _pk != _none:
+                    mc_sel[int(ln["sl"])] = _mc_labs[_pk]
+            else:
+                r[2].caption("—")
+            r[3].write(ln["pid"])
+            r[4].write(f"{ln['stock']:g}")
             _cu = ln.get("unit") or "Pcs"
             _uk = f"ri_u_{gen}_{ln['sl']}"
             if _uk not in st.session_state:
                 st.session_state[_uk] = _cu
-            r[4].selectbox("unit", uoms if _cu in uoms else uoms + [_cu], key=_uk, label_visibility="collapsed",
+            r[5].selectbox("unit", uoms if _cu in uoms else uoms + [_cu], key=_uk, label_visibility="collapsed",
                            disabled=not can_write_ui, on_change=_ri_uom_changed, args=(fac, ln["sl"], _uk, ln["name"]),
                            help="UOM ভুল থাকলে এখানেই বদলান — সঙ্গে সঙ্গে item-এ চূড়ান্তভাবে সেভ হয়ে যায়।")
             _pr = float(ln.get("price") or 0)
             if _pr > 0:
-                r[5].write(f"৳{_pr:g}")
+                r[6].write(f"৳{_pr:g}")
                 rt_ = _pr
             else:
-                rt_ = float(r[5].number_input("rate", min_value=0.0, step=1.0, format="%g", key=f"ri_r_{gen}_{ln['sl']}",
+                rt_ = float(r[6].number_input("rate", min_value=0.0, step=1.0, format="%g", key=f"ri_r_{gen}_{ln['sl']}",
                                               label_visibility="collapsed", help="এই আইটেমের Rate আগে দেওয়া হয়নি — Rate দিন, এটাই আইটেমের Rate হিসেবে সেভ হবে।"))
             rates.append(rt_)
             miss_rate = rt_ <= 0
             is_pend = False
-            q_ = r[6].number_input("q", min_value=0.0, step=1.0, format="%g", key=f"ri_q_{gen}_{ln['sl']}", label_visibility="collapsed")
+            q_ = r[7].number_input("q", min_value=0.0, step=1.0, format="%g", key=f"ri_q_{gen}_{ln['sl']}", label_visibility="collapsed")
             qtys.append(float(q_))
             if q_ <= 0:
-                r[7].write("⚠️ পরিমাণ দিন")
+                r[8].write("⚠️ পরিমাণ দিন")
                 bad = True
             elif q_ > ln["stock"] + 1e-9:
                 shortage = q_ - ln["stock"]
@@ -13376,7 +13583,7 @@ def _ri_form():
                         xcache[ck] = None
                 other = xcache[ck]
                 if other and float(other["stock"] or 0) >= shortage:
-                    ok_x = r[7].checkbox("🔁 ট্রান্সফার নিশ্চিত", key=f"ri_x_{gen}_{ln['sl']}")
+                    ok_x = r[8].checkbox("🔁 ট্রান্সফার নিশ্চিত", key=f"ri_x_{gen}_{ln['sl']}")
                     xfer_flags[ln["sl"]] = ok_x
                     if not ok_x:
                         is_pend = True
@@ -13389,20 +13596,21 @@ def _ri_form():
                         note_x += " ⏳ Tick na dile ei item Pending Issue-te thakbe (transaction hobe na)."
                     st.caption(note_x)
                 else:
-                    r[7].write("⏳ Pending-e jabe")
+                    r[8].write("⏳ Pending-e jabe")
                     st.caption(f"⏳ {ln['name']}: stock kom (shortage {shortage:g}) — save korle ei item **Pending Issue**-te thakbe, "
                                "transaction hobe na; stock ashle pore issue korben.")
                     is_pend = True
             elif ln["need"]:
-                r[7].write(f"🔎 যাচাই লাগবে ({ln['days']} দিন)")
+                r[8].write(f"🔎 যাচাই লাগবে ({ln['days']} দিন)")
             else:
-                r[7].write("⚠️ Rate দিন" if miss_rate else "✅")
+                r[8].write("⚠️ Rate দিন" if miss_rate else "✅")
             pflags.append(is_pend)
             if miss_rate and not is_pend:
                 bad = True
             if r[8].button("✖", key=f"ri_rm_{gen}_{ln['sl']}", help="সারি মুছুন"):
                 remove = i
     if remove is not None:
+        _iw_outcome(gen, lines[remove]["sl"], "Removed")
         lines.pop(remove)
         st.session_state["ri_lines"] = lines
         try:
@@ -13415,7 +13623,7 @@ def _ri_form():
     if need_names:
         verified = st.checkbox("Physically verified — এই আইটেমগুলো ফিজিক্যালি গুনে দেখা হয়েছে: " + ", ".join(need_names),
                                key=f"ri_ver_{gen}")
-    _mc_id, _mc_err, _mc_sls = _mc_issue_box(fac, _iss_lines, tx_date, ttype)      # machine (Maintenance items only)
+    _mc_map, _mc_err = _mc_lines_check(fac, lines, pflags, mc_sel, _mc_msl, tx_date, ttype, bool(_mc_labs))      # machine (Maintenance items only)
     _sb_issue_warn(fac, section, tx_date, sum(q_ * r_ for q_, r_, pf_ in zip(qtys, rates, pflags) if not pf_), ttype)   # section monthly limit
     can_write = bool(st.session_state.get("user")) and st.session_state.get("role") != "Auditor"
     f1, f2, f3 = st.columns([2, 1.2, 2.2])
@@ -13442,16 +13650,19 @@ def _ri_form():
             if _iss:
                 n = save_requisition_issue(fac, [(ln["sl"], q_, xfer_flags.get(ln["sl"], False), rt_) for ln, q_, rt_ in _iss],
                                            tx_date, sr_no, ttype, notes.strip(), verified, po_pending, section,
-                                           machine=((_mc_id, _mc_sls) if _mc_id else None))
+                                           machine=(_mc_map or None))
                 ok_all = bool(n)
             if ok_all and _pen:
                 ok_all = bool(ri_save_pending(fac, sr_no, tx_date, ttype, section, notes.strip(),
                                               [(ln["sl"], ln["pid"], ln["name"], ln["size"],
-                                                st.session_state.get(f"ri_u_{gen}_{ln['sl']}") or ln.get("unit") or "Pcs", q_, rt_)
+                                                st.session_state.get(f"ri_u_{gen}_{ln['sl']}") or ln.get("unit") or "Pcs", q_, rt_,
+                                                mc_sel.get(int(ln["sl"])))
                                                for ln, q_, rt_ in _pen]))
             if ok_all:
                 _who = st.session_state.get("user", "")
                 st.session_state["last_req_no"] = sr_no
+                for _ln, _pf in zip(lines, pflags):
+                    _iw_outcome(gen, _ln["sl"], "Pending" if _pf else "Issued", sr_no)
                 if n:
                     st.session_state["ri_saved"] = {"user": _who, "sr": sr_no, "n": int(n), "qty": float(sum(q_ for _, q_, _ in _iss)),
                                                     "section": section, "time": local_now().strftime("%d-%b-%Y %I:%M %p"), "kind": "save"}
@@ -16535,6 +16746,44 @@ def rp_transfer(P):
 
 
 # ---------------------------------------------------------------- registry + page
+# ---------------- Reports: M/C Wise Cost Report ----------------
+def rp_machine_cost(P):
+    df = _mc_tx_df(P["units"], P["d1"], P["d2"])
+    cols = [("SL", "i"), ("Date", "d"), ("SR / Req No", "t"), ("Item Code", "t"), ("Item Name", "t"), ("Size", "t"), ("UOM", "t"),
+            ("Qty", "q"), ("Rate (Tk)", "r"), ("Amount (Tk)", "a"), ("Issued By", "t")]
+
+    def build(u):
+        if df.empty:
+            return []
+        d = df[df["factory_name"] == u]
+        if d.empty:
+            return []
+        d = d.sort_values(["machine", "dt", "id"], kind="stable")
+        total = float(d["amount"].sum())
+        miss = int((d["rate"] <= 0).sum())
+        summ = []
+        for mname, g in d.groupby("machine", sort=True):
+            summ.append([mname, len(g), int(g["sl_no"].nunique()), float(g["amount"].sum()),
+                         f"{(float(g['amount'].sum()) / total * 100):.1f}%" if total else "-"])
+        summ.sort(key=lambda x: -x[3])
+        secs = [_rp_sec([("M/C", "t"), ("Issue lines", "i"), ("Different items", "i"), ("Total Cost (Tk)", "a"), ("% of cost", "t")], summ,
+                        [f"TOTAL - {u} ({len(summ)} machine(s))", len(d), None, total, "100%" if total else "-"], heading="M/C WISE COST SUMMARY")]
+        for mname, g in sorted(d.groupby("machine"), key=lambda kv: -float(kv[1]["amount"].sum())):
+            rows = []
+            for n, r in enumerate(g.itertuples(), 1):
+                rows.append([n, r.date, r.req_no, r.code, r.item, r.size, r.uom, r.qty, r.rate if r.rate > 0 else None,
+                             r.amount if r.rate > 0 else None, r.officer])
+            tot = [f"Sub-total: {mname} ({len(g)} issues)", None, None, None, None, None, None, _rp_qty_tot(g, "qty"), None,
+                   float(g["amount"].sum()), None]
+            secs.append(_rp_sec(cols, rows, tot, heading=f"M/C: {mname}", note=_rp_uom_note(g, "qty") if g["uom"].nunique() > 1 else None))
+        return secs
+    note = ["Cost = issued quantity x the issue rate (rate saved with the issue, else the item's stock rate). Only issues tagged with an M/C No. "
+            "in the Requisition Issue slip are included."]
+    if not df.empty and int((df["rate"] <= 0).sum()):
+        note.append(f"{int((df['rate'] <= 0).sum())} issue line(s) have no rate; their amount is not included.")
+    return _rp_blocks(P, build), note
+
+
 RP_STOCK_STATUS = ["All items", "In stock (quantity above zero)", "Zero or negative stock"]
 RP_REGISTRY = [
     dict(key="stock", label="Current Stock Report", type="Stock Report", dates=False, flt=("pcat", "bcat", "item", "status"), orient="P", fn=rp_current_stock, status=RP_STOCK_STATUS),
@@ -16557,6 +16806,7 @@ RP_REGISTRY = [
     dict(key="ledger", label="Ledger Report", type="Item Ledger Report", dates=True, flt=("supplier", "item", "pcat", "bcat", "ttype"), orient="P", fn=rp_ledger,
          tt=tuple(RP_NAMES), tt_def=tuple(RP_NAMES)),
     dict(key="req", label="Requisition / Issue Report", type="Requisition Report", dates=True, flt=("item", "status"), orient="L", fn=rp_requisition, status="req"),
+    dict(key="mccost", label="M/C Wise Cost Report", type="M/C Wise Cost Report", dates=True, flt=(), orient="L", fn=rp_machine_cost),
     dict(key="transfer", label="Transfer History Report", type="Transfer Report", dates=True, flt=("item", "status"), orient="L", fn=rp_transfer, status="transfer"),
 ]
 
@@ -17633,6 +17883,58 @@ def _mc_maint_sls(fac, sls):
 
 
 # ---------------- block shown inside the Requisition Issue slip ----------------
+def _mc_lines_check(fac, lines, pflags, mc_sel, msl, tx_date, ttype, has_machines):
+    """Per-line machine check of the Requisition Issue slip -> ({sl: machine_id}, error text).
+    A Maintenance item must carry a machine (when this unit has machines); other items may carry one too."""
+    try:
+        if ttype != "Issued" or not lines:
+            return {}, ""
+        act = [ln for ln, pf in zip(lines, pflags) if not pf]
+        if not has_machines:
+            return {}, ""
+        mapping = {int(ln["sl"]): int(mc_sel[int(ln["sl"])]) for ln in act if int(ln["sl"]) in mc_sel}
+        err = ""      # M/C is optional: direct production issues need no machine; pick one only when the item goes to a machine
+        if not mapping:
+            return mapping, err
+        ref = tx_date.date() if isinstance(tx_date, datetime) else tx_date
+        by_m = {}
+        for sl, mid in mapping.items():
+            by_m.setdefault(mid, []).append(sl)
+        names = {int(ln["sl"]): f"{ln['name']} [{ln['size'] or '-'}]" for ln in act}
+        for mid, sls in by_m.items():
+            hist = q_c("""SELECT sl_no, date, qty FROM transactions WHERE factory_name=%s AND machine_id=%s AND sl_no = ANY(%s)
+                          AND trans_type = ANY(%s) ORDER BY id""", (fac, mid, sorted(sls), list(ISSUE_TYPES)))
+            by = {}
+            for h in hist:
+                d = parse_date(h["date"])
+                if d:
+                    by.setdefault(int(h["sl_no"]), []).append((d.date(), float(h["qty"] or 0)))
+            for sl in sls:
+                ev = sorted(by.get(sl, []))
+                if not ev:
+                    continue
+                last_d, last_q = ev[-1]
+                ago = (ref - last_d).days
+                life, _mn = _mc_life([d for d, _ in ev])
+                t_ = f"🔩 {names[sl]} (M/C {mid_label(fac, mid)}): এই মেশিনে শেষ নিয়েছে {last_d:%d-%b-%Y} ({ago} দিন আগে, {last_q:g}) · মোট {len(ev)} বার"
+                if life is not None:
+                    t_ += f" · গড় লাইফ ~{life:.0f} দিন"
+                if ago <= MC_REPEAT_DAYS:
+                    t_ += f" · ⚠️ {MC_REPEAT_DAYS} দিনের মধ্যে আবার নিচ্ছে — Maintenance টিমকে কারণ জিজ্ঞেস করুন"
+                st.caption(t_)
+        return mapping, err
+    except Exception as e:
+        st.caption(f"⚠️ মেশিন অংশ লোড হয়নি ({e}) — মেশিন ছাড়াই সংরক্ষণ হবে।")
+        return {}, ""
+
+
+def mid_label(fac, mid):
+    for m in mc_list(fac):
+        if int(m["id"]) == int(mid):
+            return m["mc_no"] + (f" · {m['machine_no']}" if m.get("machine_no") else "")
+    return str(mid)
+
+
 def _mc_issue_box(fac, lines, tx_date, ttype):
     """Machine block of the Requisition Issue slip -> (machine_id or None, error text, maintenance sl list).
     Silent and free unless the slip holds a Maintenance item."""
