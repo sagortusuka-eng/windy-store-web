@@ -14149,8 +14149,9 @@ def _ri_status_strip(mode):
 
 
 def _ri_tools_tabs(mode, is_mgr):
-    """Everything that used to sit below the form as separate expanders - now one tidy tab bar."""
+    """Fix / UOM / Sections / Corrections: a slim button bar, nothing is shown (or loaded) until one is clicked."""
     rcv = mode.startswith("📥")
+    ids = ["fix", "uom"] + (["sec"] if (is_mgr and not rcv) else []) + (["corr"] if is_mgr else [])
     npend = 0
     if is_mgr:
         try:
@@ -14158,25 +14159,25 @@ def _ri_tools_tabs(mode, is_mgr):
             npend = int(_r[0]["n"]) if _r else 0
         except Exception:
             npend = 0
-    labels = ["✏️ Fix saved challan" if rcv else "✏️ Fix saved slip", "➕ Add UOM"]
-    if is_mgr and not rcv:
-        labels.append("⚙️ Sections")
-    if is_mgr:
-        labels.append(f"📥 Corrections ({npend})" + (" 🔴" if npend else ""))
-    tabs = st.tabs(labels)
-    k = 0
-    with tabs[k]:
-        (_rr_fix_panel if rcv else _ri_fix_panel)()
-    k += 1
-    with tabs[k]:
-        _uom_adder("ri")
-    k += 1
-    if is_mgr and not rcv:
-        with tabs[k]:
+    names = {"fix": "✏️ Fix saved challan" if rcv else "✏️ Fix saved slip", "uom": "➕ Add UOM", "sec": "⚙️ Sections",
+             "corr": f"📥 Corrections ({npend})" + (" 🔴" if npend else "")}
+    try:
+        sel = st.segmented_control("ri_tools_bar", ids, format_func=lambda i: names[i], key=f"ri_tools_{'rcv' if rcv else 'iss'}",
+                                   label_visibility="collapsed")
+    except Exception:       # older Streamlit: radio with a 'closed' choice
+        _o = st.radio("ri_tools_bar", [None] + ids, format_func=lambda i: "— Tools —" if i is None else names[i], horizontal=True,
+                      key=f"ri_toolsr_{'rcv' if rcv else 'iss'}", label_visibility="collapsed")
+        sel = _o
+    if not sel:
+        return
+    with st.container(border=True):
+        if sel == "fix":
+            (_rr_fix_panel if rcv else _ri_fix_panel)()
+        elif sel == "uom":
+            _uom_adder("ri")
+        elif sel == "sec" and is_mgr and not rcv:
             _ri_section_manager()
-        k += 1
-    if is_mgr:
-        with tabs[k]:
+        elif sel == "corr" and is_mgr:
             _ri_requests_panel()
 
 
@@ -14219,7 +14220,6 @@ def _tab_req_issue_body():
     _modes = ["📤 Issue (SR slip)", "📥 Supplier Receipt (Challan)", "⏳ Pending Issue (stock nei)", "🧰 SR Center (edit / fix)"]
     if st.session_state.get("role") in IW_VIEW_ROLES:
         _modes.append("🕵️ Skip Watch (Manager)")
-    _ri_kpis()
     _pv_slot = st.container()
     _ri_navbar()
     mode = st.radio("Ki korben?", _modes, horizontal=True, key="ri_mode", label_visibility="collapsed")
