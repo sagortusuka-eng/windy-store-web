@@ -13902,8 +13902,65 @@ def _ri_sr_center():
         _ri_item_trail_ui(fac, _pairs, key="srt")
 
 
+_RI_PREMIUM_CSS = """<style>
+.st-key-ri_premium{--p-teal:#0F766E;--p-navy:#102238;--p-ink:#172033;--p-line:#E2E8F0;--p-soft:#F6F9FC;}
+.st-key-ri_premium .ri-hero{background:linear-gradient(120deg,#102238 0%,#133a4a 55%,#0F766E 120%);color:#fff;border-radius:18px;padding:18px 22px;margin:2px 0 14px;display:flex;align-items:center;gap:14px;box-shadow:0 10px 28px rgba(16,34,56,.22);}
+.st-key-ri_premium .ri-hero .ri-ico{width:46px;height:46px;border-radius:13px;background:rgba(255,255,255,.14);display:flex;align-items:center;justify-content:center;font-size:24px;flex:0 0 auto;}
+.st-key-ri_premium .ri-hero .ri-t{font-size:20px;font-weight:800;letter-spacing:-.01em;line-height:1.2;}
+.st-key-ri_premium .ri-hero .ri-s{font-size:12.5px;opacity:.78;margin-top:3px;}
+.st-key-ri_premium .ri-hero .ri-fac{margin-left:auto;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.25);border-radius:999px;padding:5px 13px;font-size:12px;font-weight:700;white-space:nowrap;}
+/* mode switch = segmented pills */
+.st-key-ri_premium div[data-testid="stRadio"] > div[role="radiogroup"]{gap:6px;background:#EEF3F8;border:1px solid var(--p-line);padding:5px;border-radius:14px;display:flex;flex-wrap:wrap;}
+.st-key-ri_premium div[data-testid="stRadio"] label[data-baseweb="radio"]{margin:0;padding:9px 16px;border-radius:10px;cursor:pointer;transition:all .15s ease;flex:1 1 auto;justify-content:center;background:transparent;}
+.st-key-ri_premium div[data-testid="stRadio"] label[data-baseweb="radio"] > div:first-child{display:none !important;}
+.st-key-ri_premium div[data-testid="stRadio"] label[data-baseweb="radio"] p{font-weight:650;font-size:13.5px;color:#475569;margin:0;}
+.st-key-ri_premium div[data-testid="stRadio"] label[data-baseweb="radio"]:hover{background:rgba(255,255,255,.7);}
+.st-key-ri_premium div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked){background:#fff;box-shadow:0 2px 8px rgba(16,34,56,.12),inset 0 -2px 0 var(--p-teal);}
+.st-key-ri_premium div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p{color:var(--p-navy);font-weight:800;}
+.st-key-ri_premium div[data-testid="stRadio"] ::selection{background:transparent;}
+/* inputs */
+.st-key-ri_premium div[data-baseweb="input"],.st-key-ri_premium div[data-baseweb="select"] > div,.st-key-ri_premium div[data-baseweb="textarea"]{border-radius:11px !important;border:1px solid #D5DFEA !important;background:#fff !important;box-shadow:0 1px 2px rgba(16,34,56,.04);transition:border-color .15s,box-shadow .15s;}
+.st-key-ri_premium div[data-baseweb="input"]:focus-within,.st-key-ri_premium div[data-baseweb="select"] > div:focus-within,.st-key-ri_premium div[data-baseweb="textarea"]:focus-within{border-color:var(--p-teal) !important;box-shadow:0 0 0 3px rgba(15,118,110,.15) !important;}
+.st-key-ri_premium label[data-testid="stWidgetLabel"] p{font-size:12px;font-weight:700;color:#475569;letter-spacing:.02em;text-transform:uppercase;}
+/* cards */
+.st-key-ri_premium div[data-testid="stVerticalBlockBorderWrapper"]{border-radius:16px !important;border:1px solid var(--p-line) !important;background:#fff;box-shadow:0 4px 18px rgba(16,34,56,.06);}
+.st-key-ri_premium div[data-testid="stExpander"]{border:1px solid var(--p-line) !important;border-radius:14px !important;background:#fff;box-shadow:0 2px 10px rgba(16,34,56,.05);overflow:hidden;}
+.st-key-ri_premium div[data-testid="stExpander"] summary{font-weight:700;color:var(--p-navy);background:var(--p-soft);}
+.st-key-ri_premium div[data-testid="stExpander"] summary:hover{background:#EEF6F5;}
+/* buttons */
+.st-key-ri_premium button[kind="primary"]{background:linear-gradient(135deg,#0F766E,#087E8B) !important;border:0 !important;color:#fff !important;border-radius:11px !important;font-weight:750 !important;box-shadow:0 6px 16px rgba(15,118,110,.28);transition:transform .12s,box-shadow .12s;}
+.st-key-ri_premium button[kind="primary"]:hover{transform:translateY(-1px);box-shadow:0 10px 22px rgba(15,118,110,.34);}
+.st-key-ri_premium button[kind="secondary"]{border-radius:11px !important;border:1px solid #D5DFEA !important;background:#fff !important;color:var(--p-navy) !important;font-weight:650 !important;}
+.st-key-ri_premium button[kind="secondary"]:hover{border-color:var(--p-teal) !important;color:var(--p-teal) !important;background:#F0FAF8 !important;}
+/* alerts */
+.st-key-ri_premium div[data-testid="stAlert"]{border-radius:13px;border:1px solid var(--p-line);box-shadow:0 2px 8px rgba(16,34,56,.04);}
+.st-key-ri_premium div[data-testid="stCaptionContainer"]{color:#64748B;}
+.st-key-ri_premium div[data-testid="stDataFrame"]{border-radius:13px;overflow:hidden;border:1px solid var(--p-line);}
+@media (max-width:640px){.st-key-ri_premium .ri-hero{padding:14px;flex-wrap:wrap}.st-key-ri_premium .ri-hero .ri-fac{margin-left:0}}
+</style>"""
+
+
 def tab_req_issue():
-    st.markdown("#### 🧾 Requisition Issue & Supplier Receipt")
+    st.markdown(_RI_PREMIUM_CSS, unsafe_allow_html=True)
+    try:
+        _box = st.container(key="ri_premium")
+    except TypeError:
+        _box = st.container()
+    with _box:
+        _tab_req_issue_body()
+
+
+def _tab_req_issue_body():
+    try:
+        _fac_lbl = html_lib.escape(str(FAC))
+    except Exception:
+        _fac_lbl = ""
+    st.markdown(
+        '<div class="ri-hero"><div class="ri-ico">🧾</div><div>'
+        '<div class="ri-t">Requisition Issue &amp; Supplier Receipt</div>'
+        '<div class="ri-s">Store issue, challan receipt ও pending — এক জায়গায়</div></div>'
+        + (f'<div class="ri-fac">📍 {_fac_lbl}</div>' if _fac_lbl else '') + '</div>',
+        unsafe_allow_html=True)
     if is_cons_view:
         st.info("ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ ইস্যু/রিসিভ করা যায় না)।")
         return
