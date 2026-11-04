@@ -13032,6 +13032,7 @@ def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_
     sls = [int(a[0]) for a in lines]
     qtys = [float(a[1]) for a in lines]
     xfer = {int(a[0]): bool(a[2]) if len(a) > 2 else False for a in lines}
+    xconf = {int(a[0]): (float(a[4]) if len(a) > 4 and a[4] else 0.0) for a in lines}      # shortage the officer ticked the transfer for
     rates = {int(a[0]): (float(a[3]) if len(a) > 3 and a[3] else 0.0) for a in lines}
     rows = run("""SELECT sl_no, COALESCE(prod_id,''), COALESCE(item_name,''), COALESCE(current_stock,0), COALESCE(size,''), COALESCE(unit_price,0)
                   FROM inventory WHERE factory_name=%s AND sl_no = ANY(%s) FOR UPDATE""", (fac, sls))
@@ -13048,6 +13049,9 @@ def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_
             continue
         shortage = q_ - stk_
         other = find_same_in_other(pid_, nm_, other_factory(fac), size_, need=shortage)
+        if other and xfer.get(sl) and abs(xconf.get(sl, 0.0) - shortage) > 1e-6:
+            bad_short.append(f"{pid_} (stock {stk_:g}, issue {q_:g}: transfer {xconf.get(sl, 0.0):g} confirm kora hoyechilo kintu ekhon {shortage:g} lagche — abar tick din)")
+            continue
         if other and xfer.get(sl):
             okey = (int(other["sl_no"]), other["factory_name"])
             lk = run("SELECT COALESCE(current_stock,0) FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE", okey)
@@ -13121,7 +13125,9 @@ def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_
                 (_m, _mc_max, fac, sr_no, _sl_list))
             audit("MACHINE_ISSUE", f"{fac}: SR {sr_no} -> machine id {_m} ({len(_sl_list)} line(s))")
     details = [f"{fac}: {ttype} {q_:g} of {info[sl][0]} ({info[sl][1]}) [SR {sr_no}]" + (f" [Section {section}]" if section else "") + (" [ERP PO Pending ticked]" if po_pending else "")
+               + f" [stock before {info[sl][2]:g}" + (f", auto-transfer {plan[sl][0]:g} from {plan[sl][1]['factory_name']} (officer confirmed)" if sl in plan else ", no transfer") + "]"
                for sl, q_ in zip(sls, qtys)]
+    st.session_state["_ri_xfer_note"] = "; ".join(f"{info[sl][1]}: {plan[sl][0]:g} pcs {plan[sl][1]['factory_name']} theke" for sl in sls if sl in plan)
     run("""INSERT INTO audit_logs (timestamp, username, action_type, details)
            SELECT %s, %s, 'TRANSACTION', d FROM unnest(%s::text[]) AS d""",
         (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user or "SYSTEM", details))
@@ -13822,8 +13828,8 @@ def _ri_form():
                         xcache[ck] = None
                 other = xcache[ck]
                 if other and float(other["stock"] or 0) >= shortage:
-                    ok_x = r[8].checkbox("🔁 ট্রান্সফার নিশ্চিত", key=f"ri_x_{gen}_{ln['sl']}")
-                    xfer_flags[ln["sl"]] = ok_x
+                    ok_x = r[8].checkbox(f"🔁 {shortage:g} {ln.get('unit') or 'pcs'} ট্রান্সফার নিশ্চিত", key=f"ri_x_{gen}_{ln['sl']}_{shortage:g}")
+                    xfer_flags[ln["sl"]] = (bool(ok_x), round(float(shortage), 6))
                     if not ok_x:
                         is_pend = True
                     note_x = (f"⚠️ {ln['name']}: স্টক কম {shortage:g}। {other['factory_name']} থেকে অটো-ট্রান্সফার হবে "
@@ -13887,7 +13893,8 @@ def _ri_form():
             _pen = [(ln, q_, rt_) for ln, q_, rt_, pf_ in zip(lines, qtys, rates, pflags) if pf_]
             n, ok_all = 0, True
             if _iss:
-                n = save_requisition_issue(fac, [(ln["sl"], q_, xfer_flags.get(ln["sl"], False), rt_) for ln, q_, rt_ in _iss],
+                n = save_requisition_issue(fac, [(ln["sl"], q_, xfer_flags.get(ln["sl"], (False, 0.0))[0], rt_,
+                                                  xfer_flags.get(ln["sl"], (False, 0.0))[1]) for ln, q_, rt_ in _iss],
                                            tx_date, sr_no, ttype, notes.strip(), verified, po_pending, section,
                                            machine=(_mc_map or None))
                 ok_all = bool(n)
@@ -13909,6 +13916,7 @@ def _ri_form():
                 st.session_state["ri_gen"] = gen + 1
                 done(f"✅ {_who}, apnar data sofolbhabe save hoyeche - SR {sr_no}"
                      + (f": {n}টি আইটেম ইস্যু হয়েছে" + (f" · Section: {section}" if section else "") + ", স্টক কমেছে।" if n else ".")
+                     + (f" 🔁 Auto-transfer (apni tick diyechilen): {st.session_state.pop('_ri_xfer_note')}." if st.session_state.get("_ri_xfer_note") else "")
                      + (f" ⏳ {len(_pen)}টি আইটেমে stock nei — Pending Issue-te rakha holo (transaction hoy ni)." if _pen else ""))
 
 
