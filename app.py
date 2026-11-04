@@ -13361,6 +13361,9 @@ def _ri_pending_view():
                         st.error("Confirm tick korun.")
                     elif _ri_pending_cancel(lab[pick]["id"], why.strip(), pick):
                         done("Pending line cancel hoyeche.")
+    if rows:
+        with st.expander("🔎 Item details — stock kothay gelo? (opening, received, issued, kon officer)"):
+            _ri_item_trail_ui(fac, [(int(r["sl_no"]), f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · SR {r['sr_no']}") for r in rows], key="ptr")
     with st.expander("🕘 Ager shesh howa / cancel howa pending (last 30)"):
         h = qdf("""SELECT sr_no AS "SR No", item_name AS "Item", size AS "Size", qty AS "Qty", issued_qty AS "Issued", status AS "Status",
                    slip_date AS "Slip Date", closed_by AS "By", closed_at AS "When", close_note AS "Note"
@@ -13616,6 +13619,107 @@ def _ri_pending_row(r, fac, can_write, vm, kp="rip"):
                          + (f" 🔁 {short_now:g} pcs {r['other']['factory_name']} theke auto-transfer hoyeche." if xtick else ""))
 
 
+# ------------------------------------------------------------
+#  ITEM DETAILS (stock trail): opening, received, issued, auto-transfers and who took the stock -> why the stock is nil
+# ------------------------------------------------------------
+def _ri_item_trail(fac, sl):
+    inv = q("SELECT item_name, COALESCE(size,'') AS size, prod_id, COALESCE(current_stock,0) AS stock, COALESCE(unit_name,'') AS unit "
+            "FROM inventory WHERE factory_name=%s AND sl_no=%s", (fac, int(sl)))
+    if not inv:
+        st.warning("Item paoa jayni.")
+        return
+    inv = inv[0]
+    tx_rows = q("""SELECT id, date, time, trans_type, qty, officer_name, COALESCE(req_no,'') AS req_no, COALESCE(challan_no,'') AS challan_no,
+                          COALESCE(supplier_name,'') AS supplier_name, COALESCE(section,'') AS section, COALESCE(notes,'') AS notes
+                   FROM transactions WHERE factory_name=%s AND sl_no=%s ORDER BY id""", (fac, int(sl)))
+    pend = q("SELECT sr_no, qty, COALESCE(issued_qty,0) AS iq, created_by FROM ri_pending_issues WHERE factory_name=%s AND sl_no=%s AND status='Pending'",
+             (fac, int(sl)))
+    bal, opening, rec_t, iss_t, auto_t, out_t, adj_t = 0.0, None, 0.0, 0.0, 0.0, 0.0, 0.0
+    led, by_off = [], {}
+    for t in tx_rows:
+        qty = float(t["qty"] or 0)
+        typ = t["trans_type"]
+        inn = outn = 0.0
+        flag = ""
+        if typ == OPENING_TYPE:
+            if opening is None:
+                opening = qty
+            bal, inn = qty, qty
+        elif typ in RECEIPT_TYPES:
+            bal += qty
+            inn = qty
+            rec_t += qty if typ != "Stock Adjustment (+)" else 0.0
+            adj_t += qty if typ == "Stock Adjustment (+)" else 0.0
+        elif typ in ISSUE_TYPES:
+            m = re.search(r"Auto-transferred ([0-9.]+)", t["notes"])
+            a = float(m.group(1)) if m else 0.0
+            if a:
+                bal += a
+                inn = a
+                auto_t += a
+            bal -= qty
+            outn = qty
+            iss_t += qty if typ == "Issued" else 0.0
+            out_t += qty if typ == "Internal Issue" else 0.0
+            o = by_off.setdefault(t["officer_name"] or "-", {"n": 0, "q": 0.0, "last": ""})
+            o["n"] += 1
+            o["q"] += qty
+            o["last"] = t["date"]
+            if bal < -1e-9:
+                flag = "⚠️ Stock chhilo na"
+        elif typ == ADJ_OUT:
+            bal -= qty
+            outn = qty
+            adj_t -= qty
+        led.append({"Date": t["date"], "Time": t["time"], "Type": TRANS_LABELS.get(typ, typ), "SR / Challan": t["req_no"] or t["challan_no"],
+                    "In": inn or None, "Out": outn or None, "Balance": bal, "By": t["officer_name"], "Section / Supplier": t["section"] or t["supplier_name"],
+                    "Flag": flag, "Note": t["notes"][:90]})
+    stock = float(inv["stock"] or 0)
+    e = html_lib.escape
+    st.markdown(_RQ_CSS, unsafe_allow_html=True)
+    st.markdown(f'<div class="rq-hero"><div><div class="rq-eyebrow">ITEM DETAILS · STOCK TRAIL</div><div class="rq-title">{e(inv["item_name"])}</div>'
+                f'<div class="rq-meta"><span>🏷 {e(inv["size"] or "-")}</span><span>🔢 {e(str(inv["prod_id"]))}</span><span>🏭 {e(str(fac))}</span>'
+                f'<span>📏 {e(inv["unit"] or "-")}</span></div></div><div class="rq-badge {"ok" if stock > 0 else "wait"}">Stock ekhon: {stock:g}</div></div>',
+                unsafe_allow_html=True)
+
+    def kpi(label, val, color):
+        return f'<div class="rq-kpi" style="--c:{color}"><small>{label}</small><b>{val}</b></div>'
+    st.markdown('<div class="rq-kpis">' + kpi("Opening stock", "—" if opening is None else _rq_n(opening), "#2563eb")
+                + kpi("Mot received", _rq_n(rec_t), "#16a34a") + kpi("Mot issued", _rq_n(iss_t), "#dc2626")
+                + kpi("Auto-transfer pawa", _rq_n(auto_t), "#7c3aed") + kpi("Pending demand", _rq_n(sum(float(p["qty"]) - float(p["iq"]) for p in pend)), "#f97316")
+                + '</div>', unsafe_allow_html=True)
+    diff = stock - bal
+    if abs(diff) > 1e-6:
+        st.caption(f"ℹ️ Transaction theke hishab: {bal:g}, system stock: {stock:g} (poroshor {diff:+g}) — Physical Count / ager data / transfer-er karone hote pare.")
+    if by_off:
+        st.markdown('<div class="rq-h2">👤 Kon officer koto issue koreche</div>', unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame([{"Officer": k, "Koybar": v["n"], "Mot qty": v["q"], "Shesh issue": v["last"]}
+                                   for k, v in sorted(by_off.items(), key=lambda kv: -kv[1]["q"])]),
+                     hide_index=True, use_container_width=True, height=min(80 + 36 * len(by_off), 260))
+    st.markdown('<div class="rq-h2">📒 Stock movement (notun age)</div>', unsafe_allow_html=True)
+    if not led:
+        st.info("Ei item-er kono transaction nei.")
+    else:
+        ldf = pd.DataFrame(list(reversed(led)))
+        st.dataframe(ldf, hide_index=True, use_container_width=True, height=min(90 + 36 * len(ldf), 520))
+        if any(r["Flag"] for r in led):
+            st.warning("⚠️ Kichu issue-te hishabe stock chhilo na (balance negative hoyechhilo) — oi row-er Date / officer dekhe jiggasha korun.")
+
+
+def _ri_item_trail_ui(fac, pairs, key="itr"):
+    """pairs = [(sl_no, label)] items to pick from (e.g. this SR's items); plus a search box for any other item."""
+    opts = {lbl: int(sl) for sl, lbl in pairs}
+    t2 = st.text_input("Onno item-er details dekhte khujun (nam / ERP code / size) — optional", key=f"{key}_s").strip()
+    if len(t2) >= 2:
+        for r in search_items(fac, t2)[:30]:
+            opts[f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · stock {float(r['stock']):g}"] = int(r["sl_no"])
+    if not opts:
+        st.info("Item khujun.")
+        return
+    pick = st.selectbox("Item", list(opts), key=f"{key}_p")
+    _ri_item_trail(fac, opts[pick])
+
+
 def _ri_sr_center():
     st.markdown(_RQ_CSS, unsafe_allow_html=True)
     fac = FAC
@@ -13673,7 +13777,7 @@ def _ri_sr_center():
                                     "Status": ("✅ Stock ashche" if r["stock"] >= r["left"] - 1e-9 else
                                                ("🔁 Onno unit-e stock ache" if r["xok"] else "⛔ Stock nei"))} for r in pend]),
                      hide_index=True, use_container_width=True, height=min(80 + 36 * len(pend), 300))
-    t = lazy_tab_select(["⏳ Pending issue korun", "➕ Notun item add korun", "✏️ Issued line thik korun"], "lz_src")
+    t = lazy_tab_select(["⏳ Pending issue korun", "➕ Notun item add korun", "✏️ Issued line thik korun", "🔎 Item details (stock trail)"], "lz_src")
     slip_d = parse_date(sdate_s)
     slip_date = slip_d.date() if slip_d else date.today()
     if t == 0:
@@ -13736,7 +13840,7 @@ def _ri_sr_center():
                     if ri_save_pending(fac, sr, slip_date, stype, sec if sec != "-" else "", ar, [(int(it["sl_no"]), it["prod_id"], it["item_name"], it["size"] or "",
                                                                                                     _unit_of(fac, it["sl_no"]), float(aq), rate, None)]):
                         done(f"⏳ {it['item_name']} × {aq:g} SR {sr}-er Pending-e rakha hoyeche.")
-    else:
+    elif t == 2:
         if not iss:
             st.info("Ei SR-e kono issued line nei.")
         else:
@@ -13788,6 +13892,14 @@ def _ri_sr_center():
                         done(f"✅ {who}, SR {sr}: {n_edit} qty bodlano, {n_del} line bad.")
                     elif n_edit or n_del:
                         st.rerun()
+    else:
+        _pairs, _seen = [], set()
+        for r in pend + iss:
+            _sl = int(r["sl_no"])
+            if _sl not in _seen:
+                _seen.add(_sl)
+                _pairs.append((_sl, f"{'⏳ ' if r in pend else ''}{r['item_name']} [{(r.get('size') or '') or '-'}] · {r['prod_id']}"))
+        _ri_item_trail_ui(fac, _pairs, key="srt")
 
 
 def tab_req_issue():
