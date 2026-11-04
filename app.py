@@ -9277,15 +9277,25 @@ def fresh_start_undo(batch, user):
 def apply_count_as_opening(fac, user, rows, date_s, day):
     """Sets Physical stock = counted qty for every counted item and logs an Opening Balance transaction each.
     ERP stock is left as it is (update it later from the ERP update screen)."""
+    _tags = sorted({f"Opening from Physical Count #{r['count_id']}" for r in rows})
+    _have = {(int(x["sl_no"]), x["notes"]) for x in q(
+        "SELECT sl_no, notes FROM transactions WHERE factory_name=%s AND trans_type=%s AND notes = ANY(%s)", (fac, OPENING_TYPE, _tags))}
+    _skipped = 0
     for r in rows:
+        if (int(r["sl_no"]), f"Opening from Physical Count #{r['count_id']}") in _have:
+            _skipped += 1      # this count was already applied to this item: applying it again only duplicates the row and resets stock again
+            continue
         run("UPDATE inventory SET current_stock=%s WHERE sl_no=%s AND factory_name=%s", (float(r["counted_qty"]), r["sl_no"], fac))
         r_date = r.get("count_date") or date_s          # the item's own count date
         _pd = parse_date(r_date)
         r_day = _pd.day if _pd else day
         insert_tx(fac, user, r["sl_no"], r["prod_id"], r["item_name"], float(r["counted_qty"]), OPENING_TYPE, r_day,
                   f"Opening from Physical Count #{r['count_id']}", r_date, local_now().strftime("%I:%M %p"), "Verified")
-    audit("OPENING_FROM_COUNT", f"{user} applied {len(rows)} counted item(s) as opening for {fac} ({date_s})")
-    return len(rows)
+    audit("OPENING_FROM_COUNT", f"{user} applied {len(rows) - _skipped} counted item(s) as opening for {fac} ({date_s})"
+          + (f" ({_skipped} already applied, skipped)" if _skipped else ""))
+    if _skipped:
+        st.warning(f"{_skipped}টি item-এ এই count আগেই Opening হিসেবে বসানো ছিল — আবার বসানো হয়নি (duplicate আটকানো হলো)।")
+    return len(rows) - _skipped
 
 
 @tx
@@ -19750,7 +19760,11 @@ def _ia_analyze(tx, trf, stock, size):
         trf = trf.copy()
         trf["_d"] = _parse_dates(trf["transfer_date"])
         for r in trf.to_dict("records"):
-            if od is not None and pd.notna(r["_d"]) and r["_d"] < od:
+            _m = re.match(r"TRF-(\d{8})", str(r.get("transfer_ref") or ""))
+            rd = pd.to_datetime(_m.group(1), format="%Y%m%d", errors="coerce") if _m else pd.NaT
+            if pd.isna(rd):
+                rd = r["_d"]
+            if od is not None and pd.notna(rd) and rd < od:
                 continue
             if r["_in"]:
                 t_in += float(r["qty"] or 0)
@@ -19945,10 +19959,153 @@ def _ia_audit_section(item, tx_ids):
     _ia_table(["When", "Who", "Action", "Details"], rows, 460)
 
 
+def _ia_scan_compute(fac):
+    """Ledger check for EVERY item of one unit: Opening + Receipt - Issue +/- Transfer (from the latest Opening) vs current stock."""
+    inv = qdf("SELECT sl_no, COALESCE(prod_id,'') AS prod_id, COALESCE(item_name,'') AS item_name, COALESCE(size,'') AS size, "
+              "COALESCE(current_stock,0) AS stock FROM inventory WHERE factory_name=%s", (fac,))
+    tx = qdf("SELECT id, sl_no, date, trans_type, qty FROM transactions WHERE factory_name=%s", (fac,))
+    meta = {"checked": 0, "pre_rows": 0, "multi_open": 0, "unmatched_trf": 0}
+    if inv.empty or tx.empty:
+        return pd.DataFrame(), meta
+    tx["qty"] = pd.to_numeric(tx["qty"], errors="coerce").fillna(0.0)
+    tx["_d"] = _parse_dates(tx["date"])
+    op = tx[tx["trans_type"] == OPENING_TYPE].sort_values(["_d", "id"])
+    n_open = op.groupby("sl_no").size()
+    last = op.dropna(subset=["_d"]).drop_duplicates("sl_no", keep="last").set_index("sl_no")[["_d", "qty"]]
+    last = last.rename(columns={"_d": "od", "qty": "oq"})
+    if last.empty:
+        return pd.DataFrame(), meta
+    non = tx[tx["trans_type"] != OPENING_TYPE].join(last, on="sl_no")
+    non = non[non["od"].notna()].copy()
+    non["pre"] = non["_d"].notna() & (non["_d"] < non["od"])
+    non["eff"] = non["qty"] * non["trans_type"].map(lambda t: 1.0 if t in RECEIPT_TYPES else (-1.0 if t in ISSUE_TYPES + (ADJ_OUT,) else 0.0))
+    live_net = non[~non["pre"]].groupby("sl_no")["eff"].sum()
+    pre_n = non[non["pre"]].groupby("sl_no").size()
+    odmap = last["od"].to_dict()
+    by_pid = {}
+    for r in inv.to_dict("records"):
+        by_pid.setdefault(str(r["prod_id"]).strip(), []).append(r)
+    t_net = {}
+    try:
+        trf = qdf("SELECT transfer_ref, source_factory, dest_factory, prod_id, qty, transfer_date, COALESCE(notes,'') AS notes "
+                  "FROM inter_factory_transfers WHERE source_factory=%s OR dest_factory=%s", (fac, fac))
+    except Exception:
+        trf = pd.DataFrame()
+    for r in (trf.to_dict("records") if not trf.empty else []):
+        cands = by_pid.get(str(r["prod_id"]).strip(), [])
+        m = re.search(r"Size:\s*(.+?)\s*$", r["notes"])
+        ts = norm_size(m.group(1)) if m and m.group(1).strip() != "-" else ""
+        if ts:
+            cands = [c for c in cands if norm_size(c["size"]) == ts] or [c for c in cands if not norm_size(c["size"])]
+        if len(cands) != 1:
+            meta["unmatched_trf"] += 1
+            continue
+        sl = int(cands[0]["sl_no"])
+        od = odmap.get(sl)
+        if od is None:
+            continue
+        _m = re.match(r"TRF-(\d{8})", str(r.get("transfer_ref") or ""))
+        rd = pd.to_datetime(_m.group(1), format="%Y%m%d", errors="coerce") if _m else pd.NaT
+        if pd.isna(rd):
+            rd = _parse_dates(pd.Series([r["transfer_date"]])).iloc[0]
+        if pd.notna(rd) and rd < od:
+            continue
+        t_net[sl] = t_net.get(sl, 0.0) + (float(r["qty"] or 0) if r["dest_factory"] == fac else -float(r["qty"] or 0))
+    rows = []
+    invd = inv.set_index("sl_no")
+    for sl, o in last.iterrows():
+        if sl not in invd.index:
+            continue
+        it = invd.loc[sl]
+        ledger = float(o["oq"]) + float(live_net.get(sl, 0.0)) + float(t_net.get(sl, 0.0))
+        diff = float(it["stock"]) - ledger
+        rows.append({"sl": int(sl), "item": it["item_name"], "size": it["size"], "code": it["prod_id"], "od": o["od"], "oq": float(o["oq"]),
+                     "stock": float(it["stock"]), "ledger": ledger, "diff": diff, "pre": int(pre_n.get(sl, 0)), "nopen": int(n_open.get(sl, 1))})
+    df = pd.DataFrame(rows)
+    meta["checked"] = len(df)
+    meta["pre_rows"] = int(pre_n.sum()) if len(pre_n) else 0
+    meta["multi_open"] = int((df["nopen"] > 1).sum()) if not df.empty else 0
+    bad = df[(df["diff"].abs() > 1e-6) | (df["pre"] > 0)].copy() if not df.empty else df
+    if not bad.empty:
+        bad["_a"] = bad["diff"].abs()
+        bad = bad.sort_values(["_a", "pre"], ascending=False).drop(columns="_a")
+    return bad, meta
+
+
+def _ia_scan():
+    st.markdown('<div class="ia-note info">এই unit-এর <b>সব item</b> একবারে মেলানো হয়: Opening + Receipt − Issue ± Transfer = stock? '
+                'যেগুলো মেলে না বা Opening-er age-r tarikh-er entry আছে সেগুলো নিচে আসবে। কোনো কিছু বদলায় না — শুধু দেখায়।</div>', unsafe_allow_html=True)
+    if is_cons_view:
+        st.warning("ওপর থেকে একটি Factory বাছুন (CONSOLIDATED-এ scan হয় না)।")
+        return
+    fac = FAC
+    if st.button("🧮 Scan চালান", type="primary", key="ia_scan_go"):
+        st.session_state["ia_scan_res"] = (fac, _ia_scan_compute(fac), local_now().strftime("%d-%b-%Y %I:%M %p"))
+    res = st.session_state.get("ia_scan_res")
+    if not res or res[0] != fac:
+        st.info("Scan চালাতে ওপরের বোতাম চাপুন।")
+        return
+    bad, meta = res[1]
+    st.caption(f"Scan করা হয়েছে: {res[2]}")
+    st.markdown('<div class="ia-kpis">'
+                f'<div class="ia-k t"><div class="l">Opening আছে এমন item</div><div class="v">{meta["checked"]:,}</div></div>'
+                f'<div class="ia-k {"a" if len(bad) else "g"}"><div class="l">হিসাব মেলেনি / সমস্যা</div><div class="v">{len(bad):,}</div></div>'
+                f'<div class="ia-k r"><div class="l">Opening-er age-r entry</div><div class="v">{meta["pre_rows"]:,}</div></div>'
+                f'<div class="ia-k x"><div class="l">একাধিক Opening-ওয়ালা item</div><div class="v">{meta["multi_open"]:,}</div></div></div>', unsafe_allow_html=True)
+    if meta["unmatched_trf"]:
+        st.caption(f"{meta['unmatched_trf']}টি transfer কোন item-এর তা নিশ্চিত মেলানো যায়নি — ওগুলো হিসাবে ধরা হয়নি।")
+    if bad.empty:
+        st.success("✅ সব item-এর হিসাব মিলছে।")
+        return
+    rows = []
+    for r in bad.head(400).to_dict("records"):
+        dcol = "ia-q-m" if r["diff"] < 0 else "ia-q-p"
+        rows.append(("ia-pre" if r["pre"] else "", [
+            _ia_e(r["item"]), _ia_e(r["size"] or "-"), _ia_e(r["code"] or "-"), str(r["sl"]),
+            f'{_ia_g(r["oq"])} <span class="ia-sm">@ {_ia_e(r["od"].strftime("%d-%b-%Y"))}</span>',
+            _ia_g(r["stock"]), _ia_g(r["ledger"]),
+            (f'<span class="{dcol}">{r["diff"]:+g}</span>' if abs(r["diff"]) > 1e-6 else '<span class="ia-sm">মিলেছে</span>'),
+            (f'<span class="ia-b r">⛔ {r["pre"]}</span>' if r["pre"] else ""), str(r["nopen"])]))
+    _ia_table(["Item", "Size", "ERP", "SL", "Opening", "Stock", "Ledger", "পার্থক্য", "Opening-er age", "#Opening"], rows, 520)
+    exp = pd.DataFrame({"SL": bad["sl"], "Item": bad["item"], "Size": bad["size"], "ERP": bad["code"], "Opening Date": bad["od"].dt.strftime("%d-%b-%Y"),
+                        "Opening Qty": bad["oq"], "Stock": bad["stock"], "Ledger": bad["ledger"], "Diff": bad["diff"],
+                        "Pre-opening rows": bad["pre"], "Openings": bad["nopen"]})
+    export_buttons(exp, "item_audit_scan")
+    st.caption("কোনো item খুলে দেখতে: ওপরের “🔎 একটি Item” ট্যাবে SL নম্বর লিখুন।")
+
+
+def _ia_fix_panel(item, an, diff_ok, gen):
+    fac, sl, stock = item["factory_name"], int(item["sl_no"]), float(item["stock"])
+    with st.expander("⚖️ Stock সংশোধন — physical গুনে সঠিক সংখ্যা বসান", expanded=not diff_ok):
+        st.caption("আগে shelf-এ গুনে নিন। এখানে সংখ্যা বসালে stock সেই সংখ্যা হবে এবং একটি Stock Adjustment transaction লেখা থাকবে "
+                   "(কে, কখন, কেন) — কোনো পুরোনো এন্ট্রি মোছে না, তাই report-এর history ঠিক থাকে।")
+        want = st.number_input("Physical stock (গুনে পাওয়া)", min_value=0.0, value=float(max(an["ledger"], 0.0)), step=1.0,
+                               key=f"ia_fix_q_{sl}_{gen}", help="ডিফল্টে ledger-এর হিসাব বসানো আছে — গুনে মিলিয়ে নিন।")
+        reason = st.text_input("কারণ (বাধ্যতামূলক)", key=f"ia_fix_r_{sl}_{gen}", placeholder="যেমন: duplicate opening / back-dated SR-এর কারণে stock ভুল ছিল")
+        st.markdown(f'<div class="ia-note info">Software stock <b>{_ia_g(stock)}</b> → <b>{_ia_g(want)}</b> ({want - stock:+g})</div>', unsafe_allow_html=True)
+        pw_ok = mgr_check(f"ia_fix_pw_{sl}_{gen}")
+        conf = confirm_box(f"ia_fix_cf_{sl}_{gen}", "⚠️ আমি shelf-এ গুনে দেখেছি — এই সংখ্যাই সঠিক।")
+        if st.button("✅ Stock ঠিক করুন", type="primary", key=f"ia_fix_go_{sl}_{gen}"):
+            if not reason.strip():
+                st.error("কারণ লিখুন।")
+            elif not pw_ok:
+                st.error("Manager password ঠিক নেই।")
+            elif not conf:
+                st.error("Confirm টিক দিন।")
+            elif abs(want - stock) < 1e-9:
+                st.warning("Stock আগে থেকেই এই সংখ্যা।")
+            elif guard() and pc_adjust_to_count(fac, sl, float(want), "ItemAudit", reason.strip()):
+                st.session_state["ia_gen"] = gen + 1
+                done(f"✅ Stock {_ia_g(stock)} → {_ia_g(want)} করা হয়েছে (Stock Adjustment হিসেবে লেখা আছে)।")
+
+
 def tab_item_audit():
     st.markdown(_IA_CSS, unsafe_allow_html=True)
     st.title("🔬 Item Audit")
     st.caption("একটা item খুঁজুন — stock কোথা থেকে এল, কোন SR-এ কত Issue হলো, কে কী করেছে সব এক জায়গায়। ভুল এন্ট্রি এখান থেকেই মুছতে পারবেন।")
+    if lazy_tab_select(["🔎 একটি Item", "🧮 সব Item scan"], "lz_ia_top") == 1:
+        _ia_scan()
+        return
     term = st.text_input("🔍 Item খুঁজুন (নাম / ERP code / serial / size / SL)", key="ia_search", placeholder="যেমন: Soap Mini").strip()
     if not term:
         st.info("ওপরের বক্সে item-এর নাম, ERP code বা SL লিখুন।")
@@ -20014,6 +20171,7 @@ def tab_item_audit():
     else:
         st.markdown('<div class="ia-note ok">✅ Opening + Receipt − Issue ± Transfer = এখনকার stock — হিসাব মিলছে।</div>', unsafe_allow_html=True)
 
+    _ia_fix_panel(item, an, diff_ok, gen)
     sec = lazy_tab_select(["🧾 Transactions", "📑 SR / Requisition", "🔁 Transfers", "🕵️ Audit trail"], "lz_ia")
     if sec == 0:
         if txa.empty:
