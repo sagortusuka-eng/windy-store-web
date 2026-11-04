@@ -14259,13 +14259,11 @@ def _tab_req_issue_body():
 
 
 def _ri_box(h):
+    """Slip items box: no fixed height / no inner scrollbar - it simply grows with every item added."""
     try:
-        return st.container(height=int(h), key="pv_list_ri")
+        return st.container(border=True, key="pv_list_ri")
     except TypeError:
-        try:
-            return st.container(height=int(h))
-        except TypeError:
-            return st.container()
+        return st.container()
 
 
 @_frag   # typing / adding rows re-runs ONLY this block - the rest of the app is not touched
