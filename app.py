@@ -13178,7 +13178,7 @@ def _ri_section_names(fac):
         return []
 
 
-def _ri_section_pick(key, fac, current=""):
+def _ri_section_pick(key, fac, current="", label="🏭 Section (কোন section-এ গেল) *"):
     """Officers only PICK from the list the Store Manager saved (nobody can type a new section here)."""
     NONE = "— Section বাছুন —"
     names = _ri_section_names(fac)
@@ -13188,7 +13188,7 @@ def _ri_section_pick(key, fac, current=""):
         st.warning("এই Unit-এর Section list এখনো সেট করা হয়নি — Store Manager আগে Section list সেভ করুন।")
         return ""
     opts = [NONE] + names
-    pick = st.selectbox("🏭 Section (কোন section-এ গেল) *", opts, index=opts.index(current) if current in opts else 0, key=key + "_s")
+    pick = st.selectbox(label, opts, index=opts.index(current) if current in opts else 0, key=key + "_s")
     return "" if pick == NONE else pick
 
 
@@ -13218,7 +13218,7 @@ def _ri_section_manager():
     if st.session_state.get("role") != "Store Manager":
         return
     fac = FAC
-    with st.expander(f"⚙️ Section list — {fac} (শুধু Store Manager)"):
+    with st.expander(f"⚙️ Section list · {fac}"):
         have = _ri_section_names(fac)
         st.caption("এই Unit-এর Section: " + (", ".join(have) if have else "এখনো কিছু নেই"))
         txt = st.text_area("নতুন Section লিখুন (প্রতি লাইনে একটি)", key="rism_txt", height=110, placeholder="Cutting\nSewing\nFinishing")
@@ -13902,48 +13902,52 @@ def _ri_sr_center():
         _ri_item_trail_ui(fac, _pairs, key="srt")
 
 
-_RI_PREMIUM_CSS = """<style>
-.st-key-ri_premium{--p-teal:#0F766E;--p-navy:#102238;--p-ink:#172033;--p-line:#E2E8F0;--p-soft:#F6F9FC;}
-.st-key-ri_premium .ri-hero{background:linear-gradient(120deg,#102238 0%,#133a4a 55%,#0F766E 120%);color:#fff;border-radius:18px;padding:18px 22px;margin:2px 0 14px;display:flex;align-items:center;gap:14px;box-shadow:0 10px 28px rgba(16,34,56,.22);}
-.st-key-ri_premium .ri-hero .ri-ico{width:46px;height:46px;border-radius:13px;background:rgba(255,255,255,.14);display:flex;align-items:center;justify-content:center;font-size:24px;flex:0 0 auto;}
-.st-key-ri_premium .ri-hero .ri-t{font-size:20px;font-weight:800;letter-spacing:-.01em;line-height:1.2;}
-.st-key-ri_premium .ri-hero .ri-s{font-size:12.5px;opacity:.78;margin-top:3px;}
-.st-key-ri_premium .ri-hero .ri-fac{margin-left:auto;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.25);border-radius:999px;padding:5px 13px;font-size:12px;font-weight:700;white-space:nowrap;}
-/* mode switch = segmented pills */
-.st-key-ri_premium div[data-testid="stRadio"] > div[role="radiogroup"]{gap:6px;background:#EEF3F8;border:1px solid var(--p-line);padding:5px;border-radius:14px;display:flex;flex-wrap:wrap;}
-.st-key-ri_premium div[data-testid="stRadio"] label[data-baseweb="radio"]{margin:0;padding:9px 16px;border-radius:10px;cursor:pointer;transition:all .15s ease;flex:1 1 auto;justify-content:center;background:transparent;}
-.st-key-ri_premium div[data-testid="stRadio"] label[data-baseweb="radio"] > div:first-child{display:none !important;}
-.st-key-ri_premium div[data-testid="stRadio"] label[data-baseweb="radio"] p{font-weight:650;font-size:13.5px;color:#475569;margin:0;}
-.st-key-ri_premium div[data-testid="stRadio"] label[data-baseweb="radio"]:hover{background:rgba(255,255,255,.7);}
-.st-key-ri_premium div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked){background:#fff;box-shadow:0 2px 8px rgba(16,34,56,.12),inset 0 -2px 0 var(--p-teal);}
-.st-key-ri_premium div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p{color:var(--p-navy);font-weight:800;}
-.st-key-ri_premium div[data-testid="stRadio"] ::selection{background:transparent;}
-/* inputs */
-.st-key-ri_premium div[data-baseweb="input"],.st-key-ri_premium div[data-baseweb="select"] > div,.st-key-ri_premium div[data-baseweb="textarea"]{border-radius:11px !important;border:1px solid #D5DFEA !important;background:#fff !important;box-shadow:0 1px 2px rgba(16,34,56,.04);transition:border-color .15s,box-shadow .15s;}
-.st-key-ri_premium div[data-baseweb="input"]:focus-within,.st-key-ri_premium div[data-baseweb="select"] > div:focus-within,.st-key-ri_premium div[data-baseweb="textarea"]:focus-within{border-color:var(--p-teal) !important;box-shadow:0 0 0 3px rgba(15,118,110,.15) !important;}
-.st-key-ri_premium label[data-testid="stWidgetLabel"] p{font-size:12px;font-weight:700;color:#475569;letter-spacing:.02em;text-transform:uppercase;}
-/* cards */
-.st-key-ri_premium div[data-testid="stVerticalBlockBorderWrapper"]{border-radius:16px !important;border:1px solid var(--p-line) !important;background:#fff;box-shadow:0 4px 18px rgba(16,34,56,.06);}
-.st-key-ri_premium div[data-testid="stExpander"]{border:1px solid var(--p-line) !important;border-radius:14px !important;background:#fff;box-shadow:0 2px 10px rgba(16,34,56,.05);overflow:hidden;}
-.st-key-ri_premium div[data-testid="stExpander"] summary{font-weight:700;color:var(--p-navy);background:var(--p-soft);}
-.st-key-ri_premium div[data-testid="stExpander"] summary:hover{background:#EEF6F5;}
-/* buttons */
-.st-key-ri_premium button[kind="primary"]{background:linear-gradient(135deg,#0F766E,#087E8B) !important;border:0 !important;color:#fff !important;border-radius:11px !important;font-weight:750 !important;box-shadow:0 6px 16px rgba(15,118,110,.28);transition:transform .12s,box-shadow .12s;}
-.st-key-ri_premium button[kind="primary"]:hover{transform:translateY(-1px);box-shadow:0 10px 22px rgba(15,118,110,.34);}
-.st-key-ri_premium button[kind="secondary"]{border-radius:11px !important;border:1px solid #D5DFEA !important;background:#fff !important;color:var(--p-navy) !important;font-weight:650 !important;}
-.st-key-ri_premium button[kind="secondary"]:hover{border-color:var(--p-teal) !important;color:var(--p-teal) !important;background:#F0FAF8 !important;}
-/* alerts */
-.st-key-ri_premium div[data-testid="stAlert"]{border-radius:13px;border:1px solid var(--p-line);box-shadow:0 2px 8px rgba(16,34,56,.04);}
-.st-key-ri_premium div[data-testid="stCaptionContainer"]{color:#64748B;}
-.st-key-ri_premium div[data-testid="stDataFrame"]{border-radius:13px;overflow:hidden;border:1px solid var(--p-line);}
-@media (max-width:640px){.st-key-ri_premium .ri-hero{padding:14px;flex-wrap:wrap}.st-key-ri_premium .ri-hero .ri-fac{margin-left:0}}
+_RI_PREM_CSS = """<style>
+/* ===== Requisition Issue / Supplier Receipt - premium skin (only these two modes) ===== */
+.st-key-ri_mode div[role="radiogroup"]{display:flex!important;flex-wrap:wrap!important;gap:6px!important;padding:5px!important;background:#EEF3F8;border:1px solid #DDE6EF;border-radius:15px;width:fit-content;max-width:100%}
+.st-key-ri_mode label[data-baseweb="radio"]{background:transparent!important;border:0!important;border-radius:11px!important;padding:8px 16px!important;margin:0!important;cursor:pointer;transition:all .18s ease}
+.st-key-ri_mode label[data-baseweb="radio"]>div:first-child:not(:has(p)),.st-key-ri_mode label[data-baseweb="radio"]>span:first-child:not(:has(p)){display:none!important}
+.st-key-ri_mode label[data-baseweb="radio"] p{font-size:13px!important;font-weight:700!important;color:#475569!important;margin:0!important;white-space:nowrap}
+.st-key-ri_mode label[data-baseweb="radio"]:hover{background:#fff!important}
+.st-key-ri_mode label[data-baseweb="radio"]:has(input:checked){background:linear-gradient(135deg,#0F766E,#0B5D56)!important;box-shadow:0 5px 14px rgba(15,118,110,.35)}
+.st-key-ri_mode label[data-baseweb="radio"]:has(input:checked) p{color:#fff!important}
+
+.st-key-ri_prem [data-testid="stVerticalBlock"]{gap:.55rem}
+.st-key-ri_prem div[data-testid="stVerticalBlockBorderWrapper"]{border:1px solid #DDE6EF!important;border-radius:16px!important;background:linear-gradient(180deg,#FFFFFF 0%,#F9FBFD 100%);box-shadow:0 1px 2px rgba(15,23,42,.04),0 10px 28px rgba(15,23,42,.05);padding:.8rem 1rem .9rem}
+.st-key-ri_prem div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stVerticalBlockBorderWrapper"]{box-shadow:none;background:#F8FAFC;border-radius:12px!important;padding:.4rem .6rem}
+.ri-sec{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:#0F766E;margin:0 0 2px}
+.ri-sec:before{content:"";width:4px;height:14px;border-radius:3px;background:linear-gradient(#2DD4BF,#0F766E)}
+.ri-sec span{margin-left:auto;background:#E6F6F4;color:#0F766E;border-radius:999px;padding:2px 11px;font-size:11px;letter-spacing:0;font-weight:800}
+
+.st-key-ri_prem label[data-testid="stWidgetLabel"] p{font-size:11px!important;font-weight:700!important;letter-spacing:.02em;color:#475569!important;margin:0 0 1px!important}
+.st-key-ri_prem [data-baseweb="select"]>div,.st-key-ri_prem [data-baseweb="input"],.st-key-ri_prem [data-testid="stDateInput"] [data-baseweb="input"]{background:#F8FAFC!important;border:1px solid #D5DFEA!important;border-radius:10px!important;min-height:38px;transition:border-color .15s,box-shadow .15s,background .15s}
+.st-key-ri_prem [data-baseweb="input"] [data-baseweb="base-input"],.st-key-ri_prem [data-baseweb="input"] input{background:transparent!important}
+.st-key-ri_prem [data-baseweb="select"]>div:hover,.st-key-ri_prem [data-baseweb="input"]:hover{border-color:#5EBDB4!important;background:#fff!important}
+.st-key-ri_prem [data-baseweb="select"]>div:focus-within,.st-key-ri_prem [data-baseweb="input"]:focus-within{border-color:#0F766E!important;background:#fff!important;box-shadow:0 0 0 3px rgba(15,118,110,.13)!important}
+.st-key-ri_prem [data-baseweb="select"] div,.st-key-ri_prem input{font-size:13px}
+
+.st-key-ri_prem button[kind="primary"],.st-key-ri_prem button[data-testid="stBaseButton-primary"]{background:linear-gradient(135deg,#0F766E,#0B5D56)!important;border:0!important;color:#fff!important;border-radius:11px!important;font-weight:750!important;min-height:40px;box-shadow:0 6px 16px rgba(15,118,110,.30);transition:transform .15s,box-shadow .15s}
+.st-key-ri_prem button[kind="primary"]:hover,.st-key-ri_prem button[data-testid="stBaseButton-primary"]:hover{transform:translateY(-1px);box-shadow:0 10px 24px rgba(15,118,110,.40)}
+.st-key-ri_prem button[kind="secondary"],.st-key-ri_prem button[data-testid="stBaseButton-secondary"]{background:#fff!important;border:1px solid #BFE0DB!important;color:#0F766E!important;border-radius:10px!important;font-weight:700!important;min-height:38px;transition:all .15s}
+.st-key-ri_prem button[kind="secondary"]:hover,.st-key-ri_prem button[data-testid="stBaseButton-secondary"]:hover{background:#F0FDFA!important;border-color:#0F766E!important}
+
+.st-key-ri_prem div[data-testid="stAlert"]{border-radius:12px!important;padding:.15rem .25rem!important}
+.st-key-ri_prem div[data-testid="stAlert"] p{font-size:12.5px!important;margin:0!important}
+.st-key-ri_prem div[data-testid="stCaptionContainer"],.st-key-ri_prem div[data-testid="stCaptionContainer"] p{color:#64748B!important;font-size:11.5px!important}
+
+.st-key-ri_prem div[data-testid="stExpander"]{border:1px solid #DDE6EF!important;border-radius:14px!important;background:#fff;box-shadow:0 4px 14px rgba(15,23,42,.04);overflow:hidden}
+.st-key-ri_prem div[data-testid="stExpander"] summary{padding:.4rem .9rem!important;transition:background .15s}
+.st-key-ri_prem div[data-testid="stExpander"] summary:hover{background:#F0FDFA}
+.st-key-ri_prem div[data-testid="stExpander"] summary p{font-size:12.5px!important;font-weight:700!important;color:#0F172A}
 </style>"""
 
 
 def tab_req_issue():
-    st.markdown(_RI_PREMIUM_CSS, unsafe_allow_html=True)
+    st.markdown(_RI_PREM_CSS, unsafe_allow_html=True)
+    _m = str(st.session_state.get("ri_mode") or "")
+    _k = "ri_prem" if (not _m or _m.startswith("📤") or _m.startswith("📥")) else "ri_plain"   # premium skin only for Issue + Receipt
     try:
-        _box = st.container(key="ri_premium")
+        _box = st.container(key=_k)
     except TypeError:
         _box = st.container()
     with _box:
@@ -13951,16 +13955,7 @@ def tab_req_issue():
 
 
 def _tab_req_issue_body():
-    try:
-        _fac_lbl = html_lib.escape(str(FAC))
-    except Exception:
-        _fac_lbl = ""
-    st.markdown(
-        '<div class="ri-hero"><div class="ri-ico">🧾</div><div>'
-        '<div class="ri-t">Requisition Issue &amp; Supplier Receipt</div>'
-        '<div class="ri-s">Store issue, challan receipt ও pending — এক জায়গায়</div></div>'
-        + (f'<div class="ri-fac">📍 {_fac_lbl}</div>' if _fac_lbl else '') + '</div>',
-        unsafe_allow_html=True)
+    st.markdown("#### 🧾 Requisition Issue & Supplier Receipt")
     if is_cons_view:
         st.info("ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ ইস্যু/রিসিভ করা যায় না)।")
         return
@@ -13994,7 +13989,7 @@ def _tab_req_issue_body():
     if mode.startswith("📤") or mode.startswith("📥"):
         _np = _ri_pending_count(FAC)
         if _np:
-            st.warning(f"⏳ {_np} ti item stock nei bole Pending Issue-te ache — stock ashle '⏳ Pending Issue' option theke issue korun.")
+            st.warning(f"⏳ {_np} item Pending Issue-te ache — stock ashle '⏳ Pending Issue' theke issue korun.")
     if mode.startswith("🕵️"):
         if st.session_state.get("role") not in IW_VIEW_ROLES:
             st.error("Ei tab shudhu Store Manager / Executive dekhte pare.")
@@ -14018,14 +14013,13 @@ def _tab_req_issue_body():
         _uom_adder("rip")
         return
     if mode.startswith("📥"):
-        st.caption(f"📍 Ei receipt **{FAC}**-e save hobe · Ek challan-er shob item (sorbocho {RR_MAX_LINES} ti) ek sathe · "
-                   "Supplier ar Challan No. bad-dhomulok · Dekhben: 🔍 ERP Audit → 📥 Product Received.")
+        st.caption(f"📍 **{FAC}**-e save hobe · ek challan-e max {RR_MAX_LINES} item · Supplier ar Challan No. must · 🔍 ERP Audit → 📥 Product Received.")
         _rr_form()
         _rr_fix_panel()
     else:
         _ri_form()
         _ri_fix_panel()
-        st.caption(f"ℹ️ এক SR-এ সর্বোচ্চ {RI_MAX_LINES}টি আইটেম · SR নম্বর ও Section বাধ্যতামূলক · স্টক কম হলে অন্য Unit থেকে অটো-ট্রান্সফার (নিশ্চিত করলে); না হলে কিছুই সংরক্ষণ হয় না।")
+        st.caption(f"ℹ️ এক SR-এ সর্বোচ্চ {RI_MAX_LINES}টি আইটেম · SR নম্বর ও Section বাধ্যতামূলক · স্টক কম হলে অন্য Unit থেকে অটো-ট্রান্সফার।")
     _uom_adder("ri")
     if is_mgr:                      # Store Manager only - officers never see these two
         if not mode.startswith("📥"):
@@ -14045,97 +14039,101 @@ def _ri_form():
     fac = FAC
     gen = st.session_state.get("ri_gen", 0)
     lines = st.session_state.setdefault("ri_lines", [])
-    c1, c2, c3, c4 = st.columns([1, 1, 1.1, 1.3])
-    sr_no = c1.text_input("Requisition No. (SR No.) *", key=f"ri_sr_{gen}", placeholder="e.g. 1745").strip()
-    tx_date = c2.date_input("তারিখ", value=date.today(), max_value=date.today(), key="ri_date")
-    ttype = c3.selectbox("ধরন", list(ISSUE_TYPES), format_func=lambda c: TRANS_LABELS.get(c, c), key="ri_type")
-    with c4:
-        section = _ri_section_pick(f"ri_sec_{gen}", fac)
-    notes = ""
-    confirm_existing = True
-    if sr_no:
-        used = q_c("SELECT COUNT(*) AS n FROM transactions WHERE factory_name=%s AND req_no=%s", (fac, sr_no))
-        n_used = int(used[0]["n"]) if used else 0
-        if n_used:
-            st.warning(f"⚠️ SR {sr_no} এই Unit-এ আগেই ব্যবহার হয়েছে ({n_used}টি লাইন)। একই স্লিপে আরও আইটেম যোগ করছেন তো?")
-            confirm_existing = st.checkbox(f"হ্যাঁ, SR {sr_no}-তে আরও আইটেম যোগ করছি", key=f"ri_conf_{gen}")
+    with st.container(border=True):
+        st.markdown('<div class="ri-sec">Slip details</div>', unsafe_allow_html=True)
+        c1, c2, c3, c4 = st.columns([1, 1, 1.1, 1.3])
+        sr_no = c1.text_input("SR No. *", key=f"ri_sr_{gen}", placeholder="e.g. 1745").strip()
+        tx_date = c2.date_input("তারিখ", value=date.today(), max_value=date.today(), key="ri_date")
+        ttype = c3.selectbox("ধরন", list(ISSUE_TYPES), format_func=lambda c: TRANS_LABELS.get(c, c), key="ri_type")
+        with c4:
+            section = _ri_section_pick(f"ri_sec_{gen}", fac, label="🏭 Section *")
+        notes = ""
+        confirm_existing = True
+        if sr_no:
+            used = q_c("SELECT COUNT(*) AS n FROM transactions WHERE factory_name=%s AND req_no=%s", (fac, sr_no))
+            n_used = int(used[0]["n"]) if used else 0
+            if n_used:
+                st.warning(f"⚠️ SR {sr_no} এই Unit-এ আগেই ব্যবহার হয়েছে ({n_used}টি লাইন)। একই স্লিপে আরও আইটেম যোগ করছেন তো?")
+                confirm_existing = st.checkbox(f"হ্যাঁ, SR {sr_no}-তে আরও আইটেম যোগ করছি", key=f"ri_conf_{gen}")
 
     # ---- add one item
     # Category first: pick one and the item box below lists every item of that category (click the box and the list opens;
     # type in it to narrow down). "সব Category" keeps the old behaviour: type a name / code in the search box.
-    ALL_CAT = "সব Category"
-    cat_rows = q_c("""SELECT DISTINCT COALESCE(NULLIF(TRIM(category),''),'(Category নেই)') AS c FROM inventory
-                      WHERE factory_name=%s ORDER BY 1""", (fac,))
-    a0, a1, a2, a3, a4 = st.columns([1.2, 1.5, 2.6, 0.8, 0.9])
-    cat_sel = a0.selectbox("📂 Category", [ALL_CAT] + [r["c"] for r in cat_rows], key=f"ri_cat_{gen}")
-    term = a1.text_input("🔍 খুঁজুন (নাম / code / size)", key=f"ri_search_{gen}",
-                         help="Category বাছলে নাম না লিখেও ডানের ‘আইটেম’ বক্সে ওই Category-র সব আইটেম দেখা যাবে; লিখলে তালিকা ছোট হবে।").strip()
-    if cat_sel != ALL_CAT:
-        like = f"%{term.lower()}%"
-        cand_rows = q_c(f"""SELECT {INV_COLS} FROM inventory
-                            WHERE factory_name=%s AND COALESCE(NULLIF(TRIM(category),''),'(Category নেই)')=%s
-                              AND (%s='' OR LOWER(item_name) LIKE %s OR LOWER(COALESCE(size,'')) LIKE %s OR LOWER(prod_id) LIKE %s
-                                   OR LOWER(COALESCE(serial_no,'')) LIKE %s OR CAST(sl_no AS TEXT)=%s)
-                            ORDER BY item_name, size LIMIT 400""", (fac, cat_sel, term, like, like, like, like, term))
-        cands = cand_rows
-    else:
-        cands = search_items(fac, term)[:30] if len(term) >= 2 else []
-    labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · স্টক {float(r['stock']):g}": r for r in cands}
-    pick = a2.selectbox(f"আইটেম ({len(labels)}টি)" if labels else "আইটেম", list(labels) if labels else ["— আগে Category বা নাম খুঁজুন —"],
-                        key=f"ri_pick_{gen}")
-    qty_in = a3.number_input("পরিমাণ", min_value=0.0, step=1.0, format="%g", key=f"ri_qty_{gen}")
-    try:      # Skip Watch: officer has an out-of-stock item in front of him (typed a search / chose it himself)
-        if pick in labels and st.session_state.get("user") and st.session_state.get("role") not in READ_ONLY_ROLES:
-            _rr = labels[pick]
-            if (bool(term) or (cat_sel != ALL_CAT and pick != list(labels)[0])) and float(_rr["stock"] or 0) <= 0:
-                _iw_seen(fac, gen, _rr, term, sr_no)
-    except Exception:
-        pass
-
-    def _add():
-        pick_v = st.session_state.get(f"ri_pick_{gen}")
-        qty_v = float(st.session_state.get(f"ri_qty_{gen}") or 0)
-        date_v = st.session_state.get("ri_date", date.today())
-        if not labels or pick_v not in labels:
-            st.session_state["ri_msg"] = ("error", "আগে আইটেম খুঁজে বাছুন।")
-            return
-        r = labels[pick_v]
-        cur = st.session_state.get("ri_lines", [])
-        if len(cur) >= RI_MAX_LINES:
-            st.session_state["ri_msg"] = ("error", f"একটা স্লিপে সর্বোচ্চ {RI_MAX_LINES}টি আইটেম।")
-        elif any(int(x["sl"]) == int(r["sl_no"]) for x in cur):
-            st.session_state["ri_msg"] = ("error", "এই আইটেম তালিকায় আগেই আছে — পরিমাণ নিচে বদলান।")
-        elif qty_v <= 0:
-            st.session_state["ri_msg"] = ("error", "পরিমাণ ০-র বেশি দিন।")
+    with st.container(border=True):
+        st.markdown('<div class="ri-sec">Add item</div>', unsafe_allow_html=True)
+        ALL_CAT = "সব Category"
+        cat_rows = q_c("""SELECT DISTINCT COALESCE(NULLIF(TRIM(category),''),'(Category নেই)') AS c FROM inventory
+                          WHERE factory_name=%s ORDER BY 1""", (fac,))
+        a0, a1, a2, a3, a4 = st.columns([1.2, 1.5, 2.6, 0.8, 0.9])
+        cat_sel = a0.selectbox("📂 Category", [ALL_CAT] + [r["c"] for r in cat_rows], key=f"ri_cat_{gen}")
+        term = a1.text_input("🔍 খুঁজুন (নাম / code / size)", key=f"ri_search_{gen}",
+                             help="Category বাছলে নাম না লিখেও ডানের ‘আইটেম’ বক্সে ওই Category-র সব আইটেম দেখা যাবে; লিখলে তালিকা ছোট হবে।").strip()
+        if cat_sel != ALL_CAT:
+            like = f"%{term.lower()}%"
+            cand_rows = q_c(f"""SELECT {INV_COLS} FROM inventory
+                                WHERE factory_name=%s AND COALESCE(NULLIF(TRIM(category),''),'(Category নেই)')=%s
+                                  AND (%s='' OR LOWER(item_name) LIKE %s OR LOWER(COALESCE(size,'')) LIKE %s OR LOWER(prod_id) LIKE %s
+                                       OR LOWER(COALESCE(serial_no,'')) LIKE %s OR CAST(sl_no AS TEXT)=%s)
+                                ORDER BY item_name, size LIMIT 400""", (fac, cat_sel, term, like, like, like, like, term))
+            cands = cand_rows
         else:
-            try:
-                need, days = verification_needed(fac, r["sl_no"], date_v)
-            except Exception:
-                need, days = False, 0
-            try:
-                _ur = q("SELECT COALESCE(NULLIF(TRIM(unit_name),''),'Pcs') AS u FROM inventory WHERE factory_name=%s AND sl_no=%s",
-                        (fac, int(r["sl_no"])))
-                unit_v = _ur[0]["u"] if _ur else "Pcs"
-            except Exception:
-                unit_v = "Pcs"
-            cur.append({"sl": int(r["sl_no"]), "pid": r["prod_id"], "name": r["item_name"], "size": r["size"], "unit": unit_v,
-                        "stock": float(r["stock"]), "price": float(r.get("price") or 0), "need": bool(need), "days": int(days), "vdate": date_v})
-            st.session_state[f"ri_r_{gen}_{int(r['sl_no'])}"] = 0.0
-            st.session_state[f"ri_u_{gen}_{int(r['sl_no'])}"] = unit_v
-            st.session_state[f"ri_q_{gen}_{int(r['sl_no'])}"] = qty_v
-            st.session_state["ri_lines"] = cur
-            st.session_state[f"ri_search_{gen}"] = ""
-            st.session_state[f"ri_qty_{gen}"] = 0.0
-            st.session_state["ri_msg"] = ("ok", f"যোগ হয়েছে: {r['item_name']}")
-            _iw_added(fac, gen, r, qty_v, st.session_state.get(f"ri_sr_{gen}", ""))
-    a4.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
-    a4.button("➕ যোগ করুন", key=f"ri_add_{gen}", on_click=_add, use_container_width=True)
-    msg = st.session_state.pop("ri_msg", None)
-    if msg:
-        (st.error if msg[0] == "error" else st.caption)(msg[1])
+            cands = search_items(fac, term)[:30] if len(term) >= 2 else []
+        labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · স্টক {float(r['stock']):g}": r for r in cands}
+        pick = a2.selectbox(f"আইটেম ({len(labels)}টি)" if labels else "আইটেম", list(labels) if labels else ["— আগে Category বা নাম খুঁজুন —"],
+                            key=f"ri_pick_{gen}")
+        qty_in = a3.number_input("পরিমাণ", min_value=0.0, step=1.0, format="%g", key=f"ri_qty_{gen}")
+        try:      # Skip Watch: officer has an out-of-stock item in front of him (typed a search / chose it himself)
+            if pick in labels and st.session_state.get("user") and st.session_state.get("role") not in READ_ONLY_ROLES:
+                _rr = labels[pick]
+                if (bool(term) or (cat_sel != ALL_CAT and pick != list(labels)[0])) and float(_rr["stock"] or 0) <= 0:
+                    _iw_seen(fac, gen, _rr, term, sr_no)
+        except Exception:
+            pass
+
+        def _add():
+            pick_v = st.session_state.get(f"ri_pick_{gen}")
+            qty_v = float(st.session_state.get(f"ri_qty_{gen}") or 0)
+            date_v = st.session_state.get("ri_date", date.today())
+            if not labels or pick_v not in labels:
+                st.session_state["ri_msg"] = ("error", "আগে আইটেম খুঁজে বাছুন।")
+                return
+            r = labels[pick_v]
+            cur = st.session_state.get("ri_lines", [])
+            if len(cur) >= RI_MAX_LINES:
+                st.session_state["ri_msg"] = ("error", f"একটা স্লিপে সর্বোচ্চ {RI_MAX_LINES}টি আইটেম।")
+            elif any(int(x["sl"]) == int(r["sl_no"]) for x in cur):
+                st.session_state["ri_msg"] = ("error", "এই আইটেম তালিকায় আগেই আছে — পরিমাণ নিচে বদলান।")
+            elif qty_v <= 0:
+                st.session_state["ri_msg"] = ("error", "পরিমাণ ০-র বেশি দিন।")
+            else:
+                try:
+                    need, days = verification_needed(fac, r["sl_no"], date_v)
+                except Exception:
+                    need, days = False, 0
+                try:
+                    _ur = q("SELECT COALESCE(NULLIF(TRIM(unit_name),''),'Pcs') AS u FROM inventory WHERE factory_name=%s AND sl_no=%s",
+                            (fac, int(r["sl_no"])))
+                    unit_v = _ur[0]["u"] if _ur else "Pcs"
+                except Exception:
+                    unit_v = "Pcs"
+                cur.append({"sl": int(r["sl_no"]), "pid": r["prod_id"], "name": r["item_name"], "size": r["size"], "unit": unit_v,
+                            "stock": float(r["stock"]), "price": float(r.get("price") or 0), "need": bool(need), "days": int(days), "vdate": date_v})
+                st.session_state[f"ri_r_{gen}_{int(r['sl_no'])}"] = 0.0
+                st.session_state[f"ri_u_{gen}_{int(r['sl_no'])}"] = unit_v
+                st.session_state[f"ri_q_{gen}_{int(r['sl_no'])}"] = qty_v
+                st.session_state["ri_lines"] = cur
+                st.session_state[f"ri_search_{gen}"] = ""
+                st.session_state[f"ri_qty_{gen}"] = 0.0
+                st.session_state["ri_msg"] = ("ok", f"যোগ হয়েছে: {r['item_name']}")
+                _iw_added(fac, gen, r, qty_v, st.session_state.get(f"ri_sr_{gen}", ""))
+        a4.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
+        a4.button("➕ যোগ করুন", key=f"ri_add_{gen}", on_click=_add, use_container_width=True)
+        msg = st.session_state.pop("ri_msg", None)
+        if msg:
+            (st.error if msg[0] == "error" else st.caption)(msg[1])
 
     # ---- the list
-    st.markdown(f"**📋 এই স্লিপের আইটেম ({len(lines)}/{RI_MAX_LINES})**")
+    st.markdown(f'<div class="ri-sec">Slip items <span>{len(lines)}/{RI_MAX_LINES}</span></div>', unsafe_allow_html=True)
     if not lines:
         st.caption("এখনো কোনো আইটেম যোগ হয়নি।")
         return
@@ -14366,84 +14364,88 @@ def _rr_form():
                     WHERE factory_name=%s AND trans_type='Supplier. Rec' AND COALESCE(supplier_name,'')<>''
                     GROUP BY supplier_name ORDER BY m DESC LIMIT 40""", (fac,))
     NEW_SUP = "✍️ Notun supplier (nam likhun)"
-    c1, c2, c3 = st.columns([1.5, 1.2, 1])
-    pick_sup = c1.selectbox("Supplier *", [NEW_SUP] + [r["s"] for r in recent], key=f"rr_sup_pick_{gen}")
-    supplier = c1.text_input("Supplier-er nam", key=f"rr_sup_new_{gen}").strip() if pick_sup == NEW_SUP else pick_sup
-    challan = c2.text_input("Challan No. *", key=f"rr_challan_{gen}", placeholder="Supplier challan number").strip()
-    tx_date = c3.date_input("তারিখ", value=date.today(), max_value=date.today(), key="rr_date")
-    notes = st.text_input("Remarks (ঐচ্ছিক — যেমন PO No., গাড়ির নম্বর)", key=f"rr_notes_{gen}")
+    with st.container(border=True):
+        st.markdown('<div class="ri-sec">Challan details</div>', unsafe_allow_html=True)
+        c1, c2, c3 = st.columns([1.5, 1.2, 1])
+        pick_sup = c1.selectbox("Supplier *", [NEW_SUP] + [r["s"] for r in recent], key=f"rr_sup_pick_{gen}")
+        supplier = c1.text_input("Supplier-er nam", key=f"rr_sup_new_{gen}").strip() if pick_sup == NEW_SUP else pick_sup
+        challan = c2.text_input("Challan No. *", key=f"rr_challan_{gen}", placeholder="Supplier challan number").strip()
+        tx_date = c3.date_input("তারিখ", value=date.today(), max_value=date.today(), key="rr_date")
+        notes = st.text_input("Remarks (PO No. / গাড়ি নং — ঐচ্ছিক)", key=f"rr_notes_{gen}")
 
-    done_sl, confirm_existing = set(), True
-    if challan and supplier:
-        prior = q_c("""SELECT sl_no FROM transactions WHERE factory_name=%s AND trans_type='Supplier. Rec'
-                       AND challan_no=%s AND COALESCE(supplier_name,'')=%s""", (fac, challan, supplier))
-        done_sl = {int(r["sl_no"]) for r in prior}
-        if done_sl:
-            st.warning(f"⚠️ Challan {challan} ({supplier}) theke ei Unit-e ager-i {len(done_sl)} ti line receive kora hoyeche. "
-                       "Ekoi challan-er baki item jog korchen to? Same item duibar receive hole stock duibar barbe.")
-            confirm_existing = st.checkbox(f"Haan, Challan {challan}-e aro item receive korchi", key=f"rr_conf_{gen}")
+        done_sl, confirm_existing = set(), True
+        if challan and supplier:
+            prior = q_c("""SELECT sl_no FROM transactions WHERE factory_name=%s AND trans_type='Supplier. Rec'
+                           AND challan_no=%s AND COALESCE(supplier_name,'')=%s""", (fac, challan, supplier))
+            done_sl = {int(r["sl_no"]) for r in prior}
+            if done_sl:
+                st.warning(f"⚠️ Challan {challan} ({supplier}) theke ei Unit-e ager-i {len(done_sl)} ti line receive kora hoyeche. "
+                           "Ekoi challan-er baki item jog korchen to? Same item duibar receive hole stock duibar barbe.")
+                confirm_existing = st.checkbox(f"Haan, Challan {challan}-e aro item receive korchi", key=f"rr_conf_{gen}")
 
     # ---- add one item
-    st.markdown("**➕ আইটেম যোগ করুন**")
-    ALL_CAT = "সব Category"
-    cat_rows = q_c("""SELECT DISTINCT COALESCE(NULLIF(TRIM(category),''),'(Category নেই)') AS c FROM inventory
-                      WHERE factory_name=%s ORDER BY 1""", (fac,))
-    cat_sel = st.selectbox("📂 Category", [ALL_CAT] + [r["c"] for r in cat_rows], key=f"rr_cat_{gen}")
-    a1, a2, a3, a4 = st.columns([2.0, 2.3, 0.9, 1.1])
-    term = a1.text_input("🔍 খুঁজুন (নাম / ERP code / size / serial)", key=f"rr_search_{gen}").strip()
-    if cat_sel != ALL_CAT:
-        like = f"%{term.lower()}%"
-        cands = q_c(f"""SELECT {INV_COLS} FROM inventory
-                        WHERE factory_name=%s AND COALESCE(NULLIF(TRIM(category),''),'(Category নেই)')=%s
-                          AND (%s='' OR LOWER(item_name) LIKE %s OR LOWER(COALESCE(size,'')) LIKE %s OR LOWER(prod_id) LIKE %s
-                               OR LOWER(COALESCE(serial_no,'')) LIKE %s OR CAST(sl_no AS TEXT)=%s)
-                        ORDER BY item_name, size LIMIT 400""", (fac, cat_sel, term, like, like, like, like, term))
-    else:
-        cands = search_items(fac, term)[:30] if len(term) >= 2 else []
-    labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · স্টক {float(r['stock']):g}": r for r in cands}
-    pick = a2.selectbox(f"আইটেম ({len(labels)}টি)" if labels else "আইটেম", list(labels) if labels else ["— আগে Category বা নাম খুঁজুন —"],
-                        key=f"rr_pick_{gen}")
-    a3.number_input("পরিমাণ", min_value=0.0, step=1.0, format="%g", key=f"rr_qty_{gen}")
-    a4.number_input("Rate (৳)", min_value=0.0, step=1.0, format="%g", key=f"rr_rate_{gen}",
-                    help="Purchase rate (ঐচ্ছিক). 0 রাখলে Unit Price বদলাবে না।")
-
-    def _add():
-        pick_v = st.session_state.get(f"rr_pick_{gen}")
-        qty_v = float(st.session_state.get(f"rr_qty_{gen}") or 0)
-        rate_v = float(st.session_state.get(f"rr_rate_{gen}") or 0)
-        if not labels or pick_v not in labels:
-            st.session_state["rr_msg"] = ("error", "আগে আইটেম খুঁজে বাছুন।")
-            return
-        r = labels[pick_v]
-        cur = st.session_state.get("rr_lines", [])
-        if len(cur) >= RR_MAX_LINES:
-            st.session_state["rr_msg"] = ("error", f"একটা challan-এ সর্বোচ্চ {RR_MAX_LINES}টি আইটেম।")
-        elif any(int(x["sl"]) == int(r["sl_no"]) for x in cur):
-            st.session_state["rr_msg"] = ("error", "এই আইটেম তালিকায় আগেই আছে — পরিমাণ নিচে বদলান।")
-        elif qty_v <= 0:
-            st.session_state["rr_msg"] = ("error", "পরিমাণ ০-র বেশি দিন।")
+    with st.container(border=True):
+        st.markdown('<div class="ri-sec">Add item</div>', unsafe_allow_html=True)
+        ALL_CAT = "সব Category"
+        cat_rows = q_c("""SELECT DISTINCT COALESCE(NULLIF(TRIM(category),''),'(Category নেই)') AS c FROM inventory
+                          WHERE factory_name=%s ORDER BY 1""", (fac,))
+        a0, a1, a2, a3, a4, a5 = st.columns([1.2, 1.5, 2.4, 0.8, 0.9, 1.0])
+        cat_sel = a0.selectbox("📂 Category", [ALL_CAT] + [r["c"] for r in cat_rows], key=f"rr_cat_{gen}")
+        term = a1.text_input("🔍 খুঁজুন (নাম / code / size)", key=f"rr_search_{gen}").strip()
+        if cat_sel != ALL_CAT:
+            like = f"%{term.lower()}%"
+            cands = q_c(f"""SELECT {INV_COLS} FROM inventory
+                            WHERE factory_name=%s AND COALESCE(NULLIF(TRIM(category),''),'(Category নেই)')=%s
+                              AND (%s='' OR LOWER(item_name) LIKE %s OR LOWER(COALESCE(size,'')) LIKE %s OR LOWER(prod_id) LIKE %s
+                                   OR LOWER(COALESCE(serial_no,'')) LIKE %s OR CAST(sl_no AS TEXT)=%s)
+                            ORDER BY item_name, size LIMIT 400""", (fac, cat_sel, term, like, like, like, like, term))
         else:
-            _u = _unit_of(fac, r["sl_no"])
-            cur.append({"sl": int(r["sl_no"]), "pid": r["prod_id"], "name": r["item_name"], "size": r["size"],
-                        "stock": float(r["stock"]), "price": float(r["price"] or 0), "unit": _u})
-            st.session_state[f"rr_u_{gen}_{int(r['sl_no'])}"] = _u
-            st.session_state[f"rr_q_{gen}_{int(r['sl_no'])}"] = qty_v
-            st.session_state[f"rr_r_{gen}_{int(r['sl_no'])}"] = rate_v
-            st.session_state["rr_lines"] = cur
-            st.session_state[f"rr_search_{gen}"] = ""
-            st.session_state[f"rr_qty_{gen}"] = 0.0
-            st.session_state[f"rr_rate_{gen}"] = 0.0
-            st.session_state["rr_msg"] = ("ok", f"যোগ হয়েছে: {r['item_name']}")
-    st.button("➕ তালিকায় যোগ করুন", key=f"rr_add_{gen}", on_click=_add)
-    msg = st.session_state.pop("rr_msg", None)
-    if msg:
-        (st.error if msg[0] == "error" else st.caption)(msg[1])
-    _rr_quick_add_item(gen)
+            cands = search_items(fac, term)[:30] if len(term) >= 2 else []
+        labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · স্টক {float(r['stock']):g}": r for r in cands}
+        pick = a2.selectbox(f"আইটেম ({len(labels)}টি)" if labels else "আইটেম", list(labels) if labels else ["— আগে Category বা নাম খুঁজুন —"],
+                            key=f"rr_pick_{gen}")
+        a3.number_input("পরিমাণ", min_value=0.0, step=1.0, format="%g", key=f"rr_qty_{gen}")
+        a4.number_input("Rate (৳)", min_value=0.0, step=1.0, format="%g", key=f"rr_rate_{gen}",
+                        help="Purchase rate (ঐচ্ছিক). 0 রাখলে Unit Price বদলাবে না।")
+
+        def _add():
+            pick_v = st.session_state.get(f"rr_pick_{gen}")
+            qty_v = float(st.session_state.get(f"rr_qty_{gen}") or 0)
+            rate_v = float(st.session_state.get(f"rr_rate_{gen}") or 0)
+            if not labels or pick_v not in labels:
+                st.session_state["rr_msg"] = ("error", "আগে আইটেম খুঁজে বাছুন।")
+                return
+            r = labels[pick_v]
+            cur = st.session_state.get("rr_lines", [])
+            if len(cur) >= RR_MAX_LINES:
+                st.session_state["rr_msg"] = ("error", f"একটা challan-এ সর্বোচ্চ {RR_MAX_LINES}টি আইটেম।")
+            elif any(int(x["sl"]) == int(r["sl_no"]) for x in cur):
+                st.session_state["rr_msg"] = ("error", "এই আইটেম তালিকায় আগেই আছে — পরিমাণ নিচে বদলান।")
+            elif qty_v <= 0:
+                st.session_state["rr_msg"] = ("error", "পরিমাণ ০-র বেশি দিন।")
+            else:
+                _u = _unit_of(fac, r["sl_no"])
+                cur.append({"sl": int(r["sl_no"]), "pid": r["prod_id"], "name": r["item_name"], "size": r["size"],
+                            "stock": float(r["stock"]), "price": float(r["price"] or 0), "unit": _u})
+                st.session_state[f"rr_u_{gen}_{int(r['sl_no'])}"] = _u
+                st.session_state[f"rr_q_{gen}_{int(r['sl_no'])}"] = qty_v
+                st.session_state[f"rr_r_{gen}_{int(r['sl_no'])}"] = rate_v
+                st.session_state["rr_lines"] = cur
+                st.session_state[f"rr_search_{gen}"] = ""
+                st.session_state[f"rr_qty_{gen}"] = 0.0
+                st.session_state[f"rr_rate_{gen}"] = 0.0
+                st.session_state["rr_msg"] = ("ok", f"যোগ হয়েছে: {r['item_name']}")
+        a5.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
+        a5.button("➕ যোগ করুন", key=f"rr_add_{gen}", on_click=_add, use_container_width=True)
+        msg = st.session_state.pop("rr_msg", None)
+        if msg:
+            (st.error if msg[0] == "error" else st.caption)(msg[1])
+        _rr_quick_add_item(gen)
 
     # ---- the list
-    st.markdown(f"**📋 এই challan-এর আইটেম ({len(lines)}/{RR_MAX_LINES})**")
+    st.markdown(f'<div class="ri-sec">Challan items <span>{len(lines)}/{RR_MAX_LINES}</span></div>', unsafe_allow_html=True)
     if not lines:
-        st.info("এখনো কোনো আইটেম যোগ হয়নি।")
+        st.caption("এখনো কোনো আইটেম যোগ হয়নি।")
         return
     h = st.columns([0.4, 2.7, 1.1, 0.8, 1.1, 1.1, 1.1, 1.6, 0.7])
     for col, t in zip(h, ["#", "আইটেম", "ERP Code", "স্টক", "Unit (বদলানো যায়)", "রিসিভ পরিমাণ", "Rate (৳)", "অবস্থা", ""]):
@@ -14527,7 +14529,7 @@ def _rr_fix_panel():
     """Edit / delete a challan that was already received: change a quantity or remove a wrong line. Stock follows; the
     requisition Received qty follows too. Manager password for a direct fix, or a request the Store Manager approves."""
     fac = FAC
-    with st.expander("✏️ Receive kora challan thik korun (qty bodlano · vul line bad deya)"):
+    with st.expander("✏️ Challan fix — qty · line bad"):
         look = st.text_input("Challan number likhe khujun (ager challan hole)", key="rrfix_look").strip()
         sql = """SELECT COALESCE(challan_no,'') AS ch, COALESCE(supplier_name,'') AS sup, date, COUNT(*) AS n, MAX(id) AS last_id
                  FROM transactions WHERE factory_name=%s AND trans_type='Supplier. Rec'"""
@@ -14700,7 +14702,7 @@ def _ri_fix_panel():
     """Fix a slip that was already saved: change a quantity, remove a wrongly added item, or add a forgotten item to the same SR.
     Uses the same stock-safe functions as Transactions / Physical Count; needs the Store Manager password like every delete / edit."""
     fac = FAC
-    with st.expander("✏️ Save kora slip-e vul thik korun (qty bodlano · vul item bad deya · aro item jog kora)"):
+    with st.expander("✏️ SR fix — qty · item bad · aro item"):
         recent = q("""SELECT req_no, COUNT(*) AS n, MAX(date) AS d, MAX(officer_name) AS u, MAX(id) AS last_id
                       FROM transactions WHERE factory_name=%s AND COALESCE(req_no,'')<>'' AND trans_type = ANY(%s)
                       GROUP BY req_no ORDER BY MAX(id) DESC LIMIT 40""", (fac, list(ISSUE_TYPES)))
@@ -15054,7 +15056,7 @@ def _ri_requests_panel():
                     else:
                         st.caption("⏳ Manager approve-er opekkhay.")
         if not pend and not hist:
-            st.caption("Ekhono kono correction request nei. Officer niche '✏️ Save kora slip-e vul thik korun' theke request pathale ekhane ashbe.")
+            st.caption("Ekhono kono correction request nei. Officer niche '✏️ SR fix' theke request pathale ekhane ashbe.")
         if hist:
             st.markdown("**Shomproti shiddhanto howa request**")
             hv = pd.DataFrame([{"#": r["id"], "SR": r["req_no"], "Item": r["item_name"], "Change": _desc(r), "Status": r["status"],
