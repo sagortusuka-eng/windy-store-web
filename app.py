@@ -13178,7 +13178,7 @@ def _ri_section_names(fac):
         return []
 
 
-def _ri_section_pick(key, fac, current="", label="🏭 Section (কোন section-এ গেল) *"):
+def _ri_section_pick(key, fac, current=""):
     """Officers only PICK from the list the Store Manager saved (nobody can type a new section here)."""
     NONE = "— Section বাছুন —"
     names = _ri_section_names(fac)
@@ -13188,7 +13188,7 @@ def _ri_section_pick(key, fac, current="", label="🏭 Section (কোন sectio
         st.warning("এই Unit-এর Section list এখনো সেট করা হয়নি — Store Manager আগে Section list সেভ করুন।")
         return ""
     opts = [NONE] + names
-    pick = st.selectbox(label, opts, index=opts.index(current) if current in opts else 0, key=key + "_s")
+    pick = st.selectbox("🏭 Section (কোন section-এ গেল) *", opts, index=opts.index(current) if current in opts else 0, key=key + "_s")
     return "" if pick == NONE else pick
 
 
@@ -13218,7 +13218,7 @@ def _ri_section_manager():
     if st.session_state.get("role") != "Store Manager":
         return
     fac = FAC
-    with st.expander(f"⚙️ Section list · {fac}"):
+    with _ri_exp(f"⚙️ Section list — {fac} (শুধু Store Manager)"):
         have = _ri_section_names(fac)
         st.caption("এই Unit-এর Section: " + (", ".join(have) if have else "এখনো কিছু নেই"))
         txt = st.text_area("নতুন Section লিখুন (প্রতি লাইনে একটি)", key="rism_txt", height=110, placeholder="Cutting\nSewing\nFinishing")
@@ -13376,7 +13376,7 @@ def _ri_pending_view():
 
 def _uom_adder(key):
     """Same 'Add new UOM' box as Inventory > Add Item, so a UOM can be added from the Requisition screens too."""
-    with st.expander("➕ Add new UOM"):
+    with _ri_exp("➕ Add new UOM"):
         ensure_master_tables()
         nu1, nu2 = st.columns([3, 1])
         v = nu1.text_input("New UOM (e.g. DOZEN, MTR, SET)", key=f"{key}_uom_name")
@@ -13902,61 +13902,287 @@ def _ri_sr_center():
         _ri_item_trail_ui(fac, _pairs, key="srt")
 
 
+# ------------------------------------------------------------
+#  PREMIUM LOOK for  Issue (SR slip)  +  Supplier Receipt (Challan)  -  presentation only, no business logic touched
+# ------------------------------------------------------------
 _RI_PREM_CSS = """<style>
-/* ===== Requisition Issue / Supplier Receipt - premium skin (only these two modes) ===== */
-.st-key-ri_mode div[role="radiogroup"]{display:flex!important;flex-wrap:wrap!important;gap:6px!important;padding:5px!important;background:#EEF3F8;border:1px solid #DDE6EF;border-radius:15px;width:fit-content;max-width:100%}
-.st-key-ri_mode label[data-baseweb="radio"]{background:transparent!important;border:0!important;border-radius:11px!important;padding:8px 16px!important;margin:0!important;cursor:pointer;transition:all .18s ease}
+.st-key-pv_css{display:none!important}
+.st-key-pv_root{--b-navy:#0B3D91;--b-blue:#1F63D6;--b-ink:#0B2A5B;--b-soft:#EAF2FD;--b-line:#DCE6F5;--b-mut:#64748B}
+/* ---- page header */
+.pv-hero{display:flex;align-items:center;gap:16px;padding:18px 22px;border-radius:18px;border:1px solid #D2E2F7;background:radial-gradient(900px 220px at 100% 0%,#BFD9FB 0%,rgba(191,217,251,0) 60%),linear-gradient(120deg,#F5F9FF,#E3EFFF);box-shadow:0 6px 22px rgba(15,60,140,.08)}
+.pv-hero-ic{width:54px;height:54px;border-radius:15px;background:linear-gradient(135deg,#0B3D91,#1F63D6);color:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 8px 18px rgba(11,61,145,.35);flex:none}
+.pv-hero-t{font-size:24px;font-weight:800;color:var(--b-ink);line-height:1.15;letter-spacing:-.01em}
+.pv-hero-s{font-size:13.5px;color:#3E5C8A;margin-top:3px}
+.pv-hero-r{margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;gap:6px;font-size:12.5px;font-weight:700;font-style:italic;color:#1F63D6}
+.pv-fac{font-style:normal;font-size:12px;font-weight:700;color:#0B3D91;background:#fff;border:1px solid #C9DBF5;border-radius:999px;padding:3px 12px}
+/* ---- KPI cards (real data) */
+.pv-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:2px 0}
+.pv-kpi{display:flex;align-items:center;gap:13px;background:#fff;border:1px solid var(--b-line);border-radius:14px;padding:13px 16px;box-shadow:0 4px 16px rgba(15,60,140,.06)}
+.pv-kpi-ic{width:46px;height:46px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex:none}
+.pv-kpi-ic.b{background:#E3EEFD;color:#1F63D6}.pv-kpi-ic.g{background:#DDF4E6;color:#16864B}.pv-kpi-ic.p{background:#EBE4FB;color:#6D3FD1}.pv-kpi-ic.o{background:#FFE9D6;color:#D9640B}
+.pv-kpi-l{font-size:12.5px;color:var(--b-mut);font-weight:600}
+.pv-kpi-v{font-size:24px;font-weight:800;color:var(--b-ink);line-height:1.15}
+.pv-kpi-v small{font-size:11.5px;font-weight:700;color:var(--b-mut);margin-left:6px}
+/* ---- notifications */
+.pv-notes{display:flex;flex-direction:column;gap:6px}
+.pv-note{padding:8px 14px;border-radius:10px;font-size:12.5px;line-height:1.45;border:1px solid;border-left-width:4px}
+.pv-note.warn{background:#FFF7E6;border-color:#F2D9A2;color:#7A4A06}
+.pv-note.err{background:#FEECEC;border-color:#F4BDBD;color:#9B1C1C}
+.pv-note.ok{background:#E9F7EF;border-color:#B7E2CB;color:#136A3D}
+.st-key-pv_strip .stButton>button{min-height:34px!important;padding:0 10px!important;font-size:12.5px!important}
+/* ---- navy bar + mode switch */
+.pv-nav{display:flex;align-items:center;gap:11px;padding:13px 18px;border-radius:14px 14px 0 0;background:linear-gradient(100deg,#0A2E6E,#0B3D91 55%,#1450B8);color:#fff;font-weight:750;font-size:16px;margin-top:4px}
+.pv-nav .r{margin-left:auto;font-size:12px;font-weight:700;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.3);border-radius:999px;padding:4px 12px}
+.st-key-ri_mode{margin-top:-.95rem}
+.st-key-ri_mode div[role="radiogroup"]{display:flex!important;flex-wrap:wrap!important;gap:6px!important;background:#fff;border:1px solid var(--b-line);border-top:0;border-radius:0 0 14px 14px;padding:9px 12px;box-shadow:0 6px 20px rgba(15,60,140,.07);width:100%}
+.st-key-ri_mode label[data-baseweb="radio"]{margin:0!important;padding:8px 15px!important;border-radius:10px!important;border:1px solid transparent!important;background:transparent!important;cursor:pointer;transition:background .15s}
 .st-key-ri_mode label[data-baseweb="radio"]>div:first-child:not(:has(p)),.st-key-ri_mode label[data-baseweb="radio"]>span:first-child:not(:has(p)){display:none!important}
-.st-key-ri_mode label[data-baseweb="radio"] p{font-size:13px!important;font-weight:700!important;color:#475569!important;margin:0!important;white-space:nowrap}
-.st-key-ri_mode label[data-baseweb="radio"]:hover{background:#fff!important}
-.st-key-ri_mode label[data-baseweb="radio"]:has(input:checked){background:linear-gradient(135deg,#0F766E,#0B5D56)!important;box-shadow:0 5px 14px rgba(15,118,110,.35)}
+.st-key-ri_mode label[data-baseweb="radio"] p{font-size:13px!important;font-weight:650!important;color:#35507A!important;margin:0!important;white-space:nowrap}
+.st-key-ri_mode label[data-baseweb="radio"]:hover{background:var(--b-soft)!important}
+.st-key-ri_mode label[data-baseweb="radio"]:has(input:checked){background:linear-gradient(135deg,#0B3D91,#1F63D6)!important;box-shadow:0 5px 14px rgba(11,61,145,.32)!important}
 .st-key-ri_mode label[data-baseweb="radio"]:has(input:checked) p{color:#fff!important}
-
-.st-key-ri_prem [data-testid="stVerticalBlock"]{gap:.55rem}
-.st-key-ri_prem div[data-testid="stVerticalBlockBorderWrapper"]{border:1px solid #DDE6EF!important;border-radius:16px!important;background:linear-gradient(180deg,#FFFFFF 0%,#F9FBFD 100%);box-shadow:0 1px 2px rgba(15,23,42,.04),0 10px 28px rgba(15,23,42,.05);padding:.8rem 1rem .9rem}
-.st-key-ri_prem div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stVerticalBlockBorderWrapper"]{box-shadow:none;background:#F8FAFC;border-radius:12px!important;padding:.4rem .6rem}
-.ri-sec{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:#0F766E;margin:0 0 2px}
-.ri-sec:before{content:"";width:4px;height:14px;border-radius:3px;background:linear-gradient(#2DD4BF,#0F766E)}
-.ri-sec span{margin-left:auto;background:#E6F6F4;color:#0F766E;border-radius:999px;padding:2px 11px;font-size:11px;letter-spacing:0;font-weight:800}
-
-.st-key-ri_prem label[data-testid="stWidgetLabel"] p{font-size:11px!important;font-weight:700!important;letter-spacing:.02em;color:#475569!important;margin:0 0 1px!important}
-.st-key-ri_prem [data-baseweb="select"]>div,.st-key-ri_prem [data-baseweb="input"],.st-key-ri_prem [data-testid="stDateInput"] [data-baseweb="input"]{background:#F8FAFC!important;border:1px solid #D5DFEA!important;border-radius:10px!important;min-height:38px;transition:border-color .15s,box-shadow .15s,background .15s}
-.st-key-ri_prem [data-baseweb="input"] [data-baseweb="base-input"],.st-key-ri_prem [data-baseweb="input"] input{background:transparent!important}
-.st-key-ri_prem [data-baseweb="select"]>div:hover,.st-key-ri_prem [data-baseweb="input"]:hover{border-color:#5EBDB4!important;background:#fff!important}
-.st-key-ri_prem [data-baseweb="select"]>div:focus-within,.st-key-ri_prem [data-baseweb="input"]:focus-within{border-color:#0F766E!important;background:#fff!important;box-shadow:0 0 0 3px rgba(15,118,110,.13)!important}
-.st-key-ri_prem [data-baseweb="select"] div,.st-key-ri_prem input{font-size:13px}
-
-.st-key-ri_prem button[kind="primary"],.st-key-ri_prem button[data-testid="stBaseButton-primary"]{background:linear-gradient(135deg,#0F766E,#0B5D56)!important;border:0!important;color:#fff!important;border-radius:11px!important;font-weight:750!important;min-height:40px;box-shadow:0 6px 16px rgba(15,118,110,.30);transition:transform .15s,box-shadow .15s}
-.st-key-ri_prem button[kind="primary"]:hover,.st-key-ri_prem button[data-testid="stBaseButton-primary"]:hover{transform:translateY(-1px);box-shadow:0 10px 24px rgba(15,118,110,.40)}
-.st-key-ri_prem button[kind="secondary"],.st-key-ri_prem button[data-testid="stBaseButton-secondary"]{background:#fff!important;border:1px solid #BFE0DB!important;color:#0F766E!important;border-radius:10px!important;font-weight:700!important;min-height:38px;transition:all .15s}
-.st-key-ri_prem button[kind="secondary"]:hover,.st-key-ri_prem button[data-testid="stBaseButton-secondary"]:hover{background:#F0FDFA!important;border-color:#0F766E!important}
-
-.st-key-ri_prem div[data-testid="stAlert"]{border-radius:12px!important;padding:.15rem .25rem!important}
-.st-key-ri_prem div[data-testid="stAlert"] p{font-size:12.5px!important;margin:0!important}
-.st-key-ri_prem div[data-testid="stCaptionContainer"],.st-key-ri_prem div[data-testid="stCaptionContainer"] p{color:#64748B!important;font-size:11.5px!important}
-
-.st-key-ri_prem div[data-testid="stExpander"]{border:1px solid #DDE6EF!important;border-radius:14px!important;background:#fff;box-shadow:0 4px 14px rgba(15,23,42,.04);overflow:hidden}
-.st-key-ri_prem div[data-testid="stExpander"] summary{padding:.4rem .9rem!important;transition:background .15s}
-.st-key-ri_prem div[data-testid="stExpander"] summary:hover{background:#F0FDFA}
-.st-key-ri_prem div[data-testid="stExpander"] summary p{font-size:12.5px!important;font-weight:700!important;color:#0F172A}
+/* ---- cards */
+[class*="st-key-pv_card_"]{background:#fff!important;border:1px solid var(--b-line)!important;border-radius:16px!important;box-shadow:0 6px 24px rgba(15,60,140,.07)!important;padding:16px 18px 10px!important;position:relative}
+[class*="st-key-pv_card_"]::before{content:"";position:absolute;left:0;top:0;right:0;height:3px;border-radius:16px 16px 0 0;background:linear-gradient(90deg,#0B3D91,#5BA0F5)}
+.pv-step{display:flex;align-items:center;gap:11px;margin:0 0 12px}
+.pv-n{width:27px;height:27px;border-radius:9px;background:linear-gradient(135deg,#0B3D91,#1F63D6);color:#fff;font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:center;box-shadow:0 3px 8px rgba(11,61,145,.3);flex:none}
+.pv-t{font-size:15px;font-weight:750;color:var(--b-ink);line-height:1.2}
+.pv-s{font-size:12px;color:var(--b-mut);margin-top:2px}
+.pv-chips{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 8px}
+.pv-chip{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:999px;background:#fff;border:1px solid var(--b-line);font-size:12px;font-weight:650;color:#334155;box-shadow:0 1px 3px rgba(15,23,42,.04);white-space:normal;line-height:1.35}
+.pv-chip.teal{background:var(--b-soft);border-color:#C9DBF5;color:#0B3D91}
+.pv-chip.amber{background:#FFF7E0;border-color:#F5DFA0;color:#92600A}
+.pv-chip.red{background:#FEECEC;border-color:#F8C9C9;color:#B42318}
+.pv-chip.green{background:#E6F7EE;border-color:#B5E3C9;color:#127A47}
+.pv-empty{display:flex;flex-direction:column;align-items:center;gap:4px;padding:26px 12px;border:1.5px dashed #BFD2EC;border-radius:14px;background:linear-gradient(180deg,#FBFDFF,#F1F6FD);text-align:center}
+.pv-empty .i{font-size:28px}.pv-empty .t{font-weight:700;color:#334155;font-size:14px}.pv-empty .s{font-size:12.5px;color:var(--b-mut)}
+/* ---- fields */
+.st-key-pv_root div[data-testid="stWidgetLabel"] p{font-size:11px!important;font-weight:750!important;letter-spacing:.05em;text-transform:uppercase;color:#3E5575!important}
+.st-key-pv_root div[data-baseweb="input"],.st-key-pv_root div[data-baseweb="select"]>div{background:#F7FAFE!important;border:1px solid #CFDCEE!important;border-radius:10px!important;min-height:40px;transition:background .15s,border-color .15s,box-shadow .15s}
+.st-key-pv_root div[data-baseweb="input"]:hover,.st-key-pv_root div[data-baseweb="select"]>div:hover{background:#fff!important;border-color:#8FB0DC!important}
+.st-key-pv_root div[data-baseweb="input"]:focus-within{background:#fff!important;border-color:#1F63D6!important;box-shadow:0 0 0 3px rgba(31,99,214,.15)!important}
+[class*="st-key-pv_card_"] div[data-testid="stHorizontalBlock"]{align-items:flex-end!important}
+/* ---- buttons */
+.st-key-pv_root .stButton>button{border-radius:10px!important;font-weight:700!important;transition:transform .12s,box-shadow .15s,background .15s}
+.st-key-pv_root .stButton>button:not([kind="primary"]){background:var(--b-soft)!important;border:1px solid #C9DBF5!important;color:#0B3D91!important}
+.st-key-pv_root .stButton>button:not([kind="primary"]):hover{background:#0B3D91!important;color:#fff!important;border-color:#0B3D91!important}
+.st-key-pv_root .stButton>button:not([kind="primary"]):hover p{color:#fff!important}
+.st-key-pv_root .stButton>button[kind="primary"]{background:linear-gradient(135deg,#0B3D91,#1F63D6)!important;border:0!important;box-shadow:0 8px 20px rgba(11,61,145,.32)!important;min-height:46px;font-size:15px}
+.st-key-pv_root .stButton>button[kind="primary"]:hover{transform:translateY(-1px);box-shadow:0 12px 26px rgba(11,61,145,.42)!important}
+/* ---- item list */
+[class*="st-key-pv_list_"]{background:#fff!important;border:1px solid var(--b-line)!important;border-radius:14px!important;box-shadow:0 4px 18px rgba(15,60,140,.06)!important;padding:6px 8px!important}
+[class*="st-key-pv_list_"] div[data-testid="stHorizontalBlock"]{align-items:center!important;padding:5px 6px;border-bottom:1px solid #EAF0F8;gap:.5rem!important;transition:background .12s}
+[class*="st-key-pv_list_"] div[data-testid="stHorizontalBlock"]:hover{background:#F5F9FF}
+[class*="st-key-pv_list_"] div[data-testid="stHorizontalBlock"]:has(.pv-th){background:#EEF4FD;border-radius:10px;border-bottom:0;padding:8px 6px}
+[class*="st-key-pv_list_"] .stButton>button{min-height:32px!important;padding:0 8px!important;background:#FFF5F5!important;border:1px solid #F3C6C6!important;color:#B42318!important}
+[class*="st-key-pv_list_"] .stButton>button:hover{background:#B42318!important;color:#fff!important;border-color:#B42318!important}
+.pv-th{font-size:10.5px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#4B6286}
+.pv-idx{display:inline-flex;width:24px;height:24px;border-radius:8px;background:#E7F0FD;color:#0B3D91;font-weight:750;font-size:12px;align-items:center;justify-content:center}
+.pv-item{font-weight:650;color:#0F2547;font-size:13.5px;line-height:1.3}
+.pv-code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:#F1F5FB;border:1px solid #DCE6F5;border-radius:7px;padding:2px 7px;color:#1E3A66}
+/* ---- alerts */
+.st-key-pv_root div[data-testid="stAlert"]{border-radius:12px!important;border:1px solid rgba(15,23,42,.08)!important;font-size:13px}
+/* ---- bottom tools: tabs */
+.st-key-pv_root .stTabs [data-baseweb="tab-list"]{gap:6px;background:#fff;border:1px solid var(--b-line);border-radius:14px;padding:5px;box-shadow:0 4px 16px rgba(15,60,140,.06);width:fit-content;max-width:100%;overflow-x:auto}
+.st-key-pv_root .stTabs [data-baseweb="tab"]{height:38px;padding:0 14px;border-radius:10px;font-weight:650;color:#35507A;background:transparent}
+.st-key-pv_root .stTabs [data-baseweb="tab"][aria-selected="true"]{background:var(--b-soft);color:#0B3D91}
+.st-key-pv_root .stTabs [data-baseweb="tab-highlight"],.st-key-pv_root .stTabs [data-baseweb="tab-border"]{display:none}
+.st-key-pv_root .stTabs [data-baseweb="tab-panel"]{margin-top:10px;background:#fff;border:1px solid var(--b-line);border-radius:14px;padding:16px 18px;box-shadow:0 4px 16px rgba(15,60,140,.06)}
+@media (max-width:1100px){.pv-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:800px){[class*="st-key-pv_card_"]{padding:12px 12px 6px!important}.st-key-ri_mode label[data-baseweb="radio"]{padding:7px 10px!important}.pv-hero{flex-wrap:wrap}.pv-hero-r{margin-left:0;align-items:flex-start}}
 </style>"""
 
 
-def tab_req_issue():
-    st.markdown(_RI_PREM_CSS, unsafe_allow_html=True)
-    _m = str(st.session_state.get("ri_mode") or "")
-    _k = "ri_prem" if (not _m or _m.startswith("📤") or _m.startswith("📥")) else "ri_plain"   # premium skin only for Issue + Receipt
+def _ri_exp(label, **kw):
+    """Normal expander - except inside the premium bottom tabs, where the tab itself is the container."""
+    if st.session_state.get("_ri_tabbed"):
+        from contextlib import nullcontext
+        return nullcontext()
+    return st.expander(label, **kw)
+
+
+def _ri_chips(items, target=None):
+    h = "".join(f'<span class="pv-chip {tone}">{ico} {html_lib.escape(str(txt))}</span>' for ico, txt, tone in items)
+    (st if target is None else target).markdown(f'<div class="pv-chips">{h}</div>', unsafe_allow_html=True)
+
+
+def _ri_step(n, title, sub=""):
+    st.markdown(f'<div class="pv-step"><span class="pv-n">{n}</span><div><div class="pv-t">{html_lib.escape(title)}</div>'
+                + (f'<div class="pv-s">{html_lib.escape(sub)}</div>' if sub else "") + '</div></div>', unsafe_allow_html=True)
+
+
+def _ri_empty(icon, title, sub=""):
+    st.markdown(f'<div class="pv-empty"><div class="i">{icon}</div><div class="t">{html_lib.escape(title)}</div>'
+                f'<div class="s">{html_lib.escape(sub)}</div></div>', unsafe_allow_html=True)
+
+
+def _ri_card(key):
     try:
-        _box = st.container(key=_k)
+        return st.container(border=True, key=f"pv_card_{key}")
     except TypeError:
-        _box = st.container()
-    with _box:
-        _tab_req_issue_body()
+        return st.container()
 
 
-def _tab_req_issue_body():
-    st.markdown("#### 🧾 Requisition Issue & Supplier Receipt")
+def _ri_list_box(key):
+    try:
+        return st.container(border=True, key=f"pv_list_{key}")
+    except TypeError:
+        return st.container()
+
+
+_PV_ICONS = {
+    "doc": '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>',
+    "box": '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/>',
+    "check": '<path d="M20 6 9 17l-5-5"/>',
+    "cart": '<circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/>',
+    "clock": '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
+}
+
+
+def _pv_svg(name, size=24):
+    return (f'<svg viewBox="0 0 24 24" width="{size}" height="{size}" fill="none" stroke="currentColor" stroke-width="2" '
+            f'stroke-linecap="round" stroke-linejoin="round">{_PV_ICONS[name]}</svg>')
+
+
+def _ri_page_header():
+    st.markdown(
+        f'<div class="pv-hero"><div class="pv-hero-ic">{_pv_svg("doc", 28)}</div>'
+        '<div><div class="pv-hero-t">Requisition Issue &amp; Supplier Receipt</div>'
+        '<div class="pv-hero-s">Manage requisition, issue and supplier receipt efficiently</div></div>'
+        f'<div class="pv-hero-r"><span class="pv-fac">📍 {html_lib.escape(str(FAC))}</span>'
+        '<span>Smart Inventory • Better Control • Greater Efficiency</span></div></div>', unsafe_allow_html=True)
+
+
+def _ri_kpis():
+    """Four live numbers from this unit's own records (current month) - nothing is hard-coded."""
+    sr = iss = rc = pend = appr = 0
+    try:
+        m0 = date.today().replace(day=1).isoformat()
+        r = q_c("""SELECT COUNT(DISTINCT CASE WHEN trans_type IN ('Issued','Internal Issue') AND COALESCE(req_no,'')<>'' THEN req_no END) AS sr,
+                          COUNT(CASE WHEN trans_type IN ('Issued','Internal Issue') THEN 1 END) AS iss,
+                          COUNT(DISTINCT CASE WHEN trans_type='Supplier. Rec' THEN challan_no END) AS rc
+                   FROM transactions WHERE factory_name=%s AND date>=%s""", (FAC, m0))
+        if r:
+            sr, iss, rc = int(r[0]["sr"] or 0), int(r[0]["iss"] or 0), int(r[0]["rc"] or 0)
+    except Exception:
+        pass
+    try:
+        pend = _ri_pending_count(FAC)
+    except Exception:
+        pend = 0
+    try:
+        _a = q_c("SELECT COUNT(*) AS n FROM ri_correction_requests WHERE factory_name=%s AND status='Pending'", (FAC,))
+        appr = int(_a[0]["n"]) if _a else 0
+    except Exception:
+        appr = 0
+    cards = [("b", "box", "SR slips · this month", f"{sr:,}", ""), ("g", "check", "Issue lines · this month", f"{iss:,}", ""),
+             ("p", "cart", "Challans received · this month", f"{rc:,}", ""),
+             ("o", "clock", "Pending Issue", f"{pend:,}", f"<small>{appr} approval</small>" if appr else "")]
+    h = "".join(f'<div class="pv-kpi"><div class="pv-kpi-ic {c}">{_pv_svg(ic, 22)}</div><div><div class="pv-kpi-l">{l}</div>'
+                f'<div class="pv-kpi-v">{v}{x}</div></div></div>' for c, ic, l, v, x in cards)
+    st.markdown(f'<div class="pv-kpis">{h}</div>', unsafe_allow_html=True)
+
+
+def _ri_navbar():
+    st.markdown(f'<div class="pv-nav"><span>{_pv_svg("doc", 20)}</span>Requisition Issue &amp; Supplier Receipt'
+                f'<span class="r">📍 {html_lib.escape(str(FAC))}</span></div>', unsafe_allow_html=True)
+
+
+def _ri_status_strip(mode):
+    """Compact notification area - same messages as before, one slim row each, all in one tidy panel."""
+    notes, go_btn, saved = [], False, None
+    e = html_lib.escape
+    if mode.startswith("📤"):
+        try:
+            g = count_gate_status(FAC)
+        except Exception:
+            g = None
+        if g and g["need"] != 0 and g["done"] < g["need"]:
+            if g["blocked"]:
+                notes.append(("err", f"🚫 এই সপ্তাহের compulsory Physical Count শেষ হয়নি ({g['done']}/{g['need']}) — Issue save বন্ধ। "
+                                     "📱 Physical Count → 🎯 তালিকার আইটেমগুলো গুনুন, তারপর আবার Issue করুন।"))
+            elif g["overdue"]:
+                notes.append(("warn", f"⚠️ এই সপ্তাহের Physical Count {g['done']}/{g['need']} — সময় পার হয়ে গেছে ({g['due_name']})। এখনই গুনুন।"))
+            else:
+                notes.append(("warn", f"🎯 এই সপ্তাহের Physical Count {g['done']}/{g['need']} — {g['due_name']}-এর মধ্যে শেষ না করলে Issue save বন্ধ হয়ে যাবে।"))
+            go_btn = True
+    info = st.session_state.get("ri_saved")
+    if info and info.get("user") == st.session_state.get("user"):
+        u, k, sr = e(str(info["user"])), info.get("kind"), e(str(info["sr"]))
+        if k == "rcv":
+            tx = f"✅ <b>{u}</b>, apnar data sofolbhabe save hoyeche — Challan <b>{sr}</b> · {e(str(info['detail']))} · {info['n']} ti item receive · mot qty {info['qty']:g} · {info['time']}"
+        elif k == "req":
+            tx = f"📨 <b>{u}</b>, apnar correction request manager-er kache pathano hoyeche — <b>{e(_ri_slip_label(info['sr']))}</b> · {e(str(info['detail']))} · {info['time']}. Manager approve korle correction hobe."
+        elif k == "fix":
+            tx = f"✅ <b>{u}</b>, apnar correction sofolbhabe save hoyeche — <b>{e(_ri_slip_label(info['sr']))}</b> · {e(str(info['detail']))} · {info['time']}"
+        else:
+            tx = (f"✅ <b>{u}</b>, apnar data sofolbhabe save hoyeche — SR <b>{sr}</b> · {info['n']} ti item · mot qty {info['qty']:g}"
+                  + (f" · Section <b>{e(str(info['section']))}</b>" if info.get("section") else "") + f" · {info['time']}")
+        notes.append(("ok", tx))
+        saved = info
+    try:
+        _np = _ri_pending_count(FAC)
+    except Exception:
+        _np = 0
+    if _np:
+        notes.append(("warn", f"⏳ {_np} ti item stock nei bole Pending Issue-te ache — stock ashle '⏳ Pending Issue' option theke issue korun."))
+    if not notes:
+        return
+    html = '<div class="pv-notes">' + "".join(
+        f'<div class="pv-note {t}">{x if t == "ok" else e(x)}</div>' for t, x in notes) + "</div>"
+    try:
+        box = st.container(key="pv_strip")
+    except TypeError:
+        box = st.container()
+    with box:
+        if go_btn or saved:
+            c1, c2, c3 = st.columns([7.5, 1.5, 1.2])
+        else:
+            c1, c2, c3 = st.container(), None, None
+        c1.markdown(html, unsafe_allow_html=True)
+        if go_btn and c2 is not None:
+            c2.button("📱 গুনতে যান", key="cg_go", on_click=go_page, args=("📱 Physical Count", None), use_container_width=True)
+        if saved and c3 is not None:
+            if c3.button("✖ Bondho", key="ri_saved_close"):
+                st.session_state.pop("ri_saved", None)
+                st.rerun()
+
+
+def _ri_tools_tabs(mode, is_mgr):
+    """Everything that used to sit below the form as separate expanders - now one tidy tab bar."""
+    rcv = mode.startswith("📥")
+    npend = 0
+    if is_mgr:
+        try:
+            _r = q("SELECT COUNT(*) AS n FROM ri_correction_requests WHERE factory_name=%s AND status='Pending'", (FAC,))
+            npend = int(_r[0]["n"]) if _r else 0
+        except Exception:
+            npend = 0
+    labels = ["✏️ Fix saved challan" if rcv else "✏️ Fix saved slip", "➕ Add UOM"]
+    if is_mgr and not rcv:
+        labels.append("⚙️ Sections")
+    if is_mgr:
+        labels.append(f"📥 Corrections ({npend})" + (" 🔴" if npend else ""))
+    tabs = st.tabs(labels)
+    k = 0
+    with tabs[k]:
+        (_rr_fix_panel if rcv else _ri_fix_panel)()
+    k += 1
+    with tabs[k]:
+        _uom_adder("ri")
+    k += 1
+    if is_mgr and not rcv:
+        with tabs[k]:
+            _ri_section_manager()
+        k += 1
+    if is_mgr:
+        with tabs[k]:
+            _ri_requests_panel()
+
+
+def tab_req_issue():
     if is_cons_view:
+        st.markdown("#### 🧾 Requisition Issue & Supplier Receipt")
         st.info("ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ ইস্যু/রিসিভ করা যায় না)।")
         return
     try:
@@ -13975,21 +14201,33 @@ def _tab_req_issue_body():
     except Exception as e:
         st.error(f"req_no column setup failed: {e}")
         return
+    try:
+        with st.container(key="pv_css"):
+            st.markdown(_RI_PREM_CSS, unsafe_allow_html=True)
+        _pv_root = st.container(key="pv_root")
+    except TypeError:       # very old Streamlit without container(key=...)
+        st.markdown(_RI_PREM_CSS, unsafe_allow_html=True)
+        _pv_root = st.container()
+    with _pv_root:
+        _tab_req_issue_body()
+
+
+def _tab_req_issue_body():
+    st.session_state["_ri_tabbed"] = False
+    _ri_page_header()
     is_mgr = st.session_state.get("role") == "Store Manager"
     _modes = ["📤 Issue (SR slip)", "📥 Supplier Receipt (Challan)", "⏳ Pending Issue (stock nei)", "🧰 SR Center (edit / fix)"]
     if st.session_state.get("role") in IW_VIEW_ROLES:
         _modes.append("🕵️ Skip Watch (Manager)")
+    _ri_kpis()
+    _pv_slot = st.container()
+    _ri_navbar()
     mode = st.radio("Ki korben?", _modes, horizontal=True, key="ri_mode", label_visibility="collapsed")
-    if mode.startswith("📤"):
-        try:
-            render_count_gate_banner()
-        except Exception:
-            pass
-    _ri_saved_banner()
-    if mode.startswith("📤") or mode.startswith("📥"):
-        _np = _ri_pending_count(FAC)
-        if _np:
-            st.warning(f"⏳ {_np} item Pending Issue-te ache — stock ashle '⏳ Pending Issue' theke issue korun.")
+    with _pv_slot:
+        if mode.startswith("📤") or mode.startswith("📥"):
+            _ri_status_strip(mode)
+        else:
+            _ri_saved_banner()
     if mode.startswith("🕵️"):
         if st.session_state.get("role") not in IW_VIEW_ROLES:
             st.error("Ei tab shudhu Store Manager / Executive dekhte pare.")
@@ -14012,26 +14250,22 @@ def _tab_req_issue_body():
             st.error(f"Pending Issue load kora jayni: {e}")
         _uom_adder("rip")
         return
+    st.session_state["_ri_tabbed"] = True
     if mode.startswith("📥"):
-        st.caption(f"📍 **{FAC}**-e save hobe · ek challan-e max {RR_MAX_LINES} item · Supplier ar Challan No. must · 🔍 ERP Audit → 📥 Product Received.")
         _rr_form()
-        _rr_fix_panel()
     else:
         _ri_form()
-        _ri_fix_panel()
-        st.caption(f"ℹ️ এক SR-এ সর্বোচ্চ {RI_MAX_LINES}টি আইটেম · SR নম্বর ও Section বাধ্যতামূলক · স্টক কম হলে অন্য Unit থেকে অটো-ট্রান্সফার।")
-    _uom_adder("ri")
-    if is_mgr:                      # Store Manager only - officers never see these two
-        if not mode.startswith("📥"):
-            _ri_section_manager()
-        _ri_requests_panel()
+    _ri_tools_tabs(mode, is_mgr)
 
 
 def _ri_box(h):
     try:
-        return st.container(height=int(h))
+        return st.container(height=int(h), key="pv_list_ri")
     except TypeError:
-        return st.container()
+        try:
+            return st.container(height=int(h))
+        except TypeError:
+            return st.container()
 
 
 @_frag   # typing / adding rows re-runs ONLY this block - the rest of the app is not touched
@@ -14039,14 +14273,16 @@ def _ri_form():
     fac = FAC
     gen = st.session_state.get("ri_gen", 0)
     lines = st.session_state.setdefault("ri_lines", [])
-    with st.container(border=True):
-        st.markdown('<div class="ri-sec">Slip details</div>', unsafe_allow_html=True)
+    _ri_chips([("📍", fac, "teal"), ("🧾", f"Max {RI_MAX_LINES} items per SR", ""), ("🔁", "Auto-transfer when stock is low", ""),
+               ("🔒", "SR No. & Section required", "")])
+    with _ri_card("ri_hdr"):
+        _ri_step(1, "Slip details", "Requisition no., date, type and section")
         c1, c2, c3, c4 = st.columns([1, 1, 1.1, 1.3])
-        sr_no = c1.text_input("SR No. *", key=f"ri_sr_{gen}", placeholder="e.g. 1745").strip()
+        sr_no = c1.text_input("Requisition No. (SR No.) *", key=f"ri_sr_{gen}", placeholder="e.g. 1745").strip()
         tx_date = c2.date_input("তারিখ", value=date.today(), max_value=date.today(), key="ri_date")
         ttype = c3.selectbox("ধরন", list(ISSUE_TYPES), format_func=lambda c: TRANS_LABELS.get(c, c), key="ri_type")
         with c4:
-            section = _ri_section_pick(f"ri_sec_{gen}", fac, label="🏭 Section *")
+            section = _ri_section_pick(f"ri_sec_{gen}", fac)
         notes = ""
         confirm_existing = True
         if sr_no:
@@ -14056,11 +14292,11 @@ def _ri_form():
                 st.warning(f"⚠️ SR {sr_no} এই Unit-এ আগেই ব্যবহার হয়েছে ({n_used}টি লাইন)। একই স্লিপে আরও আইটেম যোগ করছেন তো?")
                 confirm_existing = st.checkbox(f"হ্যাঁ, SR {sr_no}-তে আরও আইটেম যোগ করছি", key=f"ri_conf_{gen}")
 
-    # ---- add one item
-    # Category first: pick one and the item box below lists every item of that category (click the box and the list opens;
-    # type in it to narrow down). "সব Category" keeps the old behaviour: type a name / code in the search box.
-    with st.container(border=True):
-        st.markdown('<div class="ri-sec">Add item</div>', unsafe_allow_html=True)
+    with _ri_card("ri_add"):
+        _ri_step(2, "Add items", "Pick a category or search, set the quantity, then add")
+        # ---- add one item
+        # Category first: pick one and the item box below lists every item of that category (click the box and the list opens;
+        # type in it to narrow down). "সব Category" keeps the old behaviour: type a name / code in the search box.
         ALL_CAT = "সব Category"
         cat_rows = q_c("""SELECT DISTINCT COALESCE(NULLIF(TRIM(category),''),'(Category নেই)') AS c FROM inventory
                           WHERE factory_name=%s ORDER BY 1""", (fac,))
@@ -14133,14 +14369,14 @@ def _ri_form():
             (st.error if msg[0] == "error" else st.caption)(msg[1])
 
     # ---- the list
-    st.markdown(f'<div class="ri-sec">Slip items <span>{len(lines)}/{RI_MAX_LINES}</span></div>', unsafe_allow_html=True)
+    _ri_step(3, "Slip items", f"{len(lines)} / {RI_MAX_LINES} added")
     if not lines:
-        st.caption("এখনো কোনো আইটেম যোগ হয়নি।")
+        _ri_empty("🧺", "এখনো কোনো আইটেম যোগ হয়নি", "উপরে Category / নাম দিয়ে আইটেম খুঁজে ‘যোগ করুন’ চাপুন।")
         return
     with _ri_box(min(70 + 52 * len(lines), 280)):
         h = st.columns([0.3, 2.1, 1.6, 1.0, 0.7, 0.9, 0.9, 0.9, 1.4, 0.5])
         for col, t in zip(h, ["#", "আইটেম", "M/C No.", "ERP Code", "স্টক", "Unit", "Rate (৳)", "ইস্যু পরিমাণ", "অবস্থা", ""]):
-            col.caption(t)
+            col.markdown(f'<div class="pv-th">{t}</div>', unsafe_allow_html=True)
         if any(ln.get("vdate") != tx_date for ln in lines):   # date changed after the item was added -> re-check the 3-day rule (1 query)
             try:
                 vm_ = _ri_verif_many(fac, [ln["sl"] for ln in lines], tx_date)
@@ -14167,8 +14403,8 @@ def _ri_form():
                     + (f" · {m['machine_name']}" if m.get("machine_name") else ""): int(m["id"]) for m in _mc_all}
         for i, ln in enumerate(lines):
             r = st.columns([0.3, 2.1, 1.6, 1.0, 0.7, 0.9, 0.9, 0.9, 1.4, 0.5])
-            r[0].write(i + 1)
-            r[1].write(f"{ln['name']} [{ln['size'] or '-'}]")
+            r[0].markdown(f'<span class="pv-idx">{i + 1}</span>', unsafe_allow_html=True)
+            r[1].markdown(f'<div class="pv-item">{html_lib.escape(str(ln["name"]))} <span style="color:#64748B;font-weight:500">[{html_lib.escape(str(ln["size"] or "-"))}]</span></div>', unsafe_allow_html=True)
             _need_mc = int(ln["sl"]) in _mc_msl
             if _mc_labs:
                 _none = "— M/C —"
@@ -14179,7 +14415,7 @@ def _ri_form():
                     mc_sel[int(ln["sl"])] = _mc_labs[_pk]
             else:
                 r[2].caption("—")
-            r[3].write(ln["pid"])
+            r[3].markdown(f'<span class="pv-code">{html_lib.escape(str(ln["pid"]))}</span>', unsafe_allow_html=True)
             r[4].write(f"{ln['stock']:g}")
             _cu = ln.get("unit") or "Pcs"
             _uk = f"ri_u_{gen}_{ln['sl']}"
@@ -14257,7 +14493,9 @@ def _ri_form():
     _sb_issue_warn(fac, section, tx_date, sum(q_ * r_ for q_, r_, pf_ in zip(qtys, rates, pflags) if not pf_), ttype)   # section monthly limit
     can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
     f1, f2, f3 = st.columns([2, 1.2, 2.2])
-    f1.caption(f"মোট আইটেম-লাইন: {len(lines)} · মোট পরিমাণ: {sum(qtys):g}" + (f" · ⏳ Pending: {sum(pflags)}" if any(pflags) else "") + ("" if can_write else " · সংরক্ষণ করতে login লাগবে"))
+    _ri_chips([("📋", f"{len(lines)} lines", ""), ("🔢", f"Qty {sum(qtys):g}", "")]
+              + ([("⏳", f"{sum(pflags)} pending", "amber")] if any(pflags) else [])
+              + ([] if can_write else [("🔒", "Login required to save", "red")]), target=f1)
     po_pending = f2.checkbox("ERP PO pending", key=f"ri_po_{gen}",
                              help="এই স্লিপের সব লাইন ERP Audit → ERP PO Pending-এ ট্র্যাক হবে।")
     if f3.button("💾 সব সংরক্ষণ করুন", type="primary", key=f"ri_save_{gen}", use_container_width=True, disabled=not can_write):
@@ -14359,19 +14597,20 @@ def _rr_form():
                           "stock": float(r0[0]["stock"]), "price": float(r0[0]["price"] or 0), "unit": _unit_of(fac, r0[0]["sl_no"])})
             st.session_state["rr_lines"] = lines
 
-    # ---- header: supplier, challan, date
-    recent = q_c("""SELECT supplier_name AS s, MAX(id) AS m FROM transactions
-                    WHERE factory_name=%s AND trans_type='Supplier. Rec' AND COALESCE(supplier_name,'')<>''
-                    GROUP BY supplier_name ORDER BY m DESC LIMIT 40""", (fac,))
-    NEW_SUP = "✍️ Notun supplier (nam likhun)"
-    with st.container(border=True):
-        st.markdown('<div class="ri-sec">Challan details</div>', unsafe_allow_html=True)
+    _ri_chips([("📍", fac, "teal"), ("📦", f"Max {RR_MAX_LINES} items per challan", ""), ("🔎", "ERP Audit → Product Received", "")])
+    with _ri_card("rr_hdr"):
+        _ri_step(1, "Challan details", "Supplier, challan number, date and remarks")
+        # ---- header: supplier, challan, date
+        recent = q_c("""SELECT supplier_name AS s, MAX(id) AS m FROM transactions
+                        WHERE factory_name=%s AND trans_type='Supplier. Rec' AND COALESCE(supplier_name,'')<>''
+                        GROUP BY supplier_name ORDER BY m DESC LIMIT 40""", (fac,))
+        NEW_SUP = "✍️ Notun supplier (nam likhun)"
         c1, c2, c3 = st.columns([1.5, 1.2, 1])
         pick_sup = c1.selectbox("Supplier *", [NEW_SUP] + [r["s"] for r in recent], key=f"rr_sup_pick_{gen}")
         supplier = c1.text_input("Supplier-er nam", key=f"rr_sup_new_{gen}").strip() if pick_sup == NEW_SUP else pick_sup
         challan = c2.text_input("Challan No. *", key=f"rr_challan_{gen}", placeholder="Supplier challan number").strip()
         tx_date = c3.date_input("তারিখ", value=date.today(), max_value=date.today(), key="rr_date")
-        notes = st.text_input("Remarks (PO No. / গাড়ি নং — ঐচ্ছিক)", key=f"rr_notes_{gen}")
+        notes = st.text_input("Remarks (ঐচ্ছিক — যেমন PO No., গাড়ির নম্বর)", key=f"rr_notes_{gen}")
 
         done_sl, confirm_existing = set(), True
         if challan and supplier:
@@ -14383,15 +14622,15 @@ def _rr_form():
                            "Ekoi challan-er baki item jog korchen to? Same item duibar receive hole stock duibar barbe.")
                 confirm_existing = st.checkbox(f"Haan, Challan {challan}-e aro item receive korchi", key=f"rr_conf_{gen}")
 
-    # ---- add one item
-    with st.container(border=True):
-        st.markdown('<div class="ri-sec">Add item</div>', unsafe_allow_html=True)
+    with _ri_card("rr_add"):
+        _ri_step(2, "Add items", "Pick a category or search, set quantity and rate, then add")
+        # ---- add one item
         ALL_CAT = "সব Category"
         cat_rows = q_c("""SELECT DISTINCT COALESCE(NULLIF(TRIM(category),''),'(Category নেই)') AS c FROM inventory
                           WHERE factory_name=%s ORDER BY 1""", (fac,))
         a0, a1, a2, a3, a4, a5 = st.columns([1.2, 1.5, 2.4, 0.8, 0.9, 1.0])
         cat_sel = a0.selectbox("📂 Category", [ALL_CAT] + [r["c"] for r in cat_rows], key=f"rr_cat_{gen}")
-        term = a1.text_input("🔍 খুঁজুন (নাম / code / size)", key=f"rr_search_{gen}").strip()
+        term = a1.text_input("🔍 খুঁজুন (নাম / ERP code / size / serial)", key=f"rr_search_{gen}").strip()
         if cat_sel != ALL_CAT:
             like = f"%{term.lower()}%"
             cands = q_c(f"""SELECT {INV_COLS} FROM inventory
@@ -14443,48 +14682,49 @@ def _rr_form():
         _rr_quick_add_item(gen)
 
     # ---- the list
-    st.markdown(f'<div class="ri-sec">Challan items <span>{len(lines)}/{RR_MAX_LINES}</span></div>', unsafe_allow_html=True)
+    _ri_step(3, "Challan items", f"{len(lines)} / {RR_MAX_LINES} added")
     if not lines:
-        st.caption("এখনো কোনো আইটেম যোগ হয়নি।")
+        _ri_empty("📦", "এখনো কোনো আইটেম যোগ হয়নি", "উপরে Category / নাম দিয়ে আইটেম খুঁজে ‘যোগ করুন’ চাপুন।")
         return
-    h = st.columns([0.4, 2.7, 1.1, 0.8, 1.1, 1.1, 1.1, 1.6, 0.7])
-    for col, t in zip(h, ["#", "আইটেম", "ERP Code", "স্টক", "Unit (বদলানো যায়)", "রিসিভ পরিমাণ", "Rate (৳)", "অবস্থা", ""]):
-        col.caption(t)
-    remove, qtys, rates, bad = None, [], [], False
-    uoms = get_uoms()
-    can_write_ui = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
-    for i, ln in enumerate(lines):
-        r = st.columns([0.4, 2.7, 1.1, 0.8, 1.1, 1.1, 1.1, 1.6, 0.7])
-        r[0].write(i + 1)
-        r[1].write(f"{ln['name']} [{ln['size'] or '-'}]")
-        r[2].write(ln["pid"])
-        r[3].write(f"{ln['stock']:g}")
-        _cu = ln.get("unit") or _unit_of(fac, ln["sl"])
-        ln["unit"] = _cu
-        _uk = f"rr_u_{gen}_{ln['sl']}"
-        if _uk not in st.session_state:
-            st.session_state[_uk] = _cu
-        r[4].selectbox("unit", uoms if _cu in uoms else uoms + [_cu], key=_uk, label_visibility="collapsed",
-                       disabled=not can_write_ui, on_change=_ri_uom_changed, args=(fac, ln["sl"], _uk, ln["name"], "rr_lines"),
-                       help="UOM ভুল থাকলে এখানেই বদলান — সঙ্গে সঙ্গে item-এ চূড়ান্তভাবে সেভ হয়ে যায়।")
-        q_ = r[5].number_input("q", min_value=0.0, step=1.0, format="%g", key=f"rr_q_{gen}_{ln['sl']}", label_visibility="collapsed")
-        rt_ = r[6].number_input("r", min_value=0.0, step=1.0, format="%g", key=f"rr_r_{gen}_{ln['sl']}", label_visibility="collapsed")
-        qtys.append(float(q_))
-        rates.append(float(rt_))
-        cur_p = float(ln.get("price") or 0)
-        if q_ <= 0:
-            r[7].write("⚠️ পরিমাণ দিন")
-            bad = True
-        elif int(ln["sl"]) in done_sl:
-            r[7].write("🔁 এই challan-এ আগে রিসিভ")
-        elif rt_ > 0 and cur_p > 0 and abs(rt_ - cur_p) / cur_p > 0.25:
-            r[7].write(f"⚠️ দাম {(rt_ - cur_p) / cur_p * 100:+.0f}% (এখন ৳{cur_p:g})")
-        elif rt_ <= 0 and cur_p <= 0:
-            r[7].write("⚠️ দাম নেই")
-        else:
-            r[7].write("✅")
-        if r[8].button("✖", key=f"rr_rm_{gen}_{ln['sl']}", help="সারি মুছুন"):
-            remove = i
+    with _ri_list_box("rr"):
+        h = st.columns([0.4, 2.7, 1.1, 0.8, 1.1, 1.1, 1.1, 1.6, 0.7])
+        for col, t in zip(h, ["#", "আইটেম", "ERP Code", "স্টক", "Unit (বদলানো যায়)", "রিসিভ পরিমাণ", "Rate (৳)", "অবস্থা", ""]):
+            col.markdown(f'<div class="pv-th">{t}</div>', unsafe_allow_html=True)
+        remove, qtys, rates, bad = None, [], [], False
+        uoms = get_uoms()
+        can_write_ui = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
+        for i, ln in enumerate(lines):
+            r = st.columns([0.4, 2.7, 1.1, 0.8, 1.1, 1.1, 1.1, 1.6, 0.7])
+            r[0].markdown(f'<span class="pv-idx">{i + 1}</span>', unsafe_allow_html=True)
+            r[1].markdown(f'<div class="pv-item">{html_lib.escape(str(ln["name"]))} <span style="color:#64748B;font-weight:500">[{html_lib.escape(str(ln["size"] or "-"))}]</span></div>', unsafe_allow_html=True)
+            r[2].markdown(f'<span class="pv-code">{html_lib.escape(str(ln["pid"]))}</span>', unsafe_allow_html=True)
+            r[3].write(f"{ln['stock']:g}")
+            _cu = ln.get("unit") or _unit_of(fac, ln["sl"])
+            ln["unit"] = _cu
+            _uk = f"rr_u_{gen}_{ln['sl']}"
+            if _uk not in st.session_state:
+                st.session_state[_uk] = _cu
+            r[4].selectbox("unit", uoms if _cu in uoms else uoms + [_cu], key=_uk, label_visibility="collapsed",
+                           disabled=not can_write_ui, on_change=_ri_uom_changed, args=(fac, ln["sl"], _uk, ln["name"], "rr_lines"),
+                           help="UOM ভুল থাকলে এখানেই বদলান — সঙ্গে সঙ্গে item-এ চূড়ান্তভাবে সেভ হয়ে যায়।")
+            q_ = r[5].number_input("q", min_value=0.0, step=1.0, format="%g", key=f"rr_q_{gen}_{ln['sl']}", label_visibility="collapsed")
+            rt_ = r[6].number_input("r", min_value=0.0, step=1.0, format="%g", key=f"rr_r_{gen}_{ln['sl']}", label_visibility="collapsed")
+            qtys.append(float(q_))
+            rates.append(float(rt_))
+            cur_p = float(ln.get("price") or 0)
+            if q_ <= 0:
+                r[7].write("⚠️ পরিমাণ দিন")
+                bad = True
+            elif int(ln["sl"]) in done_sl:
+                r[7].write("🔁 এই challan-এ আগে রিসিভ")
+            elif rt_ > 0 and cur_p > 0 and abs(rt_ - cur_p) / cur_p > 0.25:
+                r[7].write(f"⚠️ দাম {(rt_ - cur_p) / cur_p * 100:+.0f}% (এখন ৳{cur_p:g})")
+            elif rt_ <= 0 and cur_p <= 0:
+                r[7].write("⚠️ দাম নেই")
+            else:
+                r[7].write("✅")
+            if r[8].button("✖", key=f"rr_rm_{gen}_{ln['sl']}", help="সারি মুছুন"):
+                remove = i
     if remove is not None:
         lines.pop(remove)
         st.session_state["rr_lines"] = lines
@@ -14492,7 +14732,7 @@ def _rr_form():
             st.rerun(scope="fragment")
         except TypeError:
             st.rerun()
-    st.caption(f"মোট আইটেম-লাইন: {len(lines)} · মোট পরিমাণ: {sum(qtys):g}")
+    _ri_chips([("📋", f"{len(lines)} lines", ""), ("🔢", f"Qty {sum(qtys):g}", "")])
     rate_mode = "Latest purchase rate"
     if any(x > 0 for x in rates):
         rate_mode = st.selectbox("Unit Price update (যে item-এ Rate দিয়েছেন)", ["Latest purchase rate", "Weighted average", "Keep current price"],
@@ -14529,7 +14769,7 @@ def _rr_fix_panel():
     """Edit / delete a challan that was already received: change a quantity or remove a wrong line. Stock follows; the
     requisition Received qty follows too. Manager password for a direct fix, or a request the Store Manager approves."""
     fac = FAC
-    with st.expander("✏️ Challan fix — qty · line bad"):
+    with _ri_exp("✏️ Receive kora challan thik korun (qty bodlano · vul line bad deya)"):
         look = st.text_input("Challan number likhe khujun (ager challan hole)", key="rrfix_look").strip()
         sql = """SELECT COALESCE(challan_no,'') AS ch, COALESCE(supplier_name,'') AS sup, date, COUNT(*) AS n, MAX(id) AS last_id
                  FROM transactions WHERE factory_name=%s AND trans_type='Supplier. Rec'"""
@@ -14702,7 +14942,7 @@ def _ri_fix_panel():
     """Fix a slip that was already saved: change a quantity, remove a wrongly added item, or add a forgotten item to the same SR.
     Uses the same stock-safe functions as Transactions / Physical Count; needs the Store Manager password like every delete / edit."""
     fac = FAC
-    with st.expander("✏️ SR fix — qty · item bad · aro item"):
+    with _ri_exp("✏️ Save kora slip-e vul thik korun (qty bodlano · vul item bad deya · aro item jog kora)"):
         recent = q("""SELECT req_no, COUNT(*) AS n, MAX(date) AS d, MAX(officer_name) AS u, MAX(id) AS last_id
                       FROM transactions WHERE factory_name=%s AND COALESCE(req_no,'')<>'' AND trans_type = ANY(%s)
                       GROUP BY req_no ORDER BY MAX(id) DESC LIMIT 40""", (fac, list(ISSUE_TYPES)))
@@ -15017,7 +15257,7 @@ def _ri_requests_panel():
         return
     if pend and is_mgr:
         st.warning(f"📥 {len(pend)} ti correction request apnar approve-er opekkhay ache.")
-    with st.expander(f"📥 Correction request ({len(pend)} pending)", expanded=bool(pend and is_mgr)):
+    with _ri_exp(f"📥 Correction request ({len(pend)} pending)", expanded=bool(pend and is_mgr)):
         def _desc(r):
             if r["action"] == "Change qty":
                 return f"qty {float(r['old_qty']):g} → {float(r['new_qty']):g}"
@@ -15056,7 +15296,7 @@ def _ri_requests_panel():
                     else:
                         st.caption("⏳ Manager approve-er opekkhay.")
         if not pend and not hist:
-            st.caption("Ekhono kono correction request nei. Officer niche '✏️ SR fix' theke request pathale ekhane ashbe.")
+            st.caption("Ekhono kono correction request nei. Officer niche '✏️ Save kora slip-e vul thik korun' theke request pathale ekhane ashbe.")
         if hist:
             st.markdown("**Shomproti shiddhanto howa request**")
             hv = pd.DataFrame([{"#": r["id"], "SR": r["req_no"], "Item": r["item_name"], "Change": _desc(r), "Status": r["status"],
