@@ -13307,8 +13307,8 @@ def _ri_pending_cancel(pid, note, label):
     return True
 
 
-def ri_issue_pending(row, qty, rate, verified):
-    n = save_requisition_issue(row["factory_name"], [(int(row["sl_no"]), float(qty), False, float(rate or 0))], date.today(),
+def ri_issue_pending(row, qty, rate, verified, xfer=False, xconf=0.0):
+    n = save_requisition_issue(row["factory_name"], [(int(row["sl_no"]), float(qty), bool(xfer), float(rate or 0), float(xconf or 0))], date.today(),
                                row["sr_no"], row["issue_type"] or "Issued",
                                f"[Pending issue theke - slip date {row['slip_date']}] {row['notes'] or ''}".strip(),
                                verified, False, row["section"] or "",
@@ -13342,6 +13342,14 @@ def _ri_pending_view():
         r["left"] = max(float(r["qty"] or 0) - float(r["issued_qty"] or 0), 0.0)
         r["stock"] = float(r["stock"] or 0)
         r["ready"] = r["stock"] >= r["left"] - 1e-9 and r["left"] > 0
+        r["other"], r["xok"] = None, False
+        if r["left"] > 0 and r["stock"] < r["left"] - 1e-9:        # short here: maybe the other unit has the rest
+            try:
+                r["other"] = find_same_in_other(r["prod_id"], r["item_name"], other_factory(fac), r["size"] or "", need=r["left"] - r["stock"])
+                r["xok"] = bool(r["other"]) and float(r["other"]["stock"] or 0) >= r["left"] - r["stock"] - 1e-9
+            except Exception:
+                r["other"], r["xok"] = None, False
+        r["ready"] = r["ready"] or r["xok"]
     ready_n = sum(1 for r in rows if r["ready"])
     if not rows:
         st.success("✅ Kono pending issue nei.")
@@ -13350,7 +13358,8 @@ def _ri_pending_view():
         df = pd.DataFrame([{"SR No": r["sr_no"], "Item": r["item_name"], "Size": r["size"] or "", "ERP Code": r["prod_id"],
                             "Pending Qty": r["left"], "Stock ekhon": r["stock"], "Section": r["section"] or "", "Slip Date": r["slip_date"],
                             "Entry by": r["created_by"],
-                            "Status": ("✅ Stock ashche" if r["ready"] else ("🟠 Ongsho stock ache" if r["stock"] > 0 else "⛔ Stock nei"))}
+                            "Status": ("✅ Stock ashche" if r["stock"] >= r["left"] - 1e-9 else ("🔁 Onno unit-e stock ache (auto-transfer hobe)" if r["xok"]
+                                                                         else ("🟠 Ongsho stock ache" if r["stock"] > 0 else "⛔ Stock nei")))}
                            for r in rows])
         st.dataframe(df, hide_index=True, use_container_width=True, height=min(80 + 36 * len(df), 360))
         can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
@@ -13363,8 +13372,14 @@ def _ri_pending_view():
                 c[0].markdown(f"**{r['item_name']}** [{r['size'] or '-'}] · {r['prod_id']}  \n"
                               f"<span style='color:#64748b;font-size:12px'>SR {r['sr_no']} · Pending {r['left']:g} {r['unit'] or ''} · "
                               f"Stock ekhon {r['stock']:g} · Section {r['section'] or '-'}" + (f" · M/C {r['mc_no']}" if r.get("mc_no") else "") + "</span>", unsafe_allow_html=True)
-                dflt = float(min(r["left"], r["stock"])) if r["stock"] > 0 else 0.0
-                qv = c[1].number_input("Qty", 0.0, float(r["left"]), dflt, step=1.0, format="%g", key=f"rip_q_{k}", disabled=r["stock"] <= 0)
+                dflt = float(r["left"]) if (r["xok"] or r["stock"] >= r["left"] - 1e-9) else (float(min(r["left"], r["stock"])) if r["stock"] > 0 else 0.0)
+                can_issue = r["stock"] > 0 or r["xok"]
+                qv = c[1].number_input("Qty", 0.0, float(r["left"]), dflt, step=1.0, format="%g", key=f"rip_q_{k}", disabled=not can_issue)
+                short_now = max(float(qv) - r["stock"], 0.0)
+                xtick = False
+                if short_now > 1e-9 and r["xok"] and float(r["other"]["stock"] or 0) >= short_now - 1e-9:
+                    xtick = st.checkbox(f"🔁 {short_now:g} {r['unit'] or 'pcs'} {r['other']['factory_name']} theke auto-transfer kore issue korun "
+                                        f"(oi unit-e stock {float(r['other']['stock']):g})", value=True, key=f"rip_x_{k}_{short_now:g}")
                 rate_known = float(r["price"]) if float(r["price"]) > 0 else float(r["rate"])
                 if float(r["price"]) > 0:
                     c[2].caption(f"Rate ৳{float(r['price']):g}")
@@ -13372,21 +13387,22 @@ def _ri_pending_view():
                 else:
                     rv = float(c[2].number_input("Rate", 0.0, step=1.0, value=rate_known, format="%g", key=f"rip_r_{k}"))
                 c[3].markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
-                if c[3].button("✅ Issue korun", key=f"rip_b_{k}", disabled=(not can_write) or r["stock"] <= 0, use_container_width=True):
+                if c[3].button("✅ Issue korun", key=f"rip_b_{k}", disabled=(not can_write) or (not can_issue), use_container_width=True):
                     if qv <= 0:
                         st.error("Qty 0-r beshi din.")
-                    elif qv > r["stock"] + 1e-9:
-                        st.error(f"Stock matro {r['stock']:g} — tar beshi issue kora jabe na.")
+                    elif qv > r["stock"] + 1e-9 and not xtick:
+                        st.error(f"Stock matro {r['stock']:g} — tar beshi issue korte hole upore auto-transfer tick din.")
                     elif rv <= 0:
                         st.error("Ei item-er Rate nei — Rate din.")
                     elif (count_gate_status(fac) or {}).get("blocked"):
                         st.error("Ei saptahe-r compulsory Physical Count shesh hoy ni — age 📱 Physical Count korun.")
                     elif guard():
-                        if ri_issue_pending(r, qv, rv, verified):
+                        if ri_issue_pending(r, qv, rv, verified, xtick, short_now if xtick else 0.0):
                             _who = st.session_state.get("user", "")
                             st.session_state["ri_saved"] = {"user": _who, "sr": r["sr_no"], "n": 1, "qty": float(qv), "section": r["section"] or "",
                                                             "time": local_now().strftime("%d-%b-%Y %I:%M %p"), "kind": "save"}
-                            done(f"✅ {_who}, pending issue save hoyeche - SR {r['sr_no']}: {r['item_name']} × {qv:g} issue hoyeche, stock komeche.")
+                            done(f"✅ {_who}, pending issue save hoyeche - SR {r['sr_no']}: {r['item_name']} × {qv:g} issue hoyeche, stock komeche."
+                                 + (f" 🔁 {short_now:g} pcs {r['other']['factory_name']} theke auto-transfer hoyeche." if xtick else ""))
         if is_mgr:
             with st.expander("🗑 Pending cancel (Store Manager)"):
                 lab = {f"SR {r['sr_no']} · {r['item_name']} [{r['size'] or '-'}] · pending {r['left']:g}": r for r in rows}
@@ -13828,7 +13844,7 @@ def _ri_form():
                         xcache[ck] = None
                 other = xcache[ck]
                 if other and float(other["stock"] or 0) >= shortage:
-                    ok_x = r[8].checkbox(f"🔁 {shortage:g} {ln.get('unit') or 'pcs'} ট্রান্সফার নিশ্চিত", key=f"ri_x_{gen}_{ln['sl']}_{shortage:g}")
+                    ok_x = r[8].checkbox(f"🔁 {shortage:g} {ln.get('unit') or 'pcs'} auto-transfer", value=True, key=f"ri_x_{gen}_{ln['sl']}_{shortage:g}")
                     xfer_flags[ln["sl"]] = (bool(ok_x), round(float(shortage), 6))
                     if not ok_x:
                         is_pend = True
@@ -13838,7 +13854,7 @@ def _ri_form():
                     if other["level"] == "fuzzy":
                         note_x += " নাম হুবহু এক নয় — দুটো একই আইটেম কিনা দেখে নিশ্চিত করুন।"
                     if not ok_x:
-                        note_x += " ⏳ Tick na dile ei item Pending Issue-te thakbe (transaction hobe na)."
+                        note_x += " ⏳ Tick tule dile ei item Pending Issue-te thakbe (transaction hobe na)."
                     st.caption(note_x)
                 else:
                     r[8].write("⏳ Pending-e jabe")
@@ -14280,6 +14296,35 @@ def _ri_use_sr(sr):
 
 
 @_frag
+@tx
+def ri_direct_edit(tid, new_qty, reason):
+    """Officer-friendly correction of ONE saved issue line: stock moves by the difference; works for auto-transferred lines too
+    (the transfer itself stays as it was). Everything is written to the audit log with the reason."""
+    rows = q("SELECT * FROM transactions WHERE id=%s FOR UPDATE", (tid,))
+    if not rows:
+        raise ValueError("Transaction paoa jay nai.")
+    t = rows[0]
+    if t["trans_type"] not in ISSUE_TYPES:
+        raise ValueError("Shudhu Issue line ekhane bodlano jay.")
+    old, new = float(t["qty"] or 0), float(new_qty)
+    delta = new - old
+    if abs(delta) < 1e-9:
+        return True
+    cur = q("SELECT COALESCE(current_stock,0) AS s FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE", (t["sl_no"], t["factory_name"]))
+    if not cur:
+        raise ValueError("Inventory item paoa jay nai.")
+    stock = float(cur[0]["s"])
+    if stock - delta < -1e-9:
+        raise ValueError(f"{t['item_name']}: stock {stock:g}, aro {delta:g} dite gele stock negative hobe.")
+    who = st.session_state.get("user", "")
+    run("UPDATE inventory SET current_stock=current_stock-%s WHERE sl_no=%s AND factory_name=%s", (delta, t["sl_no"], t["factory_name"]))
+    note = f"{(t['notes'] or '').strip()} [Qty {old:g} -> {new:g} by {who}: {reason}]".strip()
+    run("UPDATE transactions SET qty=%s, notes=%s WHERE id=%s", (new, note, tid))
+    audit("EDIT_TRANS_RI", f"{t['factory_name']} SR {t['req_no']}: transaction {tid} {t['prod_id']} ({t['item_name']}) qty {old:g}->{new:g} by {who} - {reason}"
+                           + (" (auto-transfer line: transfer unchanged)" if "Auto-transferred" in (t["notes"] or "") else ""))
+    return True
+
+
 def _ri_fix_panel():
     """Fix a slip that was already saved: change a quantity, remove a wrongly added item, or add a forgotten item to the same SR.
     Uses the same stock-safe functions as Transactions / Physical Count; needs the Store Manager password like every delete / edit."""
@@ -14335,6 +14380,7 @@ def _ri_fix_panel():
         for col, t in zip(h, ["Item", "ERP Code", "Ager qty", "Notun qty", "Bad den"]):
             col.caption(t)
         edits, dels = {}, []
+        auto_tids = set()
         for ln in lines:
             tid = int(ln["id"])
             old = float(ln["qty"] or 0)
@@ -14343,9 +14389,7 @@ def _ri_fix_panel():
             c[1].write(ln["prod_id"])
             c[2].write(f"{old:g}")
             if "Auto-transferred" in str(ln["notes"] or ""):
-                c[3].write("🔒 auto-transfer jukto")
-                c[4].write("—")
-                continue
+                auto_tids.add(tid)
             nq = c[3].number_input("q", min_value=0.0, step=1.0, value=old, format="%g", key=f"rifix_q_{tid}_{old:g}",
                                    label_visibility="collapsed")
             rm = c[4].checkbox("✖", key=f"rifix_d_{tid}")
@@ -14354,7 +14398,8 @@ def _ri_fix_panel():
             elif abs(nq - old) > 1e-9:
                 edits[tid] = (ln, float(nq))
         if any("Auto-transferred" in str(l["notes"] or "") for l in lines):
-            st.caption("🔒 Je line-e onno unit theke auto-transfer hoyechilo, shei line ekhane bodlano jay na - Transfer History ar Issue Ledger theke thik korun.")
+            st.caption("🔁 Je line-e onno unit theke auto-transfer hoyechilo, shei line-o '✏️ Ekhoni thik korun' diye bodlano / bad deya jay "
+                       "(Transfer ager moto-i thake, shudhu Issue qty bodlay).")
         if st.button("➕ Ei SR-e aro item add korun", key="rifix_add", on_click=_ri_use_sr, args=(sr,),
                      help="Upore form-e ei SR number boshe jabe. Item jog kore Save korun ar 'SR ager-i use hoyeche' tick din."):
             st.rerun()   # whole page, so the SR box in the form above shows the number
@@ -14376,6 +14421,22 @@ def _ri_fix_panel():
             a1, a2 = st.columns([1, 3])
             aq = a1.number_input("Qty", min_value=0.0, step=1.0, format="%g", key="rifix_addqty")
             ar = a2.text_input("Karon (keno bad poreche) *", key="rifix_addreason").strip()
+            if st.button("➕ Ekhoni add korun (approval lagbe na)", key="rifix_adddirect", type="primary", disabled=not can_write_ri()):
+                if pk not in lab:
+                    st.error("Age item khuje select korun.")
+                elif aq <= 0:
+                    st.error("Qty 0-r beshi din.")
+                elif len(ar) < 3:
+                    st.error("Karon likhun (kom-pokkhe 3 akkhor).")
+                elif guard():
+                    r_ = lab[pk]
+                    _d = parse_date(slip_date)
+                    if save_requisition_issue(fac, [(int(r_["sl_no"]), float(aq), False)], (_d.date() if _d else date.today()), sr, slip_type,
+                                              f"[Added later by {st.session_state.get('user', '')}: {ar}]", False):
+                        who = st.session_state.get("user", "")
+                        st.session_state["ri_saved"] = {"user": who, "sr": sr, "kind": "fix", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
+                                                        "detail": f"add item: {r_['item_name']} × {aq:g}"}
+                        done(f"✅ {who}, SR {sr}-e {r_['item_name']} × {aq:g} jog hoyeche.")
             if st.button("📨 Add-item request pathan", key="rifix_addbtn", disabled=not can_write_ri()):
                 if pk not in lab:
                     st.error("Age item khuje select korun.")
@@ -14407,8 +14468,39 @@ def _ri_fix_panel():
             st.error("Qty 0 kora jabe na - oi item bad dite hole ✖ tick din.")
             return
         st.info(f"Change: {len(edits)} ti qty bodlabe, {len(dels)} ti line delete hobe.")
-        mode = st.radio("Kivabe thik korben?", ["📨 Request pathan (Manager approve korbe)", "🔐 Ekhoni thik korun (Manager password)"],
-                        index=1 if is_mgr else 0, horizontal=True, key="rifix_mode")
+        mode = st.radio("Kivabe thik korben?", ["✏️ Ekhoni thik korun (karon likhe — approval lagbe na)", "📨 Request pathan (Manager approve korbe)",
+                                                "🔐 Ekhoni thik korun (Manager password)"], index=0, horizontal=True, key="rifix_mode")
+        if mode.startswith("✏️"):
+            dreason = st.text_input("Karon likhun (ki thik korchhen) *", key="rifix_dreason").strip()
+            if st.button("💾 Ekhoni save korun", type="primary", key="rifix_dsave", disabled=not can_write_ri()):
+                if len(dreason) < 3:
+                    st.error("Karon likhun (kom-pokkhe 3 akkhor).")
+                elif guard():
+                    n_edit = n_del = 0
+                    try:
+                        for tid, (ln, nq) in edits.items():
+                            if not ri_direct_edit(tid, nq, dreason):
+                                raise ValueError("ekta line-er correction hoyni (upore error dekhun)")
+                            n_edit += 1
+                        for ln in dels:
+                            if not delete_transaction(int(ln["id"])):
+                                raise ValueError("ekta line delete hoyni (upore error dekhun)")
+                            n_del += 1
+                    except ValueError as e:
+                        st.error(f"{e}  (ei porjonto save hoyeche: {n_edit} qty change, {n_del} delete)")
+                        if n_edit or n_del:
+                            st.rerun()
+                        return
+                    who = st.session_state.get("user", "")
+                    audit("REQUISITION_ISSUE_FIX_DIRECT", f"{fac}: SR {sr} corrected by {who} (no approval): {n_edit} qty change(s), {n_del} line(s) removed - {dreason}")
+                    st.session_state["ri_saved"] = {"user": who, "sr": sr, "kind": "fix", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
+                                                    "detail": f"{n_edit} qty bodlano, {n_del} line bad"}
+                    st.session_state.pop("rifix_dreason", None)
+                    done(f"✅ {who}, SR {sr}-er correction save hoyeche ({n_edit} qty bodlano, {n_del} line bad).")
+            return
+        if auto_tids and ((set(edits) | {int(l["id"]) for l in dels}) & auto_tids):
+            st.error("Auto-transfer jukto line shudhu '✏️ Ekhoni thik korun' option-e bodlano / bad deya jay — oita select korun.")
+            return
         if mode.startswith("📨"):
             reason = st.text_input("Karon likhun - ki bhul hoyechilo? *", key="rifix_reason").strip()
             if st.button("📨 Correction request pathan", type="primary", key="rifix_req_btn", disabled=not can_write_ri()):
