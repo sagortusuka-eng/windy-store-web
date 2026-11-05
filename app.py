@@ -21348,27 +21348,59 @@ with st.sidebar:
     # active page in teal and active group marked. Buttons keep the "sidebar_nav_" key prefix so the app's dark-sidebar
     # button styling still applies; the CSS below only adds heading / indent / chevron / teal styling.
     st.markdown("""<style>
+/* ---- Premium navigation (matches home page: navy sidebar, teal #0F766E accent, white cards) ---- */
+section[data-testid="stSidebar"] .nav-section-title {
+    font-size: 11px !important; font-weight: 800 !important; letter-spacing: 1.8px !important; text-transform: uppercase !important;
+    color: #7F93AB !important; margin: 18px 2px 8px !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] { margin-bottom: -0.4rem !important; }
+
+/* group headings */
 section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"] {
-    min-height: 40px !important; background: #16304A !important; border: 1px solid #2D4963 !important; border-radius: 9px !important; }
+    min-height: 44px !important; padding: 6px 12px !important; border-radius: 12px !important;
+    background: linear-gradient(180deg, rgba(255,255,255,.075), rgba(255,255,255,.028)) !important;
+    border: 1px solid rgba(148,163,184,.20) !important;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 3px 8px rgba(0,0,0,.20) !important; transition: all .15s ease; }
 section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]:hover {
-    background: #1B3A55 !important; border-color: #3B6280 !important; }
+    background: linear-gradient(180deg, rgba(255,255,255,.12), rgba(255,255,255,.05)) !important; border-color: rgba(94,234,212,.40) !important; }
 section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"] p {
-    font-size: 14px !important; font-weight: 800 !important; color: #FFFFFF !important; letter-spacing: .2px; }
+    font-size: 13.5px !important; font-weight: 700 !important; color: #F1F5F9 !important; letter-spacing: .2px; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button p code {
+    background: rgba(45,212,191,.14) !important; color: #5EEAD4 !important; border: 1px solid rgba(45,212,191,.30) !important;
+    border-radius: 7px !important; padding: 1px 7px !important; margin-right: 9px; font-size: 11.5px !important;
+    font-weight: 800 !important; letter-spacing: .6px; font-family: inherit !important; }
 section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button div { width: auto !important; flex: 1 1 auto !important; }
 section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button::after {
-    content: "\\25B8"; margin-left: auto; padding-left: 6px; color: #9FB6CC; font-size: 13px; }
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_open_"] button::after { content: "\\25BE"; color: #FFFFFF; }
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"] {
-    background: #0E3A4C !important; border: 1px solid #1599A6 !important; border-left: 4px solid #1FB5C4 !important; }
+    content: "\\25B8"; margin-left: auto; padding-left: 6px; color: #8FA3BA; font-size: 12px; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_open_"] button::after { content: "\\25BE"; color: #5EEAD4; }
+
+/* active group: teal glow + solid number badge (stays marked even when collapsed) */
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"],
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"]:hover {
+    background: linear-gradient(90deg, rgba(20,184,166,.30), rgba(15,118,110,.10)) !important;
+    border: 1px solid rgba(45,212,191,.50) !important; border-left: 4px solid #2DD4BF !important;
+    box-shadow: 0 6px 16px rgba(15,118,110,.30) !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button p code {
+    background: #14B8A6 !important; color: #06251F !important; border-color: #14B8A6 !important; }
+
+/* pages: indented under their group with a soft guide line */
 section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] {
-    margin-left: 16px !important; border-left: 2px solid #2D4963; }
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button { min-height: 36px !important; padding: 4px 10px 4px 14px !important; border-radius: 7px !important; }
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button p { font-size: 13.5px !important; }
+    margin-left: 20px !important; padding-left: 8px !important; border-left: 1px solid rgba(148,163,184,.28); margin-bottom: -0.55rem !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"] {
+    min-height: 35px !important; padding: 4px 11px !important; border-radius: 9px !important;
+    background: transparent !important; border: 1px solid transparent !important; box-shadow: none !important; transition: all .15s ease; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"] p {
+    font-size: 13.5px !important; font-weight: 600 !important; color: #B9C7D8 !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"]:hover {
+    background: rgba(255,255,255,.075) !important; border-color: rgba(255,255,255,.08) !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"]:hover p { color: #FFFFFF !important; }
 section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] {
-    background: #0E9AA7 !important; border-color: #1FB5C4 !important; border-left: 4px solid #7FE3EC !important; }
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] p { font-weight: 800 !important; color: #FFFFFF !important; }
+    min-height: 37px !important; padding: 4px 11px !important; border-radius: 9px !important;
+    background: linear-gradient(135deg, #0F766E 0%, #14A596 100%) !important;
+    border: 1px solid rgba(94,234,212,.55) !important; border-left: 4px solid #99F6E4 !important;
+    box-shadow: 0 6px 16px rgba(15,118,110,.45) !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] p { font-size: 13.5px !important; font-weight: 800 !important; color: #FFFFFF !important; }
 @media (max-width: 640px) {
-  section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button { min-height: 46px !important; }
+  section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button { min-height: 48px !important; }
   section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button { min-height: 44px !important; }
 }
 </style>""", unsafe_allow_html=True)
@@ -21388,7 +21420,7 @@ section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind=
 
     for _gi, (_gname, _gpages) in enumerate(NAV_GROUPS):
         _is_open = _gname in _open_grps
-        st.button(f"{_gi + 1:02d}  {_gname}",
+        st.button(f"`{_gi + 1:02d}` {_gname}",
                   key=f"sidebar_nav_g{_gi}_{'open' if _is_open else 'shut'}_{'act' if _gname == _cur_group else 'off'}",
                   on_click=_nav_toggle_group, args=(_gname,), use_container_width=True)
         if _is_open:
@@ -21404,9 +21436,11 @@ section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind=
 _bc_page = next((_l for _l, _r in _NAV_PAGES.get(_cur_group, {}).items() if _r == _cur_route), None) or str(_cur_route).split(" ", 1)[-1]
 _bc_esc = lambda _s: str(_s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 st.markdown(
-    '<style>.nav-crumb{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 10px;padding:8px 14px;'
-    'background:#EAF6F8;border:1px solid #BFE3E8;border-left:4px solid #087E8B;border-radius:8px;font-size:14px;color:#33506A}'
-    '.nav-crumb .g{font-weight:700;color:#087E8B}.nav-crumb .s{color:#7B8FA3;font-weight:700}.nav-crumb .p{font-weight:800;color:#0F2A44}</style>'
+    '<style>.nav-crumb{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0 0 12px;padding:10px 16px;'
+    'background:#FFFFFF;border:1px solid #E2E8F0;border-radius:12px;box-shadow:0 2px 8px rgba(15,23,42,.045);font-size:14px}'
+    '.nav-crumb::before{content:"";width:4px;align-self:stretch;min-height:22px;border-radius:4px;background:linear-gradient(180deg,#14B8A6,#0F766E)}'
+    '.nav-crumb .g{background:#E8F5F2;color:#0F766E;border:1px solid #B7E2D8;border-radius:999px;padding:3px 12px;font-weight:700;font-size:12.5px;letter-spacing:.2px}'
+    '.nav-crumb .s{color:#94A3B8;font-weight:700}.nav-crumb .p{color:#172033;font-weight:800;font-size:15px}</style>'
     '<div class="nav-crumb">'
     + (f'<span class="g">{_bc_esc(_cur_group)}</span><span class="s">&gt;</span>' if _cur_group else '')
     + f'<span class="p">{_bc_esc(_bc_page)}</span></div>',
