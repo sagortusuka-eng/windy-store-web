@@ -21339,23 +21339,22 @@ def _nav_go(_route):              # page click: same NAV_KEY write the old sideb
 
 
 with st.sidebar:
+    # Buttons use the existing "sidebar_nav_" key prefix so the app's own dark-sidebar button styling applies
+    # (secondary = plain link, primary = teal active page). The CSS below only adds group-header / indent styling.
     st.markdown("""<style>
-section[data-testid="stSidebar"] [class*="st-key-nav_grp_"] button,
-section[data-testid="stSidebar"] [class*="st-key-nav_pg_"] button {
-    justify-content: flex-start !important; text-align: left !important; width: 100% !important;
-    box-shadow: none !important; border-radius: 9px !important; }
-section[data-testid="stSidebar"] [class*="st-key-nav_grp_"] button { min-height: 42px; background: #16304A !important; border: 1px solid #233A52 !important; }
-section[data-testid="stSidebar"] [class*="st-key-nav_grp_"] button p { color: #FFFFFF !important; font-size: 14px !important; font-weight: 800 !important; }
-section[data-testid="stSidebar"] [class*="st-key-nav_grp_open_"] button { border-color: #1599A6 !important; background: #123A4F !important; }
-section[data-testid="stSidebar"] [class*="st-key-nav_pg_"] button { min-height: 38px; padding: 6px 12px 6px 26px !important; background: transparent !important; border: 1px solid transparent !important; }
-section[data-testid="stSidebar"] [class*="st-key-nav_pg_"] button p { color: #D8E3EF !important; font-size: 13.5px !important; font-weight: 600 !important; }
-section[data-testid="stSidebar"] [class*="st-key-nav_pg_"] button:hover { background: #1B334B !important; border-color: #2D4963 !important; }
-section[data-testid="stSidebar"] [class*="st-key-nav_pg_on_"] button { background: #087E8B !important; border-color: #1599A6 !important; }
-section[data-testid="stSidebar"] [class*="st-key-nav_pg_on_"] button p { color: #FFFFFF !important; font-weight: 750 !important; }
-section[data-testid="stSidebar"] [class*="st-key-nav_grp_"], section[data-testid="stSidebar"] [class*="st-key-nav_pg_"] { margin-bottom: -6px; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"] {
+    min-height: 42px !important; background: #16304A !important; border: 1px solid #2D4963 !important; border-radius: 9px !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"] p {
+    font-size: 14px !important; font-weight: 800 !important; color: #FFFFFF !important; letter-spacing: .2px; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_gopen"] button[kind="secondary"] {
+    background: #0E3A4C !important; border: 1px solid #1599A6 !important; border-left: 4px solid #1FB5C4 !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button { min-height: 38px !important; padding: 5px 10px 5px 30px !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button p { font-size: 13.5px !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] { border-left: 4px solid #7FE3EC !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] p { font-weight: 800 !important; }
 @media (max-width: 640px) {
-  section[data-testid="stSidebar"] [class*="st-key-nav_grp_"] button { min-height: 46px; }
-  section[data-testid="stSidebar"] [class*="st-key-nav_pg_"] button { min-height: 44px; }
+  section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button { min-height: 46px !important; }
+  section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button { min-height: 44px !important; }
 }
 </style>""", unsafe_allow_html=True)
     st.markdown('<div class="nav-section-title">Navigation</div>', unsafe_allow_html=True)
@@ -21372,14 +21371,14 @@ section[data-testid="stSidebar"] [class*="st-key-nav_grp_"], section[data-testid
     for _gi, (_gname, _gpages) in enumerate(NAV_GROUPS):
         _is_open = (_gname == _open_grp)
         st.button(("▾  " if _is_open else "▸  ") + _gname,
-                  key=(f"nav_grp_open_{_gi}" if _is_open else f"nav_grp_{_gi}"),
+                  key=(f"sidebar_nav_gopen{_gi}" if _is_open else f"sidebar_nav_g{_gi}"),
                   on_click=_nav_open_group, args=(_gname,), use_container_width=True)
         if _is_open:
             for _pi, (_plabel, _proute) in enumerate(_gpages):
                 if _proute not in TAB_NAMES:
                     continue
-                st.button(_plabel,
-                          key=(f"nav_pg_on_{_gi}_{_pi}" if _proute == _cur_route else f"nav_pg_{_gi}_{_pi}"),
+                st.button(_plabel, key=f"sidebar_nav_p{_gi}_{_pi}",
+                          type="primary" if _proute == _cur_route else "secondary",
                           on_click=_nav_go, args=(_proute,), use_container_width=True)
     st.markdown("---")
 
