@@ -21329,8 +21329,13 @@ _NAV_ROUTE_GROUP = {_r: _g for _g, _p in NAV_GROUPS for _l, _r in _p}      # rou
 _NAV_PH = "Select a page…"
 
 
-def _nav_open_group(_g):          # header click: only expands that group's pages (does not change the current page)
-    st.session_state["nav_group_sel"] = _g
+def _nav_toggle_group(_g):        # header click: expand / collapse that group's pages (does not change the current page)
+    _o = list(st.session_state.get("nav_open_groups") or [])
+    if _g in _o:
+        _o.remove(_g)
+    else:
+        _o.append(_g)
+    st.session_state["nav_open_groups"] = _o
 
 
 def _nav_go(_route):              # page click: same NAV_KEY write the old sidebar buttons did
@@ -21339,19 +21344,29 @@ def _nav_go(_route):              # page click: same NAV_KEY write the old sideb
 
 
 with st.sidebar:
-    # Buttons use the existing "sidebar_nav_" key prefix so the app's own dark-sidebar button styling applies
-    # (secondary = plain link, primary = teal active page). The CSS below only adds group-header / indent styling.
+    # Design B: compact dark-navy sidebar, numbered group headings (click = expand/collapse), indented page links,
+    # active page in teal and active group marked. Buttons keep the "sidebar_nav_" key prefix so the app's dark-sidebar
+    # button styling still applies; the CSS below only adds heading / indent / chevron / teal styling.
     st.markdown("""<style>
 section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"] {
-    min-height: 42px !important; background: #16304A !important; border: 1px solid #2D4963 !important; border-radius: 9px !important; }
+    min-height: 40px !important; background: #16304A !important; border: 1px solid #2D4963 !important; border-radius: 9px !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]:hover {
+    background: #1B3A55 !important; border-color: #3B6280 !important; }
 section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"] p {
     font-size: 14px !important; font-weight: 800 !important; color: #FFFFFF !important; letter-spacing: .2px; }
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_gopen"] button[kind="secondary"] {
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button div { width: auto !important; flex: 1 1 auto !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button::after {
+    content: "\\25B8"; margin-left: auto; padding-left: 6px; color: #9FB6CC; font-size: 13px; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_open_"] button::after { content: "\\25BE"; color: #FFFFFF; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"] {
     background: #0E3A4C !important; border: 1px solid #1599A6 !important; border-left: 4px solid #1FB5C4 !important; }
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button { min-height: 38px !important; padding: 5px 10px 5px 30px !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] {
+    margin-left: 16px !important; border-left: 2px solid #2D4963; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button { min-height: 36px !important; padding: 4px 10px 4px 14px !important; border-radius: 7px !important; }
 section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button p { font-size: 13.5px !important; }
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] { border-left: 4px solid #7FE3EC !important; }
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] p { font-weight: 800 !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] {
+    background: #0E9AA7 !important; border-color: #1FB5C4 !important; border-left: 4px solid #7FE3EC !important; }
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] p { font-weight: 800 !important; color: #FFFFFF !important; }
 @media (max-width: 640px) {
   section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button { min-height: 46px !important; }
   section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button { min-height: 44px !important; }
@@ -21360,19 +21375,22 @@ section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind=
     st.markdown('<div class="nav-section-title">Navigation</div>', unsafe_allow_html=True)
 
     _cur_route = st.session_state.get(NAV_KEY)
-    # Follow the route when it changed from anywhere else (dashboard shortcut, deep link, in-page button).
-    if st.session_state.get("_nav_seen_route") != _cur_route or st.session_state.get("nav_group_sel") not in _NAV_GROUP_NAMES:
+    _cur_group = _NAV_ROUTE_GROUP.get(_cur_route)        # None for pages outside the four groups (e.g. Transactions)
+    # Follow the route when it changed from anywhere else (dashboard shortcut, deep link, in-page button): open its group.
+    if st.session_state.get("_nav_seen_route") != _cur_route or not isinstance(st.session_state.get("nav_open_groups"), list):
         st.session_state["_nav_seen_route"] = _cur_route
-        st.session_state["nav_group_sel"] = _NAV_ROUTE_GROUP.get(_cur_route, st.session_state.get("nav_group_sel", _NAV_GROUP_NAMES[0]))
-        if st.session_state["nav_group_sel"] not in _NAV_GROUP_NAMES:
-            st.session_state["nav_group_sel"] = _NAV_GROUP_NAMES[0]
-    _open_grp = st.session_state["nav_group_sel"]
+        _og = st.session_state.get("nav_open_groups")
+        _og = list(_og) if isinstance(_og, list) else ([] if _cur_group else [_NAV_GROUP_NAMES[0]])
+        if _cur_group and _cur_group not in _og:
+            _og.append(_cur_group)
+        st.session_state["nav_open_groups"] = _og
+    _open_grps = st.session_state["nav_open_groups"]
 
     for _gi, (_gname, _gpages) in enumerate(NAV_GROUPS):
-        _is_open = (_gname == _open_grp)
-        st.button(("▾  " if _is_open else "▸  ") + _gname,
-                  key=(f"sidebar_nav_gopen{_gi}" if _is_open else f"sidebar_nav_g{_gi}"),
-                  on_click=_nav_open_group, args=(_gname,), use_container_width=True)
+        _is_open = _gname in _open_grps
+        st.button(f"{_gi + 1:02d}  {_gname}",
+                  key=f"sidebar_nav_g{_gi}_{'open' if _is_open else 'shut'}_{'act' if _gname == _cur_group else 'off'}",
+                  on_click=_nav_toggle_group, args=(_gname,), use_container_width=True)
         if _is_open:
             for _pi, (_plabel, _proute) in enumerate(_gpages):
                 if _proute not in TAB_NAMES:
@@ -21381,6 +21399,18 @@ section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind=
                           type="primary" if _proute == _cur_route else "secondary",
                           on_click=_nav_go, args=(_proute,), use_container_width=True)
     st.markdown("---")
+
+# Breadcrumb above the page content (Design B): "Group  >  Page". Pages outside the four groups show just their own name.
+_bc_page = next((_l for _l, _r in _NAV_PAGES.get(_cur_group, {}).items() if _r == _cur_route), None) or str(_cur_route).split(" ", 1)[-1]
+_bc_esc = lambda _s: str(_s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+st.markdown(
+    '<style>.nav-crumb{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 10px;padding:8px 14px;'
+    'background:#EAF6F8;border:1px solid #BFE3E8;border-left:4px solid #087E8B;border-radius:8px;font-size:14px;color:#33506A}'
+    '.nav-crumb .g{font-weight:700;color:#087E8B}.nav-crumb .s{color:#7B8FA3;font-weight:700}.nav-crumb .p{font-weight:800;color:#0F2A44}</style>'
+    '<div class="nav-crumb">'
+    + (f'<span class="g">{_bc_esc(_cur_group)}</span><span class="s">&gt;</span>' if _cur_group else '')
+    + f'<span class="p">{_bc_esc(_bc_page)}</span></div>',
+    unsafe_allow_html=True)
 
 FAC = render_header()
 FSQL, FP = fw(FAC)
