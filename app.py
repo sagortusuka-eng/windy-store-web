@@ -2711,15 +2711,15 @@ def sidebar_clock():
     with st.sidebar:
         components.html("""
         <div style="font-family:Inter,system-ui,sans-serif;display:flex;align-items:center;gap:10px;
-                    background:linear-gradient(135deg,#0B1A2A 0%,#17334B 100%);
-                    border:1px solid #2D4963;border-left:4px solid #14B8A6;border-radius:10px;
+                    background:linear-gradient(135deg,#041030 0%,#0F3F99 100%);
+                    border:1px solid rgba(232,207,142,.45);border-left:4px solid #E8CF8E;border-radius:10px;
                     padding:8px 11px;box-shadow:0 4px 12px rgba(2,12,24,.16);">
-          <div style="font-size:20px;line-height:1;color:#5EEAD4;">◷</div>
+          <div style="font-size:20px;line-height:1;color:#E8CF8E;">◷</div>
           <div style="min-width:0;">
             <div id="clk" style="font-size:16px;font-weight:800;letter-spacing:.6px;color:#FFFFFF;line-height:1.2;">--:--:--</div>
             <div id="dt" style="font-size:11px;color:#C7D4E2;margin-top:3px;white-space:nowrap;">--</div>
           </div>
-          <div style="margin-left:auto;font-size:9px;font-weight:800;letter-spacing:.8px;color:#5EEAD4;">LOCAL</div>
+          <div style="margin-left:auto;font-size:9px;font-weight:800;letter-spacing:.8px;color:#E8CF8E;">LOCAL</div>
         </div>
         <script>
           function tick(){
@@ -21446,6 +21446,25 @@ section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind=
   section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button { min-height: 48px !important; }
   section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button { min-height: 44px !important; }
 }
+/* ===== PREMIUM SIDEBAR v2: royal-blue gradient + champagne-gold accents ===== */
+section[data-testid="stSidebar"]{background:linear-gradient(180deg,#0F3F99 0%,#0A2B72 42%,#061C4B 100%)!important;border-right:1px solid rgba(232,207,142,.40)!important;box-shadow:6px 0 24px rgba(4,16,48,.28)}
+section[data-testid="stSidebar"]>div{background:transparent!important}
+section[data-testid="stSidebar"] .brand-card{background:rgba(4,16,48,.55)!important;border:1px solid rgba(232,207,142,.45)!important;box-shadow:0 8px 20px rgba(2,10,32,.35)!important}
+section[data-testid="stSidebar"] .nav-section-title{color:#E8CF8E!important}
+section[data-testid="stSidebar"] hr{border-color:rgba(232,207,142,.25)!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]{background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.04))!important;border:1px solid rgba(232,207,142,.30)!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.10),0 4px 10px rgba(2,10,32,.30)!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]:hover{background:linear-gradient(180deg,rgba(255,255,255,.18),rgba(255,255,255,.07))!important;border-color:#E8CF8E!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button p code{background:rgba(232,207,142,.16)!important;color:#F4E3B2!important;border:1px solid rgba(232,207,142,.45)!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button::after{color:#E8CF8E!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"],
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"]:hover{background:linear-gradient(90deg,rgba(232,207,142,.34),rgba(232,207,142,.08))!important;border:1px solid rgba(232,207,142,.65)!important;border-left:4px solid #E8CF8E!important;box-shadow:0 8px 18px rgba(2,10,32,.40)!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button p code{background:linear-gradient(135deg,#C9A24B,#EBD291)!important;color:#1E1503!important;border-color:#E8CF8E!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"]{border-left:1px solid rgba(232,207,142,.35)!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"] p{color:#DCE6FA!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"]:hover{background:rgba(255,255,255,.11)!important;border-color:rgba(232,207,142,.35)!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"]{background:linear-gradient(135deg,#C9A24B 0%,#EBD291 100%)!important;border:1px solid #F4E3B2!important;border-left:4px solid #FFF6D8!important;box-shadow:0 8px 18px rgba(2,10,32,.45),0 0 0 1px rgba(232,207,142,.25)!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] p{color:#0A1F4D!important;font-weight:800!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"]:hover{filter:brightness(1.05)}
 </style>""", unsafe_allow_html=True)
     st.markdown('<div class="nav-section-title">Navigation</div>', unsafe_allow_html=True)
 
