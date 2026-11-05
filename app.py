@@ -21280,34 +21280,100 @@ with st.sidebar:
 
 sidebar_clock()
 
-with st.sidebar:
-    st.markdown('<div class="nav-section-title">Workspace</div>', unsafe_allow_html=True)
-    _ws_names = list(TAB_NAMES[:6]) + [NAV_REQ_ISSUE]         # Requisition Issue (+ Supplier Receipt) sits right under Physical Count
-    _hidden_nav = {"🗓 Daily Work Sheet"}                      # not used any more - removed from the sidebar (the page itself is untouched)
-    for nav_label in _ws_names:
-        nav_index = TAB_NAMES.index(nav_label)
-        if st.button(
-            nav_label,
-            key=f"sidebar_nav_{nav_index}",
-            type="primary" if st.session_state.get(NAV_KEY) == nav_label else "secondary",
-            use_container_width=True,
-        ):
-            st.session_state[NAV_KEY] = nav_label
-            st.rerun()
+# ---- Sidebar navigation: two compact selectors (Group -> Page). UI only: every choice writes the same NAV_KEY route
+#      value the old buttons wrote, so all route strings, shortcuts (e.g. ERP Audit card) and RENDERERS are unchanged.
+NAV_GROUPS = [
+    ("Store Operations", [
+        ("Dashboard", TAB_NAMES[0]),
+        ("Daily Issue Slip & Receipt Entry", NAV_REQ_ISSUE),   # visible label only - route is the existing NAV_REQ_ISSUE page
+        ("Requisition", "📑 Requisition"),
+        ("Physical Count", NAV_PHYSICAL),
+        ("Repair & Returns", "🛠 Repair & Returns"),
+        ("Gate Pass In", NAV_GATE_PASS),
+        ("Hold Bill in Store", NAV_HOLD_BILL),
+        ("Warranty", NAV_WARRANTY),
+        ("Scrap Register", NAV_SCRAP),
+    ]),
+    ("Inventory & Stock", [
+        ("Inventory", "📦 Inventory"),
+        ("Stock Report", "📦 Stock Report"),
+        ("Global Inventory", "🌐 Global Inventory"),
+        ("Stock Cover", NAV_STOCK_COVER),
+        ("High Value Stock", NAV_HIGH_VALUE),
+        ("Old Materials", NAV_OLDMAT),
+        ("Price History", NAV_PRICE),
+    ]),
+    ("Audit & Control", [
+        ("ERP Audit", NAV_ERP_AUDIT),
+        ("Issue Ledger", NAV_ISSUE_LEDGER),
+        ("Transfer History", "🔁 Transfer History"),
+        ("Data Health", NAV_DATA_HEALTH),
+        ("Monthly Stock Check", NAV_MSC),
+        ("Item Audit", NAV_ITEM_AUDIT),
+    ]),
+    ("Finance & Reports", [
+        ("Reports", NAV_REPORTS),
+        ("Ledger", "📒 Ledger"),
+        ("Forecast", "📈 Forecast"),
+        ("Budget", "💰 Budget"),
+        ("Section Budget", NAV_SEC_BUDGET),
+        ("Machine Cost", NAV_MACHINE),
+    ]),
+]
+_NAV_GROUP_NAMES = [_g for _g, _p in NAV_GROUPS]
+_NAV_PAGES = {_g: dict(_p) for _g, _p in NAV_GROUPS}                       # group -> {visible label: route}
+_NAV_ROUTE_GROUP = {_r: _g for _g, _p in NAV_GROUPS for _l, _r in _p}      # route -> group
+_NAV_PH = "Select a page…"
 
-    st.markdown('<div class="nav-section-title">Management</div>', unsafe_allow_html=True)
-    for nav_index in range(6, len(TAB_NAMES)):
-        nav_label = TAB_NAMES[nav_index]
-        if nav_label in _ws_names or nav_label in _hidden_nav:
-            continue
-        if st.button(
-            nav_label,
-            key=f"sidebar_nav_{nav_index}",
-            type="primary" if st.session_state.get(NAV_KEY) == nav_label else "secondary",
-            use_container_width=True,
-        ):
-            st.session_state[NAV_KEY] = nav_label
-            st.rerun()
+
+def _nav_page_changed():
+    _grp = st.session_state.get("nav_group_sel")
+    _route = _NAV_PAGES.get(_grp, {}).get(st.session_state.get("nav_page_sel"))
+    if _route and _route in TAB_NAMES:
+        st.session_state[NAV_KEY] = _route
+
+
+with st.sidebar:
+    st.markdown("""<style>
+section[data-testid="stSidebar"] .st-key-nav_group_sel,
+section[data-testid="stSidebar"] .st-key-nav_page_sel { margin-bottom: 4px !important; }
+section[data-testid="stSidebar"] .st-key-nav_group_sel label p,
+section[data-testid="stSidebar"] .st-key-nav_page_sel label p {
+    color: #9FB3C8 !important; font-size: 11px !important; font-weight: 700 !important;
+    letter-spacing: .08em; text-transform: uppercase; margin: 0 !important; }
+section[data-testid="stSidebar"] .st-key-nav_group_sel div[data-baseweb="select"] > div,
+section[data-testid="stSidebar"] .st-key-nav_page_sel div[data-baseweb="select"] > div {
+    min-height: 42px; background: #FFFFFF !important; border: 1.5px solid #FFFFFF !important; border-radius: 9px !important; }
+section[data-testid="stSidebar"] .st-key-nav_group_sel div[data-baseweb="select"] *,
+section[data-testid="stSidebar"] .st-key-nav_page_sel div[data-baseweb="select"] * {
+    color: #172033 !important; font-size: 14px !important; font-weight: 650 !important; }
+section[data-testid="stSidebar"] .st-key-nav_page_sel div[data-baseweb="select"] > div { border-color: #1599A6 !important; box-shadow: 0 0 0 1px #087E8B; }
+section[data-testid="stSidebar"] .st-key-nav_group_sel div[data-baseweb="select"] svg,
+section[data-testid="stSidebar"] .st-key-nav_page_sel div[data-baseweb="select"] svg { fill: #087E8B !important; }
+@media (max-width: 640px) {
+  section[data-testid="stSidebar"] .st-key-nav_group_sel div[data-baseweb="select"] > div,
+  section[data-testid="stSidebar"] .st-key-nav_page_sel div[data-baseweb="select"] > div { min-height: 46px; }
+}
+</style>""", unsafe_allow_html=True)
+    st.markdown('<div class="nav-section-title">Navigation</div>', unsafe_allow_html=True)
+
+    _cur_route = st.session_state.get(NAV_KEY)
+    # Follow the route when it changed from anywhere else (dashboard shortcut, deep link, in-page button).
+    if st.session_state.get("_nav_seen_route") != _cur_route or st.session_state.get("nav_group_sel") not in _NAV_GROUP_NAMES:
+        st.session_state["_nav_seen_route"] = _cur_route
+        st.session_state["nav_group_sel"] = _NAV_ROUTE_GROUP.get(_cur_route, st.session_state.get("nav_group_sel", _NAV_GROUP_NAMES[0]))
+        if st.session_state["nav_group_sel"] not in _NAV_GROUP_NAMES:
+            st.session_state["nav_group_sel"] = _NAV_GROUP_NAMES[0]
+
+    st.selectbox("Group", _NAV_GROUP_NAMES, key="nav_group_sel")
+    _grp = st.session_state["nav_group_sel"]
+    _labels = [_l for _l, _r in NAV_GROUPS[_NAV_GROUP_NAMES.index(_grp)][1] if _r in TAB_NAMES]
+    _cur_label = next((_l for _l in _labels if _NAV_PAGES[_grp][_l] == _cur_route), None)
+    if _cur_label is None:          # current page is in another group (or a page not listed): ask for a pick, do not navigate
+        _labels = [_NAV_PH] + _labels
+        _cur_label = _NAV_PH
+    st.session_state["nav_page_sel"] = _cur_label
+    st.selectbox("Page", _labels, key="nav_page_sel", on_change=_nav_page_changed)
     st.markdown("---")
 
 FAC = render_header()
