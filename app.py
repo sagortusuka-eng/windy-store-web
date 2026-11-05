@@ -9724,9 +9724,12 @@ def render_today_work_card():
                     f'<span style="font-size:13px;color:#64748B;font-weight:600;"> {unit}</span></div>'
                     f'<div style="font-size:12px;color:#64748B;margin-bottom:6px;">{html_lib.escape(hint)}</div>',
                     unsafe_allow_html=True)
-                st.button(btn if (n is None or int(n) > 0) else "খুলুন →", key=f"tw_go_{i}", on_click=go_page,
-                          args=(page, view), use_container_width=True,
-                          type="primary" if (n is not None and int(n) > 0) else "secondary")
+                if page == NAV_TRANSACTIONS:   # UI only: Transactions shortcut hidden here; spacer keeps the 4 cards aligned
+                    st.markdown('<div style="height:40px;"></div>', unsafe_allow_html=True)
+                else:
+                    st.button(btn if (n is None or int(n) > 0) else "খুলুন →", key=f"tw_go_{i}", on_click=go_page,
+                              args=(page, view), use_container_width=True,
+                              type="primary" if (n is not None and int(n) > 0) else "secondary")
     if total == 0:
         st.success("🎉 আজকের জন্য কোনো বাকি কাজ নেই।")
     else:
@@ -21280,7 +21283,7 @@ with st.sidebar:
 
 sidebar_clock()
 
-# ---- Sidebar navigation: two compact selectors (Group -> Page). UI only: every choice writes the same NAV_KEY route
+# ---- Sidebar navigation: expandable grouped links (active group shows its pages). UI only: every choice writes the same NAV_KEY route
 #      value the old buttons wrote, so all route strings, shortcuts (e.g. ERP Audit card) and RENDERERS are unchanged.
 NAV_GROUPS = [
     ("Store Operations", [
@@ -21326,33 +21329,33 @@ _NAV_ROUTE_GROUP = {_r: _g for _g, _p in NAV_GROUPS for _l, _r in _p}      # rou
 _NAV_PH = "Select a page…"
 
 
-def _nav_page_changed():
-    _grp = st.session_state.get("nav_group_sel")
-    _route = _NAV_PAGES.get(_grp, {}).get(st.session_state.get("nav_page_sel"))
-    if _route and _route in TAB_NAMES:
+def _nav_open_group(_g):          # header click: only expands that group's pages (does not change the current page)
+    st.session_state["nav_group_sel"] = _g
+
+
+def _nav_go(_route):              # page click: same NAV_KEY write the old sidebar buttons did
+    if _route in TAB_NAMES:
         st.session_state[NAV_KEY] = _route
 
 
 with st.sidebar:
     st.markdown("""<style>
-section[data-testid="stSidebar"] .st-key-nav_group_sel,
-section[data-testid="stSidebar"] .st-key-nav_page_sel { margin-bottom: 4px !important; }
-section[data-testid="stSidebar"] .st-key-nav_group_sel label p,
-section[data-testid="stSidebar"] .st-key-nav_page_sel label p {
-    color: #9FB3C8 !important; font-size: 11px !important; font-weight: 700 !important;
-    letter-spacing: .08em; text-transform: uppercase; margin: 0 !important; }
-section[data-testid="stSidebar"] .st-key-nav_group_sel div[data-baseweb="select"] > div,
-section[data-testid="stSidebar"] .st-key-nav_page_sel div[data-baseweb="select"] > div {
-    min-height: 42px; background: #FFFFFF !important; border: 1.5px solid #FFFFFF !important; border-radius: 9px !important; }
-section[data-testid="stSidebar"] .st-key-nav_group_sel div[data-baseweb="select"] *,
-section[data-testid="stSidebar"] .st-key-nav_page_sel div[data-baseweb="select"] * {
-    color: #172033 !important; font-size: 14px !important; font-weight: 650 !important; }
-section[data-testid="stSidebar"] .st-key-nav_page_sel div[data-baseweb="select"] > div { border-color: #1599A6 !important; box-shadow: 0 0 0 1px #087E8B; }
-section[data-testid="stSidebar"] .st-key-nav_group_sel div[data-baseweb="select"] svg,
-section[data-testid="stSidebar"] .st-key-nav_page_sel div[data-baseweb="select"] svg { fill: #087E8B !important; }
+section[data-testid="stSidebar"] [class*="st-key-nav_grp_"] button,
+section[data-testid="stSidebar"] [class*="st-key-nav_pg_"] button {
+    justify-content: flex-start !important; text-align: left !important; width: 100% !important;
+    box-shadow: none !important; border-radius: 9px !important; }
+section[data-testid="stSidebar"] [class*="st-key-nav_grp_"] button { min-height: 42px; background: #16304A !important; border: 1px solid #233A52 !important; }
+section[data-testid="stSidebar"] [class*="st-key-nav_grp_"] button p { color: #FFFFFF !important; font-size: 14px !important; font-weight: 800 !important; }
+section[data-testid="stSidebar"] [class*="st-key-nav_grp_open_"] button { border-color: #1599A6 !important; background: #123A4F !important; }
+section[data-testid="stSidebar"] [class*="st-key-nav_pg_"] button { min-height: 38px; padding: 6px 12px 6px 26px !important; background: transparent !important; border: 1px solid transparent !important; }
+section[data-testid="stSidebar"] [class*="st-key-nav_pg_"] button p { color: #D8E3EF !important; font-size: 13.5px !important; font-weight: 600 !important; }
+section[data-testid="stSidebar"] [class*="st-key-nav_pg_"] button:hover { background: #1B334B !important; border-color: #2D4963 !important; }
+section[data-testid="stSidebar"] [class*="st-key-nav_pg_on_"] button { background: #087E8B !important; border-color: #1599A6 !important; }
+section[data-testid="stSidebar"] [class*="st-key-nav_pg_on_"] button p { color: #FFFFFF !important; font-weight: 750 !important; }
+section[data-testid="stSidebar"] [class*="st-key-nav_grp_"], section[data-testid="stSidebar"] [class*="st-key-nav_pg_"] { margin-bottom: -6px; }
 @media (max-width: 640px) {
-  section[data-testid="stSidebar"] .st-key-nav_group_sel div[data-baseweb="select"] > div,
-  section[data-testid="stSidebar"] .st-key-nav_page_sel div[data-baseweb="select"] > div { min-height: 46px; }
+  section[data-testid="stSidebar"] [class*="st-key-nav_grp_"] button { min-height: 46px; }
+  section[data-testid="stSidebar"] [class*="st-key-nav_pg_"] button { min-height: 44px; }
 }
 </style>""", unsafe_allow_html=True)
     st.markdown('<div class="nav-section-title">Navigation</div>', unsafe_allow_html=True)
@@ -21364,16 +21367,20 @@ section[data-testid="stSidebar"] .st-key-nav_page_sel div[data-baseweb="select"]
         st.session_state["nav_group_sel"] = _NAV_ROUTE_GROUP.get(_cur_route, st.session_state.get("nav_group_sel", _NAV_GROUP_NAMES[0]))
         if st.session_state["nav_group_sel"] not in _NAV_GROUP_NAMES:
             st.session_state["nav_group_sel"] = _NAV_GROUP_NAMES[0]
+    _open_grp = st.session_state["nav_group_sel"]
 
-    st.selectbox("Group", _NAV_GROUP_NAMES, key="nav_group_sel")
-    _grp = st.session_state["nav_group_sel"]
-    _labels = [_l for _l, _r in NAV_GROUPS[_NAV_GROUP_NAMES.index(_grp)][1] if _r in TAB_NAMES]
-    _cur_label = next((_l for _l in _labels if _NAV_PAGES[_grp][_l] == _cur_route), None)
-    if _cur_label is None:          # current page is in another group (or a page not listed): ask for a pick, do not navigate
-        _labels = [_NAV_PH] + _labels
-        _cur_label = _NAV_PH
-    st.session_state["nav_page_sel"] = _cur_label
-    st.selectbox("Page", _labels, key="nav_page_sel", on_change=_nav_page_changed)
+    for _gi, (_gname, _gpages) in enumerate(NAV_GROUPS):
+        _is_open = (_gname == _open_grp)
+        st.button(("▾  " if _is_open else "▸  ") + _gname,
+                  key=(f"nav_grp_open_{_gi}" if _is_open else f"nav_grp_{_gi}"),
+                  on_click=_nav_open_group, args=(_gname,), use_container_width=True)
+        if _is_open:
+            for _pi, (_plabel, _proute) in enumerate(_gpages):
+                if _proute not in TAB_NAMES:
+                    continue
+                st.button(_plabel,
+                          key=(f"nav_pg_on_{_gi}_{_pi}" if _proute == _cur_route else f"nav_pg_{_gi}_{_pi}"),
+                          on_click=_nav_go, args=(_proute,), use_container_width=True)
     st.markdown("---")
 
 FAC = render_header()
