@@ -14848,6 +14848,55 @@ def _rr_form():
                      + (f" {_rn}" if _rn else ""))
 
 
+@tx
+def rr_move_challan(src, ch, sup, dt, dest, reason):
+    """Moves a whole received challan from one unit to the other (wrong unit chosen at entry): stock goes out of `src`,
+    into `dest`; the receipt rows are re-pointed to the matching `dest` items; requisition Received qty follows."""
+    if dest == src:
+        raise ValueError("Same unit - onno unit bachun.")
+    rows = q("""SELECT * FROM transactions WHERE factory_name=%s AND trans_type='Supplier. Rec' AND COALESCE(challan_no,'')=%s
+                 AND COALESCE(supplier_name,'')=%s AND date=%s ORDER BY id FOR UPDATE""", (src, ch, sup, dt))
+    if not rows:
+        raise ValueError("Challan paoa jay nai (hoyto ager-i soriye deya hoyeche).")
+    plan, bad = [], []
+    for t in rows:
+        qty = float(t["qty"] or 0)
+        inv = q(f"SELECT {INV_COLS} FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE", (t["sl_no"], src))
+        if not inv:
+            bad.append(f"{t['item_name']}: {src}-e inventory item paoa jayni")
+            continue
+        it = inv[0]
+        if float(it["stock"] or 0) < qty - 1e-9:
+            bad.append(f"{it['item_name']}: {src}-e stock {float(it['stock'] or 0):g}, challan qty {qty:g} - mal ager-i issue hoyeche, soranu jabe na")
+            continue
+        m = find_same_in_other(it["prod_id"], it["item_name"], dest, it["size"])
+        if not m or m.get("level") not in ("exact", "code"):
+            bad.append(f"{it['item_name']} [{it['prod_id']}]: {dest}-er inventory-te hubohu ei item nei - age oi unit-e item add korun")
+            continue
+        plan.append((t, it, m, qty))
+    if bad:
+        raise ValueError(" | ".join(bad))
+    _pm = pre_opening_msg(dest, [int(m["sl_no"]) for _, _, m, _ in plan], dt, {int(m["sl_no"]): m["item_name"] for _, _, m, _ in plan})
+    if _pm:
+        raise ValueError(_pm)
+    who = st.session_state.get("user", "")
+    for t, it, m, qty in plan:
+        tid = int(t["id"])
+        dlock = q("SELECT sl_no FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE", (m["sl_no"], dest))
+        if not dlock:
+            raise ValueError(f"{m['item_name']}: {dest}-er item paoa jayni.")
+        run("UPDATE inventory SET current_stock=current_stock-%s WHERE sl_no=%s AND factory_name=%s", (qty, it["sl_no"], src))
+        req_undo_receipt(tid)
+        run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (qty, m["sl_no"], dest))
+        note = f"{(t['notes'] or '').strip()} [Unit moved {src} -> {dest} by {who}: {reason}]".strip()
+        run("UPDATE transactions SET factory_name=%s, sl_no=%s, prod_id=%s, item_name=%s, notes=%s WHERE id=%s",
+            (dest, m["sl_no"], m["prod_id"], m["item_name"], note, tid))
+        if not is_blank_code(m["prod_id"]):
+            _req_alloc(dest, m["prod_id"], qty, t["date"], tid)
+    audit("RECEIPT_UNIT_MOVE", f"Challan {ch or '(nei)'} ({sup or '-'}, {dt}): {len(plan)} item(s) moved {src} -> {dest} by {who} - {reason}")
+    return len(plan)
+
+
 @_frag
 def _rr_fix_panel():
     """Edit / delete a challan that was already received: change a quantity or remove a wrong line. Stock follows; the
@@ -14893,6 +14942,30 @@ def _rr_fix_panel():
         n_pend = _ri_pending_n(fac, label)
         if n_pend:
             st.caption(f"⏳ Ei challan-er jonno {n_pend} ti correction request ager-i pending ache (upore '📥 Correction request' e dekhun).")
+        # ---- ভুল unit-এ receive হলে: পুরো challan অন্য unit-এ সরিয়ে দিন ----
+        _dest = other_factory(fac)
+        with st.container(border=True):
+            st.caption(f"🔀 Ei challan vul unit-e receive hoyechilo? Pura challan **{fac}** theke **{_dest}**-e soriye din.")
+            if st.checkbox(f"🔀 Challan {_dest}-e soriye din", key="rrmove_on"):
+                _mreason = st.text_input("Karon likhun (jemon: vul unit select hoyechilo) *", key="rrmove_reason").strip()
+                _mpw = mgr_check("rrmove_pw")
+                _mconf = confirm_box("rrmove_conf", f"⚠️ Ami confirm korchi - ei challan {fac} theke bad hoye {_dest}-e jabe, stock-shoho.")
+                if st.button(f"🔀 {_dest}-e soriye din", type="primary", key="rrmove_btn", disabled=not can_write_ri()):
+                    if len(_mreason) < 5:
+                        st.error("Karon likhun (kom-pokkhe 5 akkhor).")
+                    elif not _mpw:
+                        st.error("Store Manager password din.")
+                    elif not _mconf:
+                        st.error("Confirm tick din.")
+                    elif guard():
+                        _n = rr_move_challan(fac, ch, sup, dt, _dest, _mreason)
+                        if _n:
+                            who = st.session_state.get("user", "")
+                            st.session_state["ri_saved"] = {"user": who, "sr": label, "kind": "fix", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
+                                                            "detail": f"{_n} item {fac} theke {_dest}-e soranu hoyeche"}
+                            for _k in ("rrmove_on", "rrmove_reason", "rrmove_pw", "rrmove_conf"):
+                                st.session_state.pop(_k, None)
+                            done(f"✅ {who}, {label} ekhon {_dest}-er under-e ({_n} item). {fac}-er stock theke komeche, {_dest}-er stock-e joma hoyeche.")
         if not (edits or dels):
             st.caption("Qty bodlan ba bad deyar jonno ✖ tick din, tarpor niche kivabe thik korben bachun. "
                        "Item bhule gele ekoi challan number diye upore form-e abar receive korun.")
