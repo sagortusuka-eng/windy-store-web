@@ -13105,8 +13105,50 @@ def _ri_verif_many(fac, sls, tx_dt):
     return out
 
 
+def stock_asof_many(fac, sls, d, cached=False):
+    """{sl_no: stock at the END of day d} = today's stock minus everything that moved AFTER d (receipts, issues, adjustments and
+    inter-unit transfers dated later). A receipt or transfer entered / dated later must not count for an earlier date."""
+    sls = sorted({int(x) for x in sls})
+    if not sls:
+        return {}
+    if isinstance(d, datetime):
+        d = d.date()
+    qq = q_c if cached else q
+    js = json.dumps(sls)
+    inv = qq("""SELECT sl_no, COALESCE(prod_id,'') AS pid, COALESCE(size,'') AS size, COALESCE(current_stock,0) AS stock
+                FROM inventory WHERE factory_name=%s AND sl_no = ANY(SELECT jsonb_array_elements_text(%s::jsonb)::int)""", (fac, js))
+    net = {}
+    for r in qq(f"""SELECT t.sl_no, t.trans_type, SUM(COALESCE(t.qty,0)) AS q FROM transactions t
+                    WHERE t.factory_name=%s AND t.sl_no = ANY(SELECT jsonb_array_elements_text(%s::jsonb)::int)
+                      AND {_sql_date('t.date')} > %s GROUP BY t.sl_no, t.trans_type""", (fac, js, d)):
+        sign = -1.0 if (r["trans_type"] in ISSUE_TYPES or r["trans_type"] == ADJ_OUT) else (1.0 if r["trans_type"] in RECEIPT_TYPES else 0.0)
+        net[int(r["sl_no"])] = net.get(int(r["sl_no"]), 0.0) + sign * float(r["q"] or 0)
+    try:
+        tin = qq(f"""SELECT COALESCE(prod_id,'') AS pid, COALESCE(size,'') AS size, COALESCE(qty,0) AS qty, COALESCE(notes,'') AS notes
+                     FROM inter_factory_transfers WHERE dest_factory=%s AND COALESCE(status,'Completed')='Completed'
+                       AND {_sql_date('transfer_date')} > %s""", (fac, d))
+        tout = qq(f"""SELECT COALESCE(prod_id,'') AS pid, COALESCE(size,'') AS size, COALESCE(qty,0) AS qty, COALESCE(notes,'') AS notes
+                      FROM inter_factory_transfers WHERE source_factory=%s AND COALESCE(status,'Completed')='Completed'
+                        AND {_sql_date('transfer_date')} > %s""", (fac, d))
+    except Exception:
+        tin, tout = [], []
+    out = {}
+    for it in inv:
+        sl, pid, size = int(it["sl_no"]), str(it["pid"]).strip(), str(it["size"]).strip().lower()
+        n = net.get(sl, 0.0)
+        if pid:
+            for t in tin:
+                if str(t["pid"]).strip() == pid and (not str(t["size"]).strip() or str(t["size"]).strip().lower() == size):
+                    n += float(t["qty"] or 0)
+            for t in tout:
+                if f"[{pid}]" in str(t["notes"]) and (not str(t["size"]).strip() or str(t["size"]).strip().lower() == size):
+                    n -= float(t["qty"] or 0)
+        out[sl] = max(float(it["stock"] or 0) - n, 0.0)
+    return out
+
+
 @tx
-def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_pending=False, section="", machine=None):
+def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_pending=False, section="", machine=None, asof=False):
     """lines = [(sl_no, qty, xfer_ok)]. All-or-nothing: stock is re-read and locked, every line is checked first, then
     ONE update + ONE insert (+ one audit insert) write the whole slip. A line whose qty is above stock is covered by an
     auto-transfer from the other unit (same rule as the Transactions tab) when the user confirmed it."""
@@ -13129,8 +13171,11 @@ def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_
         return False
     # ---- shortage lines: need a confirmed auto-transfer from the other unit (checked for ALL lines before anything is written)
     plan, used_other, bad_short = {}, {}, []
+    _td = tx_dt.date() if isinstance(tx_dt, datetime) else tx_dt
+    _asof = stock_asof_many(fac, sls, _td) if (asof and _td < local_now().date()) else {}    # back-dated slip: stock of THAT day decides if a transfer was needed
     for sl, q_ in zip(sls, qtys):
         pid_, nm_, stk_, size_ = info[sl]
+        stk_ = _asof.get(sl, stk_)
         if q_ <= stk_ + 1e-9:
             continue
         shortage = q_ - stk_
@@ -14471,6 +14516,12 @@ def _ri_form():
                 pass
         remove = None
         qtys, rates, bad = [], [], False
+        eff_map = {}
+        if tx_date < local_now().date():      # back-dated slip: judge stock as it stood on that day (a later receipt must not count)
+            try:
+                eff_map = stock_asof_many(fac, [int(x["sl"]) for x in lines], tx_date, cached=True)
+            except Exception:
+                eff_map = {}
         pflags = []          # True = no stock for this line -> goes to Pending Issue, not saved as a transaction
         xfer_flags = {}
         xcache = st.session_state.setdefault("ri_other_cache", {})
@@ -14500,7 +14551,11 @@ def _ri_form():
             else:
                 r[2].caption("—")
             r[3].markdown(f'<span class="pv-code">{html_lib.escape(str(ln["pid"]))}</span>', unsafe_allow_html=True)
-            r[4].write(f"{ln['stock']:g}")
+            _eff = float(eff_map.get(int(ln["sl"]), ln["stock"]))
+            if abs(_eff - float(ln["stock"])) > 1e-9:
+                r[4].markdown(f"{_eff:g}<br><span style='font-size:10px;color:#94a3b8'>আজ {ln['stock']:g}</span>", unsafe_allow_html=True)
+            else:
+                r[4].write(f"{ln['stock']:g}")
             _cu = ln.get("unit") or "Pcs"
             _uk = f"ri_u_{gen}_{ln['sl']}"
             if _uk not in st.session_state:
@@ -14523,8 +14578,8 @@ def _ri_form():
             if q_ <= 0:
                 r[8].write("⚠️ পরিমাণ দিন")
                 bad = True
-            elif q_ > ln["stock"] + 1e-9:
-                shortage = q_ - ln["stock"]
+            elif q_ > _eff + 1e-9:
+                shortage = q_ - _eff
                 ck = (gen, ln["sl"], round(shortage, 6))
                 if ck not in xcache:
                     try:
@@ -14537,7 +14592,7 @@ def _ri_form():
                     xfer_flags[ln["sl"]] = (bool(ok_x), round(float(shortage), 6))
                     if not ok_x:
                         is_pend = True
-                    note_x = (f"⚠️ {ln['name']}: স্টক কম {shortage:g}। {other['factory_name']} থেকে অটো-ট্রান্সফার হবে "
+                    note_x = (f"⚠️ {ln['name']}: {tx_date:%d-%b-%Y} তারিখে স্টক কম {shortage:g}। {other['factory_name']} থেকে অটো-ট্রান্সফার হবে "
                               f"({other['item_name']} [{other['prod_id']}], size {other['size'] or '-'}, স্টক {float(other['stock']):g}, "
                               f"মিল: {other['level']} {int(round(float(other.get('score', 1.0)) * 100))}%)।")
                     if other["level"] == "fuzzy":
@@ -14603,7 +14658,7 @@ def _ri_form():
                 n = save_requisition_issue(fac, [(ln["sl"], q_, xfer_flags.get(ln["sl"], (False, 0.0))[0], rt_,
                                                   xfer_flags.get(ln["sl"], (False, 0.0))[1]) for ln, q_, rt_ in _iss],
                                            tx_date, sr_no, ttype, notes.strip(), verified, po_pending, section,
-                                           machine=(_mc_map or None))
+                                           machine=(_mc_map or None), asof=True)
                 ok_all = bool(n)
             if ok_all and _pen:
                 ok_all = bool(ri_save_pending(fac, sr_no, tx_date, ttype, section, notes.strip(),
@@ -15556,7 +15611,8 @@ def _gp_compute(lots):
     facs = sorted({r["factory_name"] for r in lots})
     sls = sorted({int(r["sl_no"]) for r in lots})
     # JSON-array parameters keep the query hashable, so it is served from the cache until something is saved
-    txs = q_c("""SELECT id, factory_name, sl_no, trans_type, qty, date, COALESCE(req_no,'') AS req_no, COALESCE(notes,'') AS notes
+    txs = q_c("""SELECT id, factory_name, sl_no, trans_type, qty, date, COALESCE(req_no,'') AS req_no, COALESCE(notes,'') AS notes,
+                      COALESCE(TRIM(section),'') AS section, COALESCE(officer_name,'') AS officer
                FROM transactions WHERE factory_name = ANY(SELECT jsonb_array_elements_text(%s::jsonb))
                AND sl_no = ANY(SELECT jsonb_array_elements_text(%s::jsonb)::int)
                AND trans_type IN ('Issued','Internal Issue','Supplier. Rec','Internal Rec','Stock Adjustment (+)')""",
@@ -15597,7 +15653,8 @@ def _gp_compute(lots):
                     if head[0] is not None and take > 0:
                         issued[head[0]] += take
                         alloc.append({"lot_id": head[0], "date": r["date"], "req_no": r["req_no"], "qty": take,
-                                      "type": r["trans_type"]})
+                                      "type": r["trans_type"], "tx_id": int(r["id"]),
+                                      "section": r.get("section", ""), "officer": r.get("officer", "")})
                     head[1] -= take
                     need -= take
                     if head[1] <= 1e-9:
@@ -16908,6 +16965,11 @@ def _rp_filters_text(doc):
     return "; ".join(f"{k}: {v}" for k, v in doc["filters"]) or "None (all records)"
 
 
+_RP_KPI_CSS = (".kpi{display:flex;gap:8px;margin:8px 0 12px}.kpi>div{flex:1;border:1px solid #1F3A5F;border-left:5px solid #F59E0B;border-radius:6px;padding:6px 9px;background:#F7F9FC;break-inside:avoid}"
+               ".kpi .l{font-size:8.5px;text-transform:uppercase;letter-spacing:.04em;color:#475569;font-weight:700}.kpi .v{font-size:18px;font-weight:800;color:#0B1F3A;margin-top:2px}"
+               ".kpi .s{font-size:8.5px;color:#555;margin-top:1px}")
+
+
 # ---------------------------------------------------------------- HTML (preview + print)
 def _rp_html(doc, button=True):
     e = html_lib.escape
@@ -16938,6 +17000,7 @@ tr.sub td{{background:#E9EFF7!important;font-weight:700}}tr.tot td{{background:#
 table.sig{{width:100%;border-collapse:collapse;margin-top:18px;break-inside:avoid}}table.sig td{{border:1px solid #777;padding:3px 6px;height:42px;vertical-align:top;font-weight:700}}
 .gen{{font-size:8.5px;color:#555;margin-top:6px}}
 @media print{{body{{background:#fff}}.noprint{{display:none!important}}.paper{{width:auto;max-width:none;margin:0;padding:0;box-shadow:none}}}}"""
+    css += _RP_KPI_CSS
     h = [f"<!doctype html><html><head><meta charset='utf-8'><title>{e(doc['title'])}</title><style>{css}</style></head><body>"]
     if button:
         h.append("<div class='bar noprint'><button onclick='window.print()'>🖨 Print Report</button>"
@@ -16950,6 +17013,8 @@ table.sig{{width:100%;border-collapse:collapse;margin-top:18px;break-inside:avoi
     for i in range(0, len(meta) - 1, 2):
         h.append(f"<tr><td class='k'>{e(meta[i][0])}</td><td>{e(meta[i][1])}</td><td class='k'>{e(meta[i + 1][0])}</td><td>{e(meta[i + 1][1])}</td></tr>")
     h.append(f"<tr><td class='k'>{e(meta[-1][0])}</td><td colspan='3'>{e(meta[-1][1])}</td></tr></table>")
+    if doc.get("kpis"):
+        h.append("<div class='kpi'>" + "".join(f"<div><div class='l'>{e(k[1])}</div><div class='v'>{e(k[2])}</div><div class='s'>{e(k[3])}</div></div>" for k in doc["kpis"]) + "</div>")
     for bi, b in enumerate(doc["blocks"]):
         h.append(f"<div class='ub{' brk' if bi else ''}'>UNIT / FACTORY: {e(b['unit'])}</div>")
         if not any(s["rows"] for s in b["sections"]):
@@ -17894,6 +17959,149 @@ def rp_machine_cost(P):
 
 
 RP_STOCK_STATUS = ["All items", "In stock (quantity above zero)", "Zero or negative stock"]
+def _rp_gp_pct(part, whole):
+    return (float(part) / float(whole) * 100.0) if whole and float(whole) > 1e-9 else None
+
+
+def _rp_gp_status(issued, balance):
+    return "Fully consumed" if balance <= 1e-9 else ("Partly consumed" if issued > 1e-9 else "In store")
+
+
+def rp_gate_pass(P):
+    """Management report: every gate pass received, what it was worth, how much has been consumed (oldest stock first),
+    what is still in the store - and WHERE it was spent (requisition / SR no., date, section). Read-only."""
+    try:
+        run_once_per_process("gate_pass_table", ensure_gate_pass_table)
+    except Exception:
+        pass
+    isql, ip = _rp_inv_where(P, "i.")
+    df = qdf(f"""SELECT g.id, g.factory_name, g.gate_pass_no, COALESCE(g.source_place,'') AS source_place, g.rec_date, g.sl_no,
+                        COALESCE(g.prod_id,'') AS code, COALESCE(g.item_name,'') AS item, COALESCE(g.size,'') AS size,
+                        COALESCE(g.qty,0) AS qty, COALESCE(g.stock_before,0) AS stock_before,
+                        COALESCE(NULLIF(i.unit_name,''),'Pcs') AS uom, COALESCE(i.unit_price,0) AS price
+                 FROM gate_pass_receipts g LEFT JOIN inventory i ON i.sl_no=g.sl_no AND i.factory_name=g.factory_name
+                 WHERE g.factory_name = ANY(%s){isql} ORDER BY g.factory_name, g.id""", tuple([P["units"]] + ip))
+    empty = (_rp_blocks(P, lambda u: []), [], [])
+    if df.empty:
+        return empty
+    df = _rpn(df, "qty", "stock_before", "price")
+    issued, alloc = _gp_compute(df.to_dict("records"))    # FIFO runs on every lot of the chosen items; filters below only choose what is shown
+    df["issued"] = df["id"].map(lambda i: float(issued.get(int(i), 0.0)))
+    df["issued"] = df[["issued", "qty"]].min(axis=1)
+    df["balance"] = (df["qty"] - df["issued"]).clip(lower=0)
+    df["rv"], df["iv"], df["bv"] = df["qty"] * df["price"], df["issued"] * df["price"], df["balance"] * df["price"]
+    df["dt"] = _parse_dates(df["rec_date"])
+    df = period_filter_df(df, "rec_date", P["d1"], P["d2"])
+    if P.get("status") == "Balance still in store":
+        df = df[df["balance"] > 1e-9]
+    elif P.get("status") == "Fully consumed":
+        df = df[df["balance"] <= 1e-9]
+    if df.empty:
+        return empty
+    keep = {int(i) for i in df["id"]}
+    al = pd.DataFrame([a for a in alloc if int(a["lot_id"]) in keep])
+    has_al = not al.empty
+    if has_al:
+        al = al.merge(df[["id", "factory_name", "gate_pass_no", "source_place", "code", "item", "size", "uom", "price"]],
+                      left_on="lot_id", right_on="id", how="left")
+        al["amt"] = al["qty"] * al["price"]
+        al["dt"] = _parse_dates(al["date"])
+        al["srk"] = al.apply(lambda r: str(r["req_no"]).strip() or ("(Internal Issue - no SR no.)" if r["type"] == "Internal Issue" else "(SR no. not recorded)"), axis=1)
+        al["sec"] = al["section"].where(al["section"].astype(str).str.strip() != "", "(Section not recorded)")
+    K = {"gp": 0, "lines": 0, "rv": 0.0, "iv": 0.0, "bv": 0.0, "sr": 0, "noprice": 0}
+
+    def build(u):
+        d = df[df["factory_name"] == u].sort_values(["dt", "id"], kind="stable")
+        if d.empty:
+            return []
+        a = al[al["factory_name"] == u] if has_al else al
+        rv, iv, bv = float(d["rv"].sum()), float(d["iv"].sum()), float(d["bv"].sum())
+        n_gp = int(d["gate_pass_no"].nunique())
+        n_sr = int(a.loc[~a["srk"].str.startswith("("), "srk"].nunique()) if (has_al and not a.empty) else 0
+        miss = int((d["price"] <= 0).sum())
+        K["gp"] += n_gp; K["lines"] += len(d); K["rv"] += rv; K["iv"] += iv; K["bv"] += bv; K["sr"] += n_sr; K["noprice"] += miss
+        secs = []
+        # 1. management summary
+        secs.append(_rp_sec([("Particulars", "t"), ("Gate Passes", "i"), ("Item Lines", "i"), ("Received Value (Tk)", "a"), ("Consumed Value (Tk)", "a"),
+                             ("Balance in Store (Tk)", "a"), ("Consumed %", "p"), ("Requisitions (SR) Served", "i")],
+                            [[f"All gate passes - {u}", n_gp, len(d), rv, iv, bv, _rp_gp_pct(iv, rv), n_sr]],
+                            heading="1. MANAGEMENT SUMMARY",
+                            note=f"{miss} item line(s) have no unit price in inventory; their value is shown as zero." if miss else None))
+        # 2. source-wise
+        rows, T = [], [0, 0, 0.0, 0.0, 0.0]
+        for sp, g in sorted(d.groupby("source_place"), key=lambda kv: kv[0].lower()):
+            r_, i_, b_ = float(g["rv"].sum()), float(g["iv"].sum()), float(g["bv"].sum())
+            rows.append([sp or "(Source not recorded)", int(g["gate_pass_no"].nunique()), len(g), r_, i_, b_, _rp_gp_pct(i_, r_)])
+            T = [T[0] + rows[-1][1], T[1] + len(g), T[2] + r_, T[3] + i_, T[4] + b_]
+        secs.append(_rp_sec([("Received From", "t"), ("Gate Passes", "i"), ("Item Lines", "i"), ("Received Value (Tk)", "a"), ("Consumed Value (Tk)", "a"),
+                             ("Balance in Store (Tk)", "a"), ("Consumed %", "p")], rows,
+                            [f"TOTAL - {u}", T[0], T[1], T[2], T[3], T[4], _rp_gp_pct(T[3], T[2])], heading="2. SOURCE-WISE SUMMARY"))
+        # 3. gate pass-wise statement
+        keys = ["gate_pass_no", "source_place", "rec_date"]
+        rows = []
+        for n, ((no, sp, rd), g) in enumerate(d.groupby(keys, sort=False), 1):
+            r_, i_, b_ = float(g["rv"].sum()), float(g["iv"].sum()), float(g["bv"].sum())
+            rows.append([n, rd, no, sp, len(g), r_, i_, b_, _rp_gp_pct(i_, r_), _rp_gp_status(float(g["issued"].sum()), float(g["balance"].sum()))])
+        secs.append(_rp_sec([("SL", "i"), ("Received On", "d"), ("Gate Pass No", "t"), ("Received From", "t"), ("Item Lines", "i"), ("Received Value (Tk)", "a"),
+                             ("Consumed Value (Tk)", "a"), ("Balance in Store (Tk)", "a"), ("Consumed %", "p"), ("Status", "t")], rows,
+                            [f"TOTAL - {u} ({len(rows)} gate pass)", None, None, None, len(d), rv, iv, bv, _rp_gp_pct(iv, rv), None],
+                            heading="3. GATE PASS-WISE STATEMENT"))
+        # 4. item detail of every gate pass
+        icols = [("SL", "i"), ("Item Code", "t"), ("Item Name", "t"), ("Size", "t"), ("UOM", "t"), ("Received", "q"), ("Consumed", "q"), ("Balance", "q"),
+                 ("Rate (Tk)", "r"), ("Received (Tk)", "a"), ("Consumed (Tk)", "a"), ("Balance (Tk)", "a"), ("Status", "t")]
+        for (no, sp, rd), g in d.groupby(keys, sort=False):
+            rows = [[n, r.code, r.item, r.size, r.uom, r.qty, r.issued, r.balance, (r.price if r.price > 0 else None), r.rv, r.iv, r.bv,
+                     _rp_gp_status(r.issued, r.balance)] for n, r in enumerate(g.itertuples(), 1)]
+            tot = [f"Gate Pass total ({len(g)} item)", None, None, None, None, _rp_qty_tot(g, "qty"), _rp_qty_tot(g, "issued"), _rp_qty_tot(g, "balance"),
+                   None, float(g["rv"].sum()), float(g["iv"].sum()), float(g["bv"].sum()), None]
+            secs.append(_rp_sec(icols, rows, tot, heading=f"{'4. ITEM DETAIL  -  ' if no == d.iloc[0]['gate_pass_no'] and rd == d.iloc[0]['rec_date'] else ''}GATE PASS {no}  |  From: {sp or '-'}  |  Received: {_rp_fmt(rd, 'd')}"))
+        # 5-7. where it was spent
+        if a is None or a.empty:
+            secs.append(_rp_sec([("Info", "t")], [], heading="5. WHERE IT WAS SPENT (REQUISITION / SR WISE)", empty="Nothing has been issued from these gate passes yet."))
+            return secs
+        a = a.sort_values(["dt", "tx_id"], kind="stable")
+        rows, tq, ta = [], 0, 0.0
+        for n, (sr, g) in enumerate(sorted(a.groupby("srk"), key=lambda kv: (kv[0].startswith("("), kv[1]["dt"].min(), kv[0])), 1):
+            gps = ", ".join(sorted({str(x) for x in g["gate_pass_no"]}))
+            secs_ = ", ".join(sorted({str(x) for x in g["sec"]}))
+            rows.append([n, sr, g["date"].iloc[0], secs_, gps, int(g["tx_id"].nunique()), float(g["amt"].sum())])
+            ta += float(g["amt"].sum())
+        secs.append(_rp_sec([("SL", "i"), ("SR / Req No", "t"), ("Issue Date", "d"), ("Section", "t"), ("From Gate Pass", "t"), ("Issue Lines", "i"), ("Consumed Value (Tk)", "a")],
+                            rows, [f"TOTAL - {u} ({len(rows)} requisition / SR)", None, None, None, None, int(a["tx_id"].nunique()), ta],
+                            heading="5. WHERE IT WAS SPENT - REQUISITION (SR) WISE SUMMARY"))
+        rows = []
+        for sc, g in sorted(a.groupby("sec"), key=lambda kv: (kv[0].startswith("("), kv[0].lower())):
+            rows.append([sc, int(g.loc[~g["srk"].str.startswith("("), "srk"].nunique()), float(g["amt"].sum()), _rp_gp_pct(float(g["amt"].sum()), ta)])
+        secs.append(_rp_sec([("Section", "t"), ("Requisitions (SR)", "i"), ("Consumed Value (Tk)", "a"), ("Share of Consumption", "p")], rows,
+                            [f"TOTAL - {u}", None, ta, 100.0 if ta > 0 else None], heading="6. SECTION-WISE CONSUMPTION"))
+        dcols = [("Issue Date", "d"), ("Section", "t"), ("Gate Pass", "t"), ("Item Code", "t"), ("Item Name", "t"), ("Size", "t"), ("UOM", "t"),
+                 ("Qty", "q"), ("Rate (Tk)", "r"), ("Amount (Tk)", "a"), ("Issued By", "t")]
+        rows = []
+        for sr, g in sorted(a.groupby("srk"), key=lambda kv: (kv[0].startswith("("), kv[1]["dt"].min(), kv[0])):
+            rows.append(_RpSub([f"SR / Req No: {sr}  ({len(g)} line)", None, None, None, None, None, None, None, None, float(g["amt"].sum()), None]))
+            for r in g.itertuples():
+                rows.append([r.date, r.sec, r.gate_pass_no, r.code, r.item, r.size, r.uom, r.qty, (r.price if r.price > 0 else None), r.amt,
+                             r.officer + (" (Internal Issue)" if r.type == "Internal Issue" else "")])
+        secs.append(_rp_sec(dcols, rows, [f"TOTAL CONSUMED - {u}", None, None, None, None, None, None, None, None, ta, None],
+                            heading="7. CONSUMPTION TRAIL - EXACTLY WHICH SR / REQUISITION TOOK WHICH GATE PASS ITEM"))
+        return secs
+
+    blocks = _rp_blocks(P, build)
+    kpis = [("🚪", "Gate Passes Received", f"{K['gp']:,}", f"{K['lines']:,} item line(s)", "teal"),
+            ("📥", "Received Value", _dbx_tk(K["rv"]), "Value of all gate-pass items", "blue"),
+            ("📤", "Consumed Value", _dbx_tk(K["iv"]), f"{(_rp_gp_pct(K['iv'], K['rv']) or 0):.1f}% of received", "amber"),
+            ("📦", "Balance in Store", _dbx_tk(K["bv"]), f"{(_rp_gp_pct(K['bv'], K['rv']) or 0):.1f}% still unused", "green"),
+            ("🧾", "Requisitions (SR) Served", f"{K['sr']:,}", "Issue slips that used these items", "violet")]
+    notes = ["Value = quantity x the item's current unit price in inventory.",
+             "Consumed = quantity issued from gate-pass stock, counted oldest stock first (FIFO), up to the date this report is generated "
+             "(issues made after the selected receiving period are included).",
+             "Requisition / SR number is the Issue slip number entered when the item was issued."]
+    if K["noprice"]:
+        notes.append(f"{K['noprice']} item line(s) have no unit price in inventory, so their value is zero in this report.")
+    return blocks, notes, kpis
+
+
+
 RP_REGISTRY = [
     dict(key="stock", label="Current Stock Report", type="Stock Report", dates=False, flt=("pcat", "bcat", "item", "status"), orient="P", fn=rp_current_stock, status=RP_STOCK_STATUS),
     dict(key="stockqv", label="Stock Quantity and Stock Value Report", type="Stock Report (ERP vs Physical)", dates=False, flt=("pcat", "bcat", "item", "status"), orient="L", fn=rp_stock_qty_value, status=RP_STOCK_STATUS),
@@ -17917,6 +18125,8 @@ RP_REGISTRY = [
     dict(key="req", label="Requisition / Issue Report", type="Requisition Report", dates=True, flt=("item", "status"), orient="L", fn=rp_requisition, status="req"),
     dict(key="mccost", label="M/C Wise Cost Report", type="M/C Wise Cost Report", dates=True, flt=(), orient="L", fn=rp_machine_cost),
     dict(key="transfer", label="Transfer History Report", type="Transfer Report", dates=True, flt=("item", "status"), orient="L", fn=rp_transfer, status="transfer"),
+    dict(key="gatepass", label="Gate Pass Report (Management)", title="GATE PASS REPORT - RECEIVED, CONSUMPTION & BALANCE", type="Gate Pass Management Report",
+         dates=True, flt=("item", "pcat", "bcat", "status"), orient="L", fn=rp_gate_pass, status=["All", "Balance still in store", "Fully consumed"]),
 ]
 
 
@@ -17964,6 +18174,9 @@ def _rp_show(doc):
     except ImportError:
         c2.caption("Excel needs: pip install openpyxl")
     c3.caption("🖨 Print: press **Print Report** at the top of the preview below - only the report is printed, on A4.")
+    if doc.get("kpis"):
+        st.markdown(_DBX_CSS + '<div class="dbx-grid">' + "".join(_dbx_card(k[0], k[1], k[2], html_lib.escape(k[3]), k[4]) for k in doc["kpis"]) + "</div>",
+                    unsafe_allow_html=True)
     components.html(_rp_html(doc), height=820, scrolling=True)
 
 
@@ -18054,8 +18267,11 @@ def tab_reports():
     if st.button("▶ Generate Report", type="primary", key="rp_gen"):
         with st.spinner("Preparing report..."):
             try:
-                blocks, notes = R["fn"](P)
-                st.session_state["rp_doc"] = _rp_doc(R.get("title", R["label"]), R["type"], units, period, lines, R["orient"], blocks, notes)
+                _res = R["fn"](P)
+                _doc = _rp_doc(R.get("title", R["label"]), R["type"], units, period, lines, R["orient"], _res[0], _res[1])
+                if len(_res) > 2 and _res[2]:
+                    _doc["kpis"] = _res[2]
+                st.session_state["rp_doc"] = _doc
                 st.session_state["rp_sig"] = sig
             except Exception as e:
                 st.session_state.pop("rp_doc", None)
