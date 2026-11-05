@@ -14124,6 +14124,49 @@ _RI_PREM_CSS = """<style>
 .st-key-pv_root .stTabs [data-baseweb="tab-panel"]{margin-top:10px;background:#fff;border:1px solid var(--b-line);border-radius:14px;padding:16px 18px;box-shadow:0 4px 16px rgba(15,60,140,.06)}
 @media (max-width:1100px){.pv-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:800px){[class*="st-key-pv_card_"]{padding:12px 12px 6px!important}.st-key-ri_mode label[data-baseweb="radio"]{padding:7px 10px!important}.pv-hero{flex-wrap:wrap}.pv-hero-r{margin-left:0;align-items:flex-start}}
+/* ===== PREMIUM v2: midnight-navy + champagne-gold, always-visible field borders ===== */
+.st-key-pv_root{--b-navy:#0A1F4D;--b-blue:#13367F;--b-ink:#0A1F4D;--b-soft:#F3F0E6;--b-line:#D9DEE8;--b-gold:#C9A24B;--b-gold2:#E8CF8E}
+.pv-nav{background:linear-gradient(100deg,#07142F 0%,#0A1F4D 55%,#13367F 100%)!important;border-bottom:3px solid #C9A24B!important;box-shadow:0 8px 22px rgba(7,20,47,.28)!important;letter-spacing:.01em}
+.pv-nav .r{background:rgba(201,162,75,.16)!important;border:1px solid rgba(232,207,142,.55)!important;color:#F4E3B2!important}
+.pv-hero{background:radial-gradient(900px 220px at 100% 0%,rgba(201,162,75,.22) 0%,rgba(201,162,75,0) 60%),linear-gradient(120deg,#FBFAF6,#EEF2FA)!important;border:1px solid #D9DEE8!important;box-shadow:0 6px 22px rgba(10,31,77,.09)!important}
+.pv-hero-ic{background:linear-gradient(135deg,#07142F,#13367F)!important;box-shadow:0 8px 18px rgba(10,31,77,.38),inset 0 0 0 1.5px #C9A24B!important;color:#F4E3B2!important}
+.pv-hero-t{color:#0A1F4D!important}
+.pv-hero-r{color:#8A6A1F!important}
+.pv-fac{color:#0A1F4D!important;border:1px solid #C9A24B!important;background:#FFFBF0!important}
+.pv-n{background:linear-gradient(135deg,#07142F,#13367F)!important;color:#F4E3B2!important;box-shadow:0 3px 8px rgba(10,31,77,.35),inset 0 0 0 1.5px #C9A24B!important}
+[class*="st-key-pv_card_"]{border:1px solid #D9DEE8!important;box-shadow:0 6px 24px rgba(10,31,77,.09)!important}
+[class*="st-key-pv_card_"]::before{height:4px!important;background:linear-gradient(90deg,#07142F 0%,#13367F 55%,#C9A24B 100%)!important}
+.pv-chip.teal{background:#F3F0E6!important;border-color:#E2D3A6!important;color:#0A1F4D!important}
+.st-key-ri_mode div[role="radiogroup"]{border:1px solid #D9DEE8!important;border-top:0!important;box-shadow:0 6px 20px rgba(10,31,77,.09)!important}
+.st-key-ri_mode label[data-baseweb="radio"] p{color:#243B6B!important}
+.st-key-ri_mode label[data-baseweb="radio"]:hover{background:#F3F0E6!important}
+.st-key-ri_mode label[data-baseweb="radio"]:has(input:checked){background:linear-gradient(135deg,#07142F,#13367F)!important;box-shadow:0 5px 14px rgba(10,31,77,.35),inset 0 -3px 0 #C9A24B!important}
+.st-key-ri_mode label[data-baseweb="radio"]:has(input:checked) p{color:#F4E3B2!important}
+.st-key-pv_root .stButton>button:not([kind="primary"]){background:#F3F0E6!important;border:1px solid #D8C58F!important;color:#0A1F4D!important}
+.st-key-pv_root .stButton>button:not([kind="primary"]):hover{background:#0A1F4D!important;color:#F4E3B2!important;border-color:#C9A24B!important}
+.st-key-pv_root .stButton>button:not([kind="primary"]):hover p{color:#F4E3B2!important}
+.st-key-pv_root .stButton>button[kind="primary"]{background:linear-gradient(135deg,#07142F,#13367F)!important;border:1px solid #C9A24B!important;color:#F4E3B2!important;box-shadow:0 8px 20px rgba(10,31,77,.35)!important}
+.st-key-pv_root .stButton>button[kind="primary"] p{color:#F4E3B2!important}
+.st-key-pv_root .stButton>button[kind="primary"]:hover{box-shadow:0 12px 26px rgba(10,31,77,.5),0 0 0 3px rgba(201,162,75,.30)!important}
+[class*="st-key-pv_list_"]{border:1px solid #D9DEE8!important;box-shadow:0 4px 18px rgba(10,31,77,.07)!important}
+[class*="st-key-pv_list_"] div[data-testid="stHorizontalBlock"]:has(.pv-th){background:#F3F0E6!important}
+[class*="st-key-pv_list_"] div[data-testid="stHorizontalBlock"]:hover{background:#FBFAF6!important}
+.pv-idx{background:#F3F0E6!important;color:#0A1F4D!important;border:1px solid #E2D3A6}
+.st-key-pv_root .stTabs [data-baseweb="tab"][aria-selected="true"]{background:#F3F0E6!important;color:#0A1F4D!important;box-shadow:inset 0 -3px 0 #C9A24B}
+.st-key-pv_root .stTabs [data-baseweb="tab-list"],.st-key-pv_root .stTabs [data-baseweb="tab-panel"]{border-color:#D9DEE8!important}
+/* ---- EVERY input box always shows its border (not only on click) ---- */
+.st-key-pv_root div[data-baseweb="input"],
+.st-key-pv_root div[data-baseweb="textarea"],
+.st-key-pv_root div[data-baseweb="select"]>div{background:#FFFFFF!important;border:1.5px solid #7C93BD!important;border-radius:10px!important;min-height:40px;box-shadow:0 1px 2px rgba(10,31,77,.06)!important}
+.st-key-pv_root div[data-baseweb="base-input"]{border:0!important;background:transparent!important;box-shadow:none!important}
+.st-key-pv_root div[data-baseweb="input"]:hover,
+.st-key-pv_root div[data-baseweb="textarea"]:hover,
+.st-key-pv_root div[data-baseweb="select"]>div:hover{border-color:#13367F!important;background:#FFFFFF!important}
+.st-key-pv_root div[data-baseweb="input"]:focus-within,
+.st-key-pv_root div[data-baseweb="textarea"]:focus-within,
+.st-key-pv_root div[data-baseweb="select"]>div:focus-within{border-color:#0A1F4D!important;border-width:1.5px!important;background:#FFFFFF!important;box-shadow:0 0 0 3px rgba(201,162,75,.38)!important}
+.st-key-pv_root input:focus,.st-key-pv_root textarea:focus{outline:none!important;box-shadow:none!important}
+.st-key-pv_root div[data-testid="stWidgetLabel"] p{color:#243B6B!important}
 </style>"""
 
 
@@ -21461,6 +21504,21 @@ RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, t
              tab_monthly_stock_check, tab_machine_cost, tab_shift_handover, tab_section_budget,
              tab_warranty, tab_scrap, tab_old_materials, tab_price_history, tab_item_audit]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
+# --- tab switch: no stacked blank space at the top + always start at the top of the new page (CSS/JS only, no extra DB work) ---
+st.markdown("""<style>
+div[data-testid="stElementContainer"]:has(> div[data-testid="stMarkdown"] div[data-testid="stMarkdownContainer"] > style:only-child),
+div[data-testid="stElementContainer"]:has(iframe[height="0"]),
+.element-container:has(iframe[height="0"]){display:none!important}
+section.stMain .block-container,div[data-testid="stMainBlockContainer"]{padding-top:3.4rem!important}
+section.stMain div[data-testid="stMainBlockContainer"]>div[data-testid="stVerticalBlock"]{row-gap:.7rem!important}
+</style>""", unsafe_allow_html=True)
+if st.session_state.get("_scroll_top_route") != active_tab:
+    st.session_state["_scroll_top_route"] = active_tab
+    components.html("""<script>
+      try { const d = window.parent.document;
+            const m = d.querySelector('section.stMain') || d.querySelector('[data-testid="stMain"]') || d.querySelector('.main');
+            if (m) m.scrollTo(0, 0); window.parent.scrollTo(0, 0); } catch (e) {}
+    </script>""", height=0)
 RENDERERS[TAB_NAMES.index(active_tab)]()
 render_session_cookie_js()
 
