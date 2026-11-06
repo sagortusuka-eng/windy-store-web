@@ -2711,15 +2711,15 @@ def sidebar_clock():
     with st.sidebar:
         components.html("""
         <div style="font-family:Inter,system-ui,sans-serif;display:flex;align-items:center;gap:10px;
-                    background:linear-gradient(135deg,#041030 0%,#0F3F99 100%);
-                    border:1px solid rgba(232,207,142,.45);border-left:4px solid #E8CF8E;border-radius:10px;
+                    background:linear-gradient(135deg,#1e40af 0%,#2563eb 100%);
+                    border:1px solid rgba(255,255,255,.45);border-left:4px solid #fff;border-radius:10px;
                     padding:8px 11px;box-shadow:0 4px 12px rgba(2,12,24,.16);">
-          <div style="font-size:20px;line-height:1;color:#E8CF8E;">◷</div>
+          <div style="font-size:20px;line-height:1;color:#fff;">◷</div>
           <div style="min-width:0;">
             <div id="clk" style="font-size:16px;font-weight:800;letter-spacing:.6px;color:#FFFFFF;line-height:1.2;">--:--:--</div>
             <div id="dt" style="font-size:11px;color:#C7D4E2;margin-top:3px;white-space:nowrap;">--</div>
           </div>
-          <div style="margin-left:auto;font-size:9px;font-weight:800;letter-spacing:.8px;color:#E8CF8E;">LOCAL</div>
+          <div style="margin-left:auto;font-size:9px;font-weight:800;letter-spacing:.8px;color:#BFDBFE;">LOCAL</div>
         </div>
         <script>
           function tick(){
@@ -14167,6 +14167,12 @@ _RI_PREM_CSS = """<style>
 .st-key-pv_root div[data-baseweb="select"]>div:focus-within{border-color:#0A1F4D!important;border-width:1.5px!important;background:#FFFFFF!important;box-shadow:0 0 0 3px rgba(201,162,75,.38)!important}
 .st-key-pv_root input:focus,.st-key-pv_root textarea:focus{outline:none!important;box-shadow:none!important}
 .st-key-pv_root div[data-testid="stWidgetLabel"] p{color:#243B6B!important}
+/* ---- product search box: strong blue frame so it is easy to find ---- */
+.st-key-pv_root div[class*="st-key-ri_search_"] div[data-baseweb="input"]{border:2px solid #2563eb!important;background:#EFF6FF!important;border-radius:12px!important;min-height:44px;box-shadow:0 0 0 4px rgba(37,99,235,.13),0 4px 12px rgba(37,99,235,.15)!important}
+.st-key-pv_root div[class*="st-key-ri_search_"] div[data-baseweb="input"]:focus-within{border-color:#1d4ed8!important;background:#fff!important;box-shadow:0 0 0 4px rgba(37,99,235,.30)!important}
+.st-key-pv_root div[class*="st-key-ri_search_"] input{font-weight:600!important;color:#0f2a6b!important}
+.st-key-pv_root div[class*="st-key-ri_search_"] input::placeholder{color:#6b82b3!important;font-weight:500}
+.st-key-pv_root div[class*="st-key-ri_search_"] div[data-testid="stWidgetLabel"] p{color:#1d4ed8!important;font-weight:800!important}
 </style>"""
 
 
@@ -21446,25 +21452,25 @@ section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind=
   section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button { min-height: 48px !important; }
   section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button { min-height: 44px !important; }
 }
-/* ===== PREMIUM SIDEBAR v2: royal-blue gradient + champagne-gold accents ===== */
-section[data-testid="stSidebar"]{background:linear-gradient(180deg,#0F3F99 0%,#0A2B72 42%,#061C4B 100%)!important;border-right:1px solid rgba(232,207,142,.40)!important;box-shadow:6px 0 24px rgba(4,16,48,.28)}
+/* ===== PREMIUM SIDEBAR v3: same blue as the login page, white accents ===== */
+section[data-testid="stSidebar"]{background:radial-gradient(300px 300px at 0% 0%,rgba(255,255,255,.18) 0%,transparent 70%),radial-gradient(260px 260px at 100% 100%,rgba(255,255,255,.14) 0%,transparent 70%),linear-gradient(165deg,#1d4ed8 0%,#2f6df0 52%,#4b8df8 100%)!important;border-right:1px solid rgba(255,255,255,.35)!important;box-shadow:6px 0 26px rgba(29,78,216,.35)}
 section[data-testid="stSidebar"]>div{background:transparent!important}
-section[data-testid="stSidebar"] .brand-card{background:rgba(4,16,48,.55)!important;border:1px solid rgba(232,207,142,.45)!important;box-shadow:0 8px 20px rgba(2,10,32,.35)!important}
-section[data-testid="stSidebar"] .nav-section-title{color:#E8CF8E!important}
-section[data-testid="stSidebar"] hr{border-color:rgba(232,207,142,.25)!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]{background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.04))!important;border:1px solid rgba(232,207,142,.30)!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.10),0 4px 10px rgba(2,10,32,.30)!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]:hover{background:linear-gradient(180deg,rgba(255,255,255,.18),rgba(255,255,255,.07))!important;border-color:#E8CF8E!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button p code{background:rgba(232,207,142,.16)!important;color:#F4E3B2!important;border:1px solid rgba(232,207,142,.45)!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button::after{color:#E8CF8E!important}
+section[data-testid="stSidebar"] .brand-card{background:rgba(255,255,255,.14)!important;border:1px solid rgba(255,255,255,.40)!important;box-shadow:0 10px 24px rgba(15,35,110,.30)!important;backdrop-filter:blur(4px)}
+section[data-testid="stSidebar"] .nav-section-title{color:#DBEAFE!important;letter-spacing:.14em}
+section[data-testid="stSidebar"] hr{border-color:rgba(255,255,255,.28)!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]{background:rgba(255,255,255,.14)!important;border:1px solid rgba(255,255,255,.30)!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 6px 14px rgba(15,35,110,.25)!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]:hover{background:rgba(255,255,255,.24)!important;border-color:#fff!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button p code{background:rgba(255,255,255,.22)!important;color:#fff!important;border:1px solid rgba(255,255,255,.50)!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button::after{color:#fff!important}
 section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"],
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"]:hover{background:linear-gradient(90deg,rgba(232,207,142,.34),rgba(232,207,142,.08))!important;border:1px solid rgba(232,207,142,.65)!important;border-left:4px solid #E8CF8E!important;box-shadow:0 8px 18px rgba(2,10,32,.40)!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button p code{background:linear-gradient(135deg,#C9A24B,#EBD291)!important;color:#1E1503!important;border-color:#E8CF8E!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"]{border-left:1px solid rgba(232,207,142,.35)!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"] p{color:#DCE6FA!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"]:hover{background:rgba(255,255,255,.11)!important;border-color:rgba(232,207,142,.35)!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"]{background:linear-gradient(135deg,#C9A24B 0%,#EBD291 100%)!important;border:1px solid #F4E3B2!important;border-left:4px solid #FFF6D8!important;box-shadow:0 8px 18px rgba(2,10,32,.45),0 0 0 1px rgba(232,207,142,.25)!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] p{color:#0A1F4D!important;font-weight:800!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"]:hover{filter:brightness(1.05)}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"]:hover{background:linear-gradient(90deg,rgba(255,255,255,.36),rgba(255,255,255,.12))!important;border:1px solid rgba(255,255,255,.75)!important;border-left:4px solid #fff!important;box-shadow:0 10px 22px rgba(15,35,110,.35)!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button p code{background:#fff!important;color:#1d4ed8!important;border-color:#fff!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"]{border-left:1px solid rgba(255,255,255,.45)!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"] p{color:#EAF2FF!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"]:hover{background:rgba(255,255,255,.18)!important;border-color:rgba(255,255,255,.45)!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"]{background:#fff!important;border:1px solid #fff!important;border-left:4px solid #93c5fd!important;box-shadow:0 10px 22px rgba(15,35,110,.38)!important}
+section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] p{color:#1d4ed8!important;font-weight:800!important}
+section[data-testid="stSidebar"] label p,section[data-testid="stSidebar"] [data-testid="stCheckbox"] p{color:#EAF2FF!important}
 </style>""", unsafe_allow_html=True)
     st.markdown('<div class="nav-section-title">Navigation</div>', unsafe_allow_html=True)
 
@@ -21527,6 +21533,7 @@ active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
 st.markdown("""<style>
 div[data-testid="stElementContainer"]:has(> div[data-testid="stMarkdown"] div[data-testid="stMarkdownContainer"] > style:only-child),
 div[data-testid="stElementContainer"]:has(iframe[height="0"]),
+.element-container:has(.stMarkdown > div > style:only-child),
 .element-container:has(iframe[height="0"]){display:none!important}
 section.stMain .block-container,div[data-testid="stMainBlockContainer"]{padding-top:3.4rem!important}
 section.stMain div[data-testid="stMainBlockContainer"]>div[data-testid="stVerticalBlock"]{row-gap:.7rem!important}
@@ -21534,9 +21541,21 @@ section.stMain div[data-testid="stMainBlockContainer"]>div[data-testid="stVertic
 if st.session_state.get("_scroll_top_route") != active_tab:
     st.session_state["_scroll_top_route"] = active_tab
     components.html("""<script>
-      try { const d = window.parent.document;
-            const m = d.querySelector('section.stMain') || d.querySelector('[data-testid="stMain"]') || d.querySelector('.main');
-            if (m) m.scrollTo(0, 0); window.parent.scrollTo(0, 0); } catch (e) {}
+    try {
+      const w = window.parent, d = w.document;
+      const goTop = () => { const m = d.querySelector('section.stMain') || d.querySelector('[data-testid="stMain"]') || d.querySelector('.main');
+                            if (m) { m.style.scrollBehavior = 'auto'; m.scrollTop = 0; } w.scrollTo(0, 0); };
+      goTop(); setTimeout(goTop, 60); setTimeout(goTop, 250); setTimeout(goTop, 700);
+      if (!w.__kcCollapse) {            // installed once: cancel the flex-gap of any zero-height element at the top of the page
+        w.__kcCollapse = true; let q = 0;
+        const run = () => { q = 0;
+          d.querySelectorAll('[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > [data-testid="stElementContainer"], .block-container > div > div > .element-container').forEach(el => {
+            el.style.marginTop = (el.offsetHeight <= 2) ? 'calc(-0.7rem)' : ''; });
+        };
+        new w.MutationObserver(() => { if (!q) q = w.requestAnimationFrame(run); }).observe(d.body, {childList: true, subtree: true});
+        run();
+      }
+    } catch (e) {}
     </script>""", height=0)
 RENDERERS[TAB_NAMES.index(active_tab)]()
 render_session_cookie_js()
