@@ -22338,6 +22338,122 @@ def tab_consumption_trend():
             st.dataframe(dd.rename(columns={"day": "Date", "value": "Value (Tk)", "issues": "Issues"}).round(0), use_container_width=True, hide_index=True)
 
 
+# ============================================================
+#  ISSUED ITEMS STOCK CHECK (new page, ADDITIVE ONLY)
+#  Items that were ISSUED up to a chosen date (e.g. 05-Nov)  ->  their CLOSING stock on the check date (e.g. 06-Nov)
+#  -> physical count in the store -> Short / Excess result -> manager-approved adjustment.
+#  It re-uses the Monthly Stock Check engine and tables (msc_*); no existing page, transaction or stock is changed.
+#  Speed: nothing runs until this page is opened; the heavy calculation runs only when "Create" is pressed.
+# ============================================================
+NAV_ISC = "✅ Issued Items Stock Check"
+if NAV_ISC not in TAB_NAMES:
+    TAB_NAMES.append(NAV_ISC)
+ISC_TAG = "[ISSUED-ITEMS]"
+
+
+def isc_issued_sls(fac, from_d, upto_d, include_internal=True):
+    """{sl_no} of items that have at least one Issue transaction dated from_d..upto_d (from_d=None -> from the beginning)."""
+    types = list(ISSUE_TYPES) if include_internal else ["Issued"]
+    rows = q_c("SELECT DISTINCT sl_no, date FROM transactions WHERE factory_name=%s AND trans_type = ANY(%s) AND sl_no IS NOT NULL",
+               (fac, types))
+    out = set()
+    for r in rows:
+        d = _msc_pdate(r["date"])
+        if d is None or d > upto_d or (from_d is not None and d < from_d):
+            continue
+        out.add(int(r["sl_no"]))
+    return out
+
+
+def isc_sessions(fac):
+    return [s for s in msc_sessions(fac) if str(s.get("note") or "").startswith(ISC_TAG)]
+
+
+def isc_new_view(fac):
+    st.markdown("**Kibhabe kaj kore:** je item gulu *Issue* hoyeche (nirdishto tarikh porjonto) sudhu sei item gulur "
+                "**closing stock (check-er tarikhe)** software theke ber hobe. Tarpor store-e giye physical count entry korben.")
+    today = local_now().date()
+    c1, c2, c3 = st.columns(3)
+    upto_d = c1.date_input("Issue hoyeche — ei tarikh porjonto", value=today - timedelta(days=1), key="isc_upto", max_value=today)
+    chk_d = c2.date_input("Closing stock check-er tarikh", value=today, key="isc_chk", max_value=today)
+    use_from = c3.checkbox("Shuru-r tarikh dibo (na dile shuru theke)", value=False, key="isc_usefrom")
+    from_d = None
+    if use_from:
+        from_d = c3.date_input("Issue shuru", value=upto_d.replace(day=1), key="isc_from", max_value=upto_d)
+    inc_int = st.checkbox("Internal Issue (onno unit-e pathano) item-ao dhorbo", value=True, key="isc_inc_int")
+    note = st.text_input("Note (optional)", key="isc_note")
+    try:
+        n_found = len(isc_issued_sls(fac, from_d, upto_d, inc_int))
+        st.info(f"📌 {upto_d.strftime(DATE_FMT)} porjonto **{n_found}** ti item issue hoyeche. Closing stock: **{chk_d.strftime(DATE_FMT)}**.")
+    except Exception as e:
+        st.warning(f"Issue item count ber kora jay nai: {e}")
+    if st.button("✅ Issued items-er stock check toiri korun", type="primary", key="isc_create_btn", use_container_width=True):
+        if upto_d > chk_d:
+            st.error("Issue-er shesh tarikh check-er tarikh-er por hote pare na.")
+        elif guard():
+            with st.spinner("Issued item gulur closing stock hishab hocche..."):
+                sls = isc_issued_sls(fac, from_d, upto_d, inc_int)
+                if not sls:
+                    st.error("Ei tarikhe kono issue kora item paoa jay nai.")
+                    return
+                rows, flags = msc_compute(fac, chk_d, chk_d)     # closing at end of check date; nothing 'after' it is counted
+                rows = [r for r in rows if int(r["sl_no"]) in sls]
+                if not rows:
+                    st.error("Item list khali.")
+                    return
+                label = f"Issued items {upto_d.strftime('%d-%b')} → closing {chk_d.strftime('%d-%b-%Y')}"
+                tag_note = f"{ISC_TAG} issued {(from_d.strftime(DATE_FMT) + ' to ') if from_d else 'up to '}{upto_d.strftime(DATE_FMT)}" \
+                           + (f" | {note.strip()}" if note.strip() else "")
+                sid = msc_create(fac, chk_d, chk_d, label, "Software", "", rows, tag_note)
+            if sid:
+                st.session_state["isc_sid"] = sid
+                st.session_state["msc_flags"] = flags
+                done(f"Stock check #{sid} toiri hoyeche ({len(rows)} item). Ekhon 'Enter physical' e giye count likhun.")
+
+
+def tab_issued_stock_check():
+    st.title("✅ Issued Items Stock Check")
+    st.caption("Issue hoye jaoa item gulur closing stock store-e physically gune software-er sathe milan. "
+               "Stock sudhu Manager approve korle bodlay.")
+    if "CONSOLIDATED" in FAC:
+        st.info("Upor theke ekta factory select korun.")
+        return
+    try:
+        msc_ensure()
+    except Exception as e:
+        st.error(f"Stock check tables toiri kora jay nai: {e}")
+        return
+    fac = FAC
+    tab = lazy_tab_select(["🆕 New check", "✍️ Enter physical", "📊 Result & Approve", "🖨 Print sheet"], "lz_isc")
+    if tab == 0:
+        isc_new_view(fac)
+        return
+    sessions = isc_sessions(fac)
+    if not sessions:
+        st.info("Age '🆕 New check' theke ekta check toiri korun.")
+        return
+    ids = [s["id"] for s in sessions]
+    cur = st.session_state.get("isc_sid")
+    if cur not in ids:
+        cur = ids[0]
+    by = {s["id"]: s for s in sessions}
+    sid = st.selectbox("Stock check", ids, index=ids.index(cur), key="isc_pick",
+                       format_func=lambda i: f"#{i} · {by[i]['month_label']} · {by[i]['status']}")
+    st.session_state["isc_sid"] = sid
+    sess = by[sid]
+    df = msc_load(sid)
+    if df is None or df.empty:
+        st.warning("Ei check-e kono item nai.")
+        return
+    st.caption(f"Closing stock tarikh: **{_msc_fmt(sess['count_date'])}** · Item: **{len(df)}** · Counted: **{int(df['physical_qty'].notna().sum())}**")
+    if tab == 1:
+        msc_entry_view(sid, sess, df, fac)
+    elif tab == 2:
+        msc_result_view(sid, sess, df, fac)
+    elif tab == 3:
+        msc_print_view(sid, sess, df, fac)
+
+
 # Brand and account/login appear first; Workspace and Management remain clearly grouped below.
 try:   # home-screen shortcut:  <app link>/?page=count  opens Physical Count directly (once per session)
     _pg = str(st.query_params.get("page", "")).strip().lower()
@@ -22368,6 +22484,7 @@ NAV_GROUPS = [
         ("Daily Issue Slip & Receipt Entry", NAV_REQ_ISSUE),   # visible label only - route is the existing NAV_REQ_ISSUE page
         ("Requisition", "📑 Requisition"),
         ("Physical Count", NAV_PHYSICAL),
+        ("Issued Items Stock Check", NAV_ISC),
         ("Repair & Returns", "🛠 Repair & Returns"),
         ("Gate Pass In", NAV_GATE_PASS),
         ("Hold Bill in Store", NAV_HOLD_BILL),
@@ -22571,7 +22688,7 @@ RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, t
              tab_stock_cover, tab_data_health, tab_log_sheet, tab_high_value, tab_req_issue, tab_gate_pass, tab_hold_bills,
              tab_monthly_stock_check, tab_machine_cost, tab_shift_handover, tab_section_budget,
              tab_warranty, tab_scrap, tab_old_materials, tab_price_history, tab_item_audit,
-             tab_unit_compare, tab_exec_summary, tab_mgmt_pack, tab_consumption_trend]
+             tab_unit_compare, tab_exec_summary, tab_mgmt_pack, tab_consumption_trend, tab_issued_stock_check]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
 # --- tab switch: no stacked blank space at the top + always start at the top of the new page (CSS/JS only, no extra DB work) ---
 st.markdown("""<style>
