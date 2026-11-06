@@ -14361,6 +14361,55 @@ def _ri_tools_tabs(mode, is_mgr):
             _ri_requests_panel()
 
 
+@_frag   # filtering / searching re-runs ONLY this block
+def _ri_recent_tx_panel():
+    """Recent transactions (issue, receipt, everything) under the Daily Issue Slip & Receipt Entry forms, so a wrong or
+    duplicate entry is seen at once. Read-only list (cached, refreshes after every save); delete / edit keeps the existing
+    Store Manager password + confirmation rule and reverts stock exactly like the Transactions page."""
+    fac = FAC
+    st.markdown('<div class="section-title">🕘 Recent Transactions (Issue / Receipt / All)</div>', unsafe_allow_html=True)
+    f1, f2, f3 = st.columns([1.4, 1.2, 2])
+    kind = f1.radio("Type", ["All", "📤 Issue", "📥 Receipt", "Other"], horizontal=True, key="ri_rec_kind", label_visibility="collapsed")
+    span = f2.selectbox("Period", ["Last 50", "Today", "Last 3 days", "Last 200"], key="ri_rec_span", label_visibility="collapsed")
+    term = f3.text_input("Search", key="ri_rec_q", placeholder="🔍 Item / ERP / SR No. / Challan / Officer", label_visibility="collapsed").strip().lower()
+    where, par = "factory_name=%s", [fac]
+    if kind == "📤 Issue":
+        where += " AND trans_type = ANY(%s)"
+        par.append(list(ISSUE_TYPES))
+    elif kind == "📥 Receipt":
+        where += " AND trans_type = ANY(%s)"
+        par.append(list(RECEIPT_TYPES))
+    elif kind == "Other":
+        where += " AND NOT (trans_type = ANY(%s))"
+        par.append(list(ISSUE_TYPES) + list(RECEIPT_TYPES))
+    if term:
+        like = f"%{term}%"
+        where += (" AND (LOWER(item_name) LIKE %s OR LOWER(COALESCE(prod_id,'')) LIKE %s OR LOWER(COALESCE(req_no,'')) LIKE %s"
+                  " OR LOWER(COALESCE(challan_no,'')) LIKE %s OR LOWER(COALESCE(officer_name,'')) LIKE %s)")
+        par += [like] * 5
+    lim = {"Last 50": 50, "Today": 400, "Last 3 days": 400, "Last 200": 200}[span]
+    df = qdf_c(f"""SELECT id, officer_name, sl_no, prod_id, item_name,
+                   (SELECT COALESCE(i.size,'') FROM inventory i WHERE i.sl_no=transactions.sl_no AND i.factory_name=transactions.factory_name LIMIT 1) AS size,
+                   qty, trans_type, COALESCE(req_no,'') AS req_no, COALESCE(supplier_name,'') AS supplier_name,
+                   COALESCE(challan_no,'') AS challan_no, verification_status, notes, date, time
+                   FROM transactions WHERE {where} ORDER BY id DESC LIMIT {lim}""", tuple(par))
+    if not df.empty and span in ("Today", "Last 3 days"):
+        keep_from = local_now().date() - timedelta(days=0 if span == "Today" else 2)
+        df = df[df["date"].map(lambda x: (_d := parse_date(x)) is not None and _d.date() >= keep_from)]
+    if df.empty:
+        st.info("Ei filter-e kono transaction paoa jay nai.")
+        return
+    df["when"] = df[["date", "time"]].fillna("").agg(" ".join, axis=1)
+    df["type"] = df["trans_type"].map(lambda c: TRANS_LABELS.get(c, c))
+    show = df[["id", "when", "type", "item_name", "size", "qty", "req_no", "supplier_name", "challan_no", "officer_name", "notes"]]
+    st.dataframe(show.style.apply(zebra_styles, axis=1), hide_index=True, use_container_width=True, height=330,
+                 column_config={"id": "ID", "when": "Date / Time", "type": "Type", "item_name": "Item", "size": "Size", "qty": "Qty",
+                                "req_no": st.column_config.TextColumn("SR No."), "supplier_name": "Supplier", "challan_no": "Challan",
+                                "officer_name": "Officer", "notes": "Notes"})
+    st.caption(f"{len(show)} ti transaction. Vul entry hole niche Manager password diye delete korle stock auto revert hobe.")
+    tx_manager_panel(df, "ri_rec", "🔐 Vul transaction: Delete / Edit (Manager password)")
+
+
 def tab_req_issue():
     if is_cons_view:
         st.markdown("#### 🧾 Requisition Issue & Supplier Receipt")
@@ -14436,6 +14485,10 @@ def _tab_req_issue_body():
     else:
         _ri_form()
     _ri_tools_tabs(mode, is_mgr)
+    try:
+        _ri_recent_tx_panel()
+    except Exception as e:
+        st.caption(f"Recent transactions load kora jayni: {e}")
 
 
 def _ri_box(h):
@@ -22411,6 +22464,69 @@ def isc_new_view(fac):
                 done(f"Stock check #{sid} toiri hoyeche ({len(rows)} item). Ekhon 'Enter physical' e giye count likhun.")
 
 
+@_msc_fragment
+def isc_entry_editor(sid, df, locked, fac):
+    cats = list(dict.fromkeys(df["category"]))
+    prog = {c: (int(df[df["category"] == c]["physical_qty"].notna().sum()), int((df["category"] == c).sum())) for c in cats}
+    c1, c2 = st.columns([3, 2])
+    pick = c1.selectbox("Category", cats, format_func=lambda c: f"{c}  ({prog[c][0]}/{prog[c][1]} counted)", key=f"isc_ecat_{sid}")
+    show_cl = c2.checkbox("Closing balance dekhao", value=True, key=f"isc_showcl_{sid}")
+    sub = df[df["category"] == pick].copy()
+    cols = ["id", "sl_no", "prod_id", "item_name", "size", "unit"] + (["expected_qty"] if show_cl else []) + \
+           ["extra_issued", "extra_received", "physical_qty", "remarks"]
+    base = sub[cols].reset_index(drop=True)
+    cfg = {"id": None, "sl_no": st.column_config.NumberColumn("SL", format="%d"), "prod_id": "ERP code",
+           "item_name": st.column_config.TextColumn("Item", width="large"), "size": "Size", "unit": "UOM",
+           "expected_qty": st.column_config.NumberColumn("Closing balance"),
+           "extra_issued": st.column_config.NumberColumn("ISSUED after print", min_value=0.0, step=1.0,
+                                                         help="Software-e ekhono ashe nai emon issue"),
+           "extra_received": st.column_config.NumberColumn("RECEIVED after print", min_value=0.0, step=1.0,
+                                                           help="Software-e ekhono ashe nai emon receipt"),
+           "physical_qty": st.column_config.NumberColumn("PHYSICAL", min_value=0.0, step=1.0),
+           "remarks": st.column_config.TextColumn("Remarks")}
+    ed = st.data_editor(base, hide_index=True, use_container_width=True, key=f"isc_ed_{sid}_{pick}_{int(show_cl)}", column_config=cfg,
+                        disabled=[c for c in cols if c not in ("physical_qty", "remarks", "extra_issued", "extra_received")]
+                        + (["physical_qty", "remarks", "extra_issued", "extra_received"] if locked else []),
+                        height=min(620, 60 + 36 * len(base)))
+    changes = []
+    for i in range(len(base)):
+        o, n = base.loc[i, "physical_qty"], ed.loc[i, "physical_qty"]
+        orem, nrem = str(base.loc[i, "remarks"] or ""), str(ed.loc[i, "remarks"] or "")
+        same_q = (pd.isna(o) and pd.isna(n)) or (not pd.isna(o) and not pd.isna(n) and abs(float(o) - float(n)) < 1e-9)
+        oi, ni = float(base.loc[i, "extra_issued"] or 0), float(0 if pd.isna(ed.loc[i, "extra_issued"]) else ed.loc[i, "extra_issued"])
+        orc, nrc = float(base.loc[i, "extra_received"] or 0), float(0 if pd.isna(ed.loc[i, "extra_received"]) else ed.loc[i, "extra_received"])
+        if not same_q or orem != nrem or abs(oi - ni) > 1e-9 or abs(orc - nrc) > 1e-9:
+            changes.append((int(base.loc[i, "id"]), None if pd.isna(n) else float(n), nrem, ni, nrc))
+    if locked:
+        st.warning("Ei check closed - entry lock kora.")
+    elif st.button(f"💾 Ei category save korun ({len(changes)} changed)", key=f"isc_save_{sid}_{pick}", type="primary",
+                   use_container_width=True, disabled=not changes):
+        if guard():
+            n = msc_save_physical(sid, changes)
+            if n:
+                done(f"{n} physical count save hoyeche.")
+
+
+def isc_closing_view(sid, sess, df):
+    st.markdown(f"##### 📋 Closing balance — {_msc_fmt(sess['count_date'])}")
+    cats = ["All"] + list(dict.fromkeys(df["category"]))
+    f1, f2 = st.columns([2, 3])
+    cat = f1.selectbox("Category", cats, key=f"isc_ccat_{sid}")
+    term = f2.text_input("Item search", key=f"isc_cq_{sid}").strip().lower()
+    v = df if cat == "All" else df[df["category"] == cat]
+    if term:
+        v = v[v["item_name"].str.lower().str.contains(term, regex=False) | v["prod_id"].str.lower().str.contains(term, regex=False)]
+    out = v[["category", "sl_no", "prod_id", "item_name", "size", "unit", "expected_qty", "unit_price", "live_qty"]].rename(columns={
+        "category": "Category", "sl_no": "SL", "prod_id": "ERP code", "item_name": "Item", "size": "Size", "unit": "UOM",
+        "expected_qty": "Closing balance", "unit_price": "Unit price", "live_qty": "Software now"})
+    m = st.columns(3)
+    m[0].metric("Items", len(out))
+    m[1].metric("Closing > 0", int((out["Closing balance"].abs() > MSC_EPS).sum()))
+    m[2].metric("Closing value", f"{(out['Closing balance'] * out['Unit price'].fillna(0)).sum():,.0f}")
+    st.dataframe(out, hide_index=True, use_container_width=True, height=480)
+    export_buttons(out, f"issued_items_closing_{sid}", f"Issued items closing balance #{sid}")
+
+
 def tab_issued_stock_check():
     st.title("✅ Issued Items Stock Check")
     st.caption("Issue hoye jaoa item gulur closing stock store-e physically gune software-er sathe milan. "
@@ -22424,7 +22540,7 @@ def tab_issued_stock_check():
         st.error(f"Stock check tables toiri kora jay nai: {e}")
         return
     fac = FAC
-    tab = lazy_tab_select(["🆕 New check", "✍️ Enter physical", "📊 Result & Approve", "🖨 Print sheet"], "lz_isc")
+    tab = lazy_tab_select(["🆕 New check", "📋 Closing balance", "✍️ Enter physical", "📊 Result & Approve", "🖨 Print sheet"], "lz_isc")
     if tab == 0:
         isc_new_view(fac)
         return
@@ -22447,10 +22563,14 @@ def tab_issued_stock_check():
         return
     st.caption(f"Closing stock tarikh: **{_msc_fmt(sess['count_date'])}** · Item: **{len(df)}** · Counted: **{int(df['physical_qty'].notna().sum())}**")
     if tab == 1:
-        msc_entry_view(sid, sess, df, fac)
+        isc_closing_view(sid, sess, df)
     elif tab == 2:
-        msc_result_view(sid, sess, df, fac)
+        st.caption("Closing balance dekhe store-e gune PHYSICAL-e likhun. Count-er por jodi notun issue/receipt hoy ja software-e ekhono nai, "
+                   "sheta 'after print' column-e likhun.")
+        isc_entry_editor(sid, df, sess["status"] != "Open", fac)
     elif tab == 3:
+        msc_result_view(sid, sess, df, fac)
+    elif tab == 4:
         msc_print_view(sid, sess, df, fac)
 
 
