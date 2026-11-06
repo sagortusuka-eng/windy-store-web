@@ -21426,6 +21426,918 @@ def tab_price_history():
         _ph_item_view(df, len(units) > 1)
 
 
+# ============================================================
+#  MANAGEMENT INSIGHTS (NEW PAGES, ADDITIVE ONLY)
+#  1. 🏭 Unit Comparison (KC vs Windy)        2. 📋 Executive Summary (one page for management)
+#  3. 📄 Management Pack (monthly PDF)         4. 📈 Consumption Trend (6 / 12 month line chart + spike finder)
+#  Nothing existing was changed: these pages only READ the database, with the same issue-value formula the Budget /
+#  Section Budget pages use (qty x rate).
+#  Speed: a page's code runs only while that page is open; every query goes through qdf_c (cached until something is
+#  saved); the PDF is built only when the person clicks the button; it creates no table of its own and writes nothing.
+# ============================================================
+NAV_UNIT_CMP = "🏭 Unit Comparison"
+NAV_EXEC_SUM = "📋 Executive Summary"
+NAV_MGMT_PACK = "📄 Management Pack"
+NAV_TREND = "📈 Consumption Trend"
+for _nv in (NAV_UNIT_CMP, NAV_EXEC_SUM, NAV_MGMT_PACK, NAV_TREND):
+    if _nv not in TAB_NAMES:
+        TAB_NAMES.append(_nv)
+
+MI_SPIKE_X = 1.5            # a month is a "spike" when it is this many times the average of the 3 months before it ...
+MI_SPIKE_MIN = 10000.0      # ... and at least this many Tk above that average
+MI_WARN_PCT, MI_RED_PCT = 80.0, 100.0
+
+_MI_VAL = "COALESCE(t.qty,0) * COALESCE(NULLIF(t.unit_price_at_tx,0), i.unit_price, 0)"
+_MI_JOIN = "FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name"
+_MI_GRP = {"category": "COALESCE(NULLIF(TRIM(i.category),''),'(No category)')",
+           "section": "COALESCE(NULLIF(TRIM(t.section),''),'(No section)')",
+           "unit": "t.factory_name"}
+
+_MI_CSS = """<style>
+.mi-hero{background:linear-gradient(135deg,#0B2F33 0%,#0F766E 62%,#14B8A6 130%);border-radius:16px;padding:18px 24px;color:#fff;margin-bottom:12px}
+.mi-hero .t{font-size:20px;font-weight:800;letter-spacing:.2px}.mi-hero .s{font-size:12.5px;opacity:.88;margin-top:4px}
+.mi-card{background:#fff;border:1px solid #E2E8F0;border-radius:14px;padding:14px 16px;box-shadow:0 2px 8px rgba(15,23,42,.05);height:100%}
+.mi-card .l{font-size:11px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.5px}
+.mi-card .v{font-size:22px;font-weight:800;color:#0F172A;margin-top:4px}
+.mi-card .d{font-size:12px;font-weight:700;margin-top:3px}
+.mi-up{color:#DC2626}.mi-dn{color:#16A34A}.mi-flat{color:#64748B}
+.mi-unit{font-size:15px;font-weight:800;color:#0F766E;margin:2px 0 8px 0}
+.mi-tbl{width:100%;border-collapse:collapse;font-size:13px;background:#fff;border:1px solid #E2E8F0;border-radius:12px;overflow:hidden}
+.mi-tbl th{background:#0F766E;color:#fff;text-align:left;padding:9px 12px;font-size:12px;letter-spacing:.3px}
+.mi-tbl td{padding:8px 12px;border-top:1px solid #EEF2F6;color:#1E293B;vertical-align:top}
+.mi-tbl tr:nth-child(even) td{background:#F8FAFC}
+.mi-tbl td.n{text-align:right;font-variant-numeric:tabular-nums;font-weight:700}
+.mi-attn{border-radius:12px;padding:10px 14px;margin:6px 0;font-size:13.5px;font-weight:600;border:1px solid}
+.mi-attn.red{background:#FEF2F2;border-color:#FECACA;color:#991B1B}
+.mi-attn.yellow{background:#FFFBEB;border-color:#FDE68A;color:#92400E}
+.mi-attn.info{background:#EFF6FF;border-color:#BFDBFE;color:#1E40AF}
+.mi-attn.ok{background:#F0FDF4;border-color:#BBF7D0;color:#166534}
+</style>"""
+
+
+# ---------------------------------------------------------------- small helpers
+def _mi_tk(v, tk="৳"):
+    try:
+        return f"{tk}{float(v):,.0f}"
+    except Exception:
+        return f"{tk}0"
+
+
+def _mi_pct(cur, prev):
+    """% change vs previous (None when there is nothing to compare with)."""
+    try:
+        return (float(cur) - float(prev)) / float(prev) * 100 if prev and float(prev) > 0 else None
+    except Exception:
+        return None
+
+
+def _mi_shift(y, m, k):
+    t = y * 12 + (m - 1) + k
+    return t // 12, t % 12 + 1
+
+
+def _mi_range(y, m):
+    return date(y, m, 1), date(y, m, calendar.monthrange(y, m)[1])
+
+
+def _mi_ym(y, m):
+    return f"{y:04d}-{m:02d}"
+
+
+def _mi_label(y, m):
+    return date(y, m, 1).strftime("%b-%Y")
+
+
+def _mi_delta_html(cur, prev, bad_when_up=True):
+    p = _mi_pct(cur, prev)
+    if p is None:
+        return "<span class='mi-flat'>গত মাসের তথ্য নেই</span>"
+    if abs(p) < 0.5:
+        return "<span class='mi-flat'>■ গত মাসের মতোই</span>"
+    up = p > 0
+    cls = ("mi-up" if up else "mi-dn") if bad_when_up else ("mi-dn" if up else "mi-up")
+    return f"<span class='{cls}'>{'▲' if up else '▼'} {abs(p):.0f}% গত মাসের তুলনায়</span>"
+
+
+def _mi_card(label, value, sub_html=""):
+    return (f"<div class='mi-card'><div class='l'>{html_lib.escape(label)}</div><div class='v'>{value}</div>"
+            f"<div class='d'>{sub_html}</div></div>")
+
+
+def _mi_units():
+    """Units of the header selection (consolidated = both)."""
+    return list(FACTORIES) if is_cons_view else [FAC]
+
+
+def _mi_month_picker(key, default_last=False):
+    today = local_now().date()
+    y0, m0 = _mi_shift(today.year, today.month, -1) if default_last else (today.year, today.month)
+    mnames = list(calendar.month_name)[1:]
+    years = list(range(today.year - 3, today.year + 1))[::-1]
+    c = st.columns([1, 1, 3])
+    mm = c[0].selectbox("মাস", mnames, index=m0 - 1, key=f"{key}_m")
+    yy = int(c[1].selectbox("বছর", years, index=years.index(y0) if y0 in years else 0, key=f"{key}_y"))
+    return yy, mnames.index(mm) + 1
+
+
+# ---------------------------------------------------------------- data (read-only, cached through qdf_c)
+def _mi_flow(units, d1, d2):
+    """{factory: issue / receipt value + counts} for the period (one query for all units)."""
+    sd = _sql_date("t.date")
+    try:
+        df = qdf_c(f"""SELECT t.factory_name,
+                  SUM(CASE WHEN t.trans_type = ANY(%s) THEN {_MI_VAL} ELSE 0 END) AS issue_val,
+                  COUNT(CASE WHEN t.trans_type = ANY(%s) THEN 1 END) AS issue_n,
+                  SUM(CASE WHEN t.trans_type = 'Supplier. Rec' THEN {_MI_VAL} ELSE 0 END) AS rcv_val,
+                  COUNT(CASE WHEN t.trans_type = 'Supplier. Rec' THEN 1 END) AS rcv_n
+                {_MI_JOIN} WHERE t.factory_name = ANY(%s) AND {sd} BETWEEN %s AND %s GROUP BY 1""",
+                   (list(ISSUE_TYPES), list(ISSUE_TYPES), list(units), d1, d2))
+    except Exception:
+        return {}
+    return {r.factory_name: {"issue": float(r.issue_val or 0), "issue_n": int(r.issue_n or 0),
+                             "rcv": float(r.rcv_val or 0), "rcv_n": int(r.rcv_n or 0)} for r in df.itertuples()}
+
+
+def _mi_stock(units):
+    try:
+        df = qdf_c("""SELECT factory_name, COUNT(*) AS items,
+                  SUM(GREATEST(COALESCE(current_stock,0),0) * COALESCE(unit_price,0)) AS val,
+                  COUNT(CASE WHEN COALESCE(current_stock,0) <= 0 THEN 1 END) AS zero_n,
+                  COUNT(CASE WHEN COALESCE(erp_status,'') <> 'ERP Pending'
+                             AND ABS(COALESCE(current_stock,0) - COALESCE(erp_stock,0)) > 0.0001 THEN 1 END) AS var_n
+                FROM inventory WHERE factory_name = ANY(%s) GROUP BY 1""", (list(units),))
+    except Exception:
+        return {}
+    return {r.factory_name: {"items": int(r.items or 0), "stock_val": float(r.val or 0),
+                             "zero_n": int(r.zero_n or 0), "var_n": int(r.var_n or 0)} for r in df.itertuples()}
+
+
+def _mi_budget(units, d1, d2):
+    """Per (factory, budget category): monthly budget and the issue value of the period (same basis as the Budget page)."""
+    sd = _sql_date("t.date")
+    try:
+        bud = qdf_c("""SELECT factory_name, category_name AS category, SUM(COALESCE(allocated_budget,0)) AS budget
+                       FROM category_budgets WHERE factory_name = ANY(%s) GROUP BY 1,2""", (list(units),))
+        used = qdf_c(f"""SELECT t.factory_name, COALESCE(i.category,'') AS category, SUM({_MI_VAL}) AS used
+                         {_MI_JOIN} WHERE t.factory_name = ANY(%s) AND t.trans_type = ANY(%s) AND {sd} BETWEEN %s AND %s
+                         GROUP BY 1,2""", (list(units), list(ISSUE_TYPES), d1, d2))
+    except Exception:
+        return pd.DataFrame(columns=["factory_name", "category", "budget", "used"])
+    rows = {}
+    for r in bud.itertuples():
+        rows[(r.factory_name, r.category)] = [float(r.budget or 0), 0.0]
+    for r in used.itertuples():
+        k = (r.factory_name, r.category)
+        rows.setdefault(k, [0.0, 0.0])[1] += float(r.used or 0)
+    out = pd.DataFrame([[f, c, b, u] for (f, c), (b, u) in rows.items()], columns=["factory_name", "category", "budget", "used"])
+    return out
+
+
+def _mi_sections(units, d1, d2):
+    """Per (factory, section): issue value, monthly limit, % of limit."""
+    try:
+        mc_schema()
+    except Exception:
+        pass
+    try:
+        used_df = _sb_used_df(list(units), d1, d2)
+        lims = qdf_c("SELECT factory_name, section_name, monthly_limit FROM section_budget_limits WHERE factory_name = ANY(%s)",
+                     (list(units),))
+    except Exception:
+        return pd.DataFrame(columns=["factory_name", "section", "used", "limit", "pct"])
+    lim = {(r.factory_name, r.section_name): float(r.monthly_limit or 0) for r in lims.itertuples()}
+    use = {(r.factory_name, r.section): float(r.used or 0) for r in used_df.itertuples()} if not used_df.empty else {}
+    rows = []
+    for k in set(lim) | set(use):
+        l, u = lim.get(k, 0.0), use.get(k, 0.0)
+        if l <= 0 and u <= 0:
+            continue
+        rows.append([k[0], k[1] or "(No section)", u, l, (u / l * 100) if l > 0 else None])
+    return pd.DataFrame(rows, columns=["factory_name", "section", "used", "limit", "pct"])
+
+
+def _mi_monthly(units, dim, y0, m0, y1, m1):
+    """Issue value per (factory, group, month) for months y0-m0 .. y1-m1.  dim: category / section / unit."""
+    sd = _sql_date("t.date")
+    d1, d2 = date(y0, m0, 1), _mi_range(y1, m1)[1]
+    try:
+        df = qdf_c(f"""SELECT t.factory_name, {_MI_GRP[dim]} AS grp, to_char({sd}, 'YYYY-MM') AS ym,
+                              SUM({_MI_VAL}) AS used, COUNT(*) AS n
+                       {_MI_JOIN} WHERE t.factory_name = ANY(%s) AND t.trans_type = ANY(%s) AND {sd} BETWEEN %s AND %s
+                       GROUP BY 1,2,3""", (list(units), list(ISSUE_TYPES), d1, d2))
+    except Exception:
+        return pd.DataFrame(columns=["factory_name", "grp", "ym", "used", "n"])
+    if not df.empty:
+        df["used"] = df["used"].astype(float)
+    return df
+
+
+def _mi_pending(units):
+    """Pending requisition lines and open hold bills per factory."""
+    out = {u: {"req_n": 0, "hold_n": 0, "hold_val": 0.0} for u in units}
+    try:
+        df = qdf_c("""SELECT factory_name, COUNT(*) AS n FROM requisition_tracking WHERE factory_name = ANY(%s)
+                      AND COALESCE(NULLIF(audit_approved_qty,0), req_qty, 0) - COALESCE(actual_received_qty,0) > 0.0001
+                      GROUP BY 1""", (list(units),))
+        for r in df.itertuples():
+            if r.factory_name in out:
+                out[r.factory_name]["req_n"] = int(r.n or 0)
+    except Exception:
+        pass
+    try:
+        df = qdf_c("""SELECT factory_name, COUNT(*) AS n, SUM(COALESCE(total_value,0)) AS v FROM hold_bills
+                      WHERE factory_name = ANY(%s) AND COALESCE(status,'Open') = 'Open' GROUP BY 1""", (list(units),))
+        for r in df.itertuples():
+            if r.factory_name in out:
+                out[r.factory_name]["hold_n"] = int(r.n or 0)
+                out[r.factory_name]["hold_val"] = float(r.v or 0)
+    except Exception:
+        pass
+    return out
+
+
+def _mi_find_spikes(vals, x=MI_SPIKE_X, min_extra=MI_SPIKE_MIN):
+    """vals = chronological list of monthly values. Returns [(index, value, base, pct)] of months that jumped vs the 3 months before."""
+    hits = []
+    for i in range(3, len(vals)):
+        base = sum(vals[i - 3:i]) / 3.0
+        cur = vals[i]
+        if base > 0 and cur >= base * x and cur - base >= min_extra:
+            hits.append((i, cur, base, (cur - base) / base * 100))
+        elif base <= 0 and cur >= min_extra * 5:
+            hits.append((i, cur, 0.0, None))
+    return hits
+
+
+def _mi_collect(y, m, units):
+    """Everything the four pages / the PDF need for ONE month: {unit: metrics dict}."""
+    units = list(units)
+    d1, d2 = _mi_range(y, m)
+    py, pm = _mi_shift(y, m, -1)
+    pd1, pd2 = _mi_range(py, pm)
+    cur, prv = _mi_flow(units, d1, d2), _mi_flow(units, pd1, pd2)
+    stock, pend = _mi_stock(units), _mi_pending(units)
+    bud, sec = _mi_budget(units, d1, d2), _mi_sections(units, d1, d2)
+    by, bm = _mi_shift(y, m, -3)
+    catm = _mi_monthly(units, "category", by, bm, y, m)
+    months = [_mi_ym(*_mi_shift(y, m, k)) for k in (-3, -2, -1, 0)]
+    out = {}
+    for u in units:
+        c, p, s, pe = cur.get(u, {}), prv.get(u, {}), stock.get(u, {}), pend.get(u, {})
+        bu = bud[bud["factory_name"] == u].copy() if not bud.empty else pd.DataFrame(columns=bud.columns)
+        if not bu.empty:
+            bu["pct"] = bu.apply(lambda r: (r["used"] / r["budget"] * 100) if r["budget"] > 0 else (100.0 if r["used"] > 0 else 0.0), axis=1)
+            bu = bu.sort_values("used", ascending=False)
+        has_b = bu[bu["budget"] > 0] if not bu.empty else bu
+        su = sec[sec["factory_name"] == u].sort_values("used", ascending=False) if not sec.empty else sec
+        spikes = []
+        cm = catm[catm["factory_name"] == u] if not catm.empty else catm
+        if not cm.empty:
+            pv = cm.pivot_table(index="grp", columns="ym", values="used", aggfunc="sum", fill_value=0).reindex(columns=months, fill_value=0)
+            for g, row in pv.iterrows():
+                hit = _mi_find_spikes([float(v) for v in row.tolist()])
+                if hit and hit[-1][0] == 3:
+                    i, v, b, pc = hit[-1]
+                    spikes.append({"category": g, "cur": v, "base": b, "pct": pc, "extra": v - b})
+            spikes.sort(key=lambda z: -z["extra"])
+        out[u] = {
+            "unit": u, "short": short_fac(u),
+            "issue": c.get("issue", 0.0), "issue_n": c.get("issue_n", 0), "rcv": c.get("rcv", 0.0), "rcv_n": c.get("rcv_n", 0),
+            "issue_prev": p.get("issue", 0.0), "rcv_prev": p.get("rcv", 0.0),
+            "stock_val": s.get("stock_val", 0.0), "items": s.get("items", 0), "zero_n": s.get("zero_n", 0), "var_n": s.get("var_n", 0),
+            "bud_total": float(has_b["budget"].sum()) if not has_b.empty else 0.0,
+            "bud_used": float(has_b["used"].sum()) if not has_b.empty else 0.0,
+            "cats": bu,
+            "over_cats": has_b[has_b["pct"] >= MI_RED_PCT]["category"].tolist() if not has_b.empty else [],
+            "warn_cats": has_b[(has_b["pct"] >= MI_WARN_PCT) & (has_b["pct"] < MI_RED_PCT)]["category"].tolist() if not has_b.empty else [],
+            "secs": su,
+            "sec_over": su[su["pct"].fillna(-1) >= MI_RED_PCT]["section"].tolist() if not su.empty else [],
+            "sec_warn": su[(su["pct"].fillna(-1) >= MI_WARN_PCT) & (su["pct"].fillna(-1) < MI_RED_PCT)]["section"].tolist() if not su.empty else [],
+            "spikes": spikes,
+            "req_n": pe.get("req_n", 0), "hold_n": pe.get("hold_n", 0), "hold_val": pe.get("hold_val", 0.0),
+        }
+        out[u]["bud_pct"] = (out[u]["bud_used"] / out[u]["bud_total"] * 100) if out[u]["bud_total"] > 0 else None
+    return out
+
+
+def _mi_attention(u):
+    """Plain-language attention points for one unit: list of {lvl, bn, en}."""
+    s, out = u["short"], []
+    p = _mi_pct(u["issue"], u["issue_prev"])
+    if p is not None and p >= 25 and u["issue"] - u["issue_prev"] >= 20000:
+        out.append({"lvl": "yellow",
+                    "bn": f"{s}: এ মাসের issue খরচ গত মাসের চেয়ে {p:.0f}% বেশি ({_mi_tk(u['issue'])} বনাম {_mi_tk(u['issue_prev'])})",
+                    "en": f"{s}: issue value is up {p:.0f}% on last month (Tk {u['issue']:,.0f} vs Tk {u['issue_prev']:,.0f})"})
+    if u["over_cats"]:
+        n = ", ".join(u["over_cats"][:3]) + (f" +{len(u['over_cats']) - 3}" if len(u["over_cats"]) > 3 else "")
+        out.append({"lvl": "red", "bn": f"{s}: {len(u['over_cats'])}টি Budget Category বাজেট পার করেছে — {n}",
+                    "en": f"{s}: {len(u['over_cats'])} budget categor{'y is' if len(u['over_cats']) == 1 else 'ies are'} over budget - {n}"})
+    if u["warn_cats"]:
+        out.append({"lvl": "yellow", "bn": f"{s}: {len(u['warn_cats'])}টি Budget Category ৮০%-এর বেশি খরচ করেছে",
+                    "en": f"{s}: budget categories above 80% used: {len(u['warn_cats'])}"})
+    if u["sec_over"]:
+        n = ", ".join(u["sec_over"][:3]) + (f" +{len(u['sec_over']) - 3}" if len(u["sec_over"]) > 3 else "")
+        out.append({"lvl": "red", "bn": f"{s}: {len(u['sec_over'])}টি Section মাসিক সীমা পার করেছে — {n}",
+                    "en": f"{s}: {len(u['sec_over'])} section(s) over the monthly limit - {n}"})
+    if u["sec_warn"]:
+        out.append({"lvl": "yellow", "bn": f"{s}: {len(u['sec_warn'])}টি Section ৮০%-এর বেশি সীমা ব্যবহার করেছে",
+                    "en": f"{s}: {len(u['sec_warn'])} section(s) above 80% of the limit"})
+    for sp in u["spikes"][:3]:
+        pc = f"{sp['pct']:.0f}% বেশি" if sp["pct"] is not None else "নতুন বড় খরচ"
+        pe = f"{sp['pct']:.0f}% above" if sp["pct"] is not None else "new large spend"
+        out.append({"lvl": "yellow",
+                    "bn": f"{s}: «{sp['category']}» হঠাৎ বেড়েছে — {_mi_tk(sp['cur'])} (আগের ৩ মাসের গড় {_mi_tk(sp['base'])}, {pc})",
+                    "en": f"{s}: '{sp['category']}' jumped - Tk {sp['cur']:,.0f} (3-month average Tk {sp['base']:,.0f}, {pe})"})
+    if u["var_n"] > 0:
+        out.append({"lvl": "info", "bn": f"{s}: ERP-র সাথে {u['var_n']}টি item-এর stock মিলছে না",
+                    "en": f"{s}: {u['var_n']} item(s) where software stock differs from ERP stock"})
+    if u["hold_n"] > 0:
+        out.append({"lvl": "info", "bn": f"{s}: {u['hold_n']}টি Hold Bill খোলা আছে ({_mi_tk(u['hold_val'])})",
+                    "en": f"{s}: {u['hold_n']} open hold bill(s), Tk {u['hold_val']:,.0f}"})
+    if u["req_n"] > 0:
+        out.append({"lvl": "info", "bn": f"{s}: {u['req_n']}টি Requisition line এখনো পুরো আসেনি",
+                    "en": f"{s}: {u['req_n']} requisition line(s) not fully received yet"})
+    return out
+
+
+# ---------------------------------------------------------------- PDF (built only when the button is pressed)
+def _mi_pack_pdf(data, units, label, sections, trend_df=None, trend_months=None, who=""):
+    """Management Pack PDF. data = _mi_collect(...) output, sections = set of {'summary','compare','budget','sections','trend'}."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import mm
+        from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    except ImportError:
+        return None
+    esc = html_lib.escape
+    ss = getSampleStyleSheet()
+    H1 = ParagraphStyle("mi_h1", parent=ss["Title"], fontSize=17, textColor=colors.HexColor("#0F766E"), alignment=0, spaceAfter=2)
+    H2 = ParagraphStyle("mi_h2", parent=ss["Heading2"], fontSize=12, textColor=colors.HexColor("#0F172A"), spaceBefore=10, spaceAfter=4)
+    SM = ParagraphStyle("mi_sm", parent=ss["Normal"], fontSize=8.5, textColor=colors.HexColor("#475569"))
+    BL = ParagraphStyle("mi_bl", parent=ss["Normal"], fontSize=9, leading=12)
+    TEAL, LINE = colors.HexColor("#0F766E"), colors.HexColor("#CBD5E1")
+    W = A4[0] - 28 * mm
+    ulist = [u for u in units if u in data]
+
+    def table(rows, widths, right_from=1, status_col=None):
+        t = Table(rows, colWidths=widths, repeatRows=1)
+        st_ = [("BACKGROUND", (0, 0), (-1, 0), TEAL), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+               ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, -1), 8),
+               ("GRID", (0, 0), (-1, -1), 0.3, LINE), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+               ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
+               ("ALIGN", (right_from, 0), (-1, -1), "RIGHT"), ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]
+        if status_col is not None:
+            for ri, r in enumerate(rows[1:], start=1):
+                v = str(r[status_col])
+                c = {"OVER": "#FEE2E2", "WARN": "#FEF3C7", "OK": "#DCFCE7"}.get(v.split()[0] if v else "", None)
+                if c:
+                    st_.append(("BACKGROUND", (status_col, ri), (status_col, ri), colors.HexColor(c)))
+        t.setStyle(TableStyle(st_))
+        return t
+
+    def tk(v):
+        return f"{float(v):,.0f}"
+
+    def pc(v):
+        return "-" if v is None else f"{v:.0f}%"
+
+    def status(p):
+        return "-" if p is None else ("OVER" if p >= MI_RED_PCT else ("WARN" if p >= MI_WARN_PCT else "OK"))
+
+    story = [Paragraph("KC &amp; Windy - Monthly Management Pack", H1),
+             Paragraph(f"Month: <b>{esc(label)}</b> &nbsp;|&nbsp; Units: {esc(', '.join(data[u]['short'] for u in ulist))} &nbsp;|&nbsp; "
+                       f"Generated: {local_now():%d-%b-%Y %I:%M %p}{(' by ' + esc(who)) if who else ''} &nbsp;|&nbsp; All values in Tk (qty x item rate)", SM),
+             Spacer(1, 6)]
+
+    def kpi_rows(extra=False):
+        heads = ["Metric"] + [data[u]["short"] for u in ulist] + (["Total"] if len(ulist) > 1 else [])
+        spec = [("Issue value (Tk)", lambda d: tk(d["issue"]), "issue"),
+                ("Issue value - last month (Tk)", lambda d: tk(d["issue_prev"]), "issue_prev"),
+                ("Change vs last month", lambda d: pc(_mi_pct(d["issue"], d["issue_prev"])), None),
+                ("Purchase receipts (Tk)", lambda d: tk(d["rcv"]), "rcv"),
+                ("Stock value now (Tk)", lambda d: tk(d["stock_val"]), "stock_val"),
+                ("Budget allocated (Tk)", lambda d: tk(d["bud_total"]), "bud_total"),
+                ("Budget used", lambda d: pc(d["bud_pct"]), None),
+                ("Open hold bills (Tk)", lambda d: f"{d['hold_n']} / {tk(d['hold_val'])}", None),
+                ("Pending requisition lines", lambda d: str(d["req_n"]), "req_n")]
+        if extra:
+            spec += [("Issue transactions", lambda d: str(d["issue_n"]), "issue_n"),
+                     ("Items in master / zero stock", lambda d: f"{d['items']} / {d['zero_n']}", None),
+                     ("Categories over budget", lambda d: str(len(d["over_cats"])), "over"),
+                     ("Sections over limit / above 80%", lambda d: f"{len(d['sec_over'])} / {len(d['sec_warn'])}", None),
+                     ("ERP variance items", lambda d: str(d["var_n"]), "var_n"),
+                     ("Spiking categories", lambda d: str(len(d["spikes"])), "spk")]
+        rows = [heads]
+        for name, fn, key in spec:
+            r = [name] + [fn(data[u]) for u in ulist]
+            if len(ulist) > 1:
+                if key in ("issue", "issue_prev", "rcv", "stock_val", "bud_total"):
+                    r.append(tk(sum(data[u][key] for u in ulist)))
+                elif key in ("req_n", "issue_n", "var_n"):
+                    r.append(str(sum(data[u][key] for u in ulist)))
+                elif key == "over":
+                    r.append(str(sum(len(data[u]["over_cats"]) for u in ulist)))
+                elif key == "spk":
+                    r.append(str(sum(len(data[u]["spikes"]) for u in ulist)))
+                elif name == "Change vs last month":
+                    r.append(pc(_mi_pct(sum(data[u]["issue"] for u in ulist), sum(data[u]["issue_prev"] for u in ulist))))
+                elif name == "Budget used":
+                    tb, tu = sum(data[u]["bud_total"] for u in ulist), sum(data[u]["bud_used"] for u in ulist)
+                    r.append(pc(tu / tb * 100 if tb > 0 else None))
+                elif name.startswith("Open hold"):
+                    r.append(f"{sum(data[u]['hold_n'] for u in ulist)} / {tk(sum(data[u]['hold_val'] for u in ulist))}")
+                else:
+                    r.append("")
+            rows.append(r)
+        n = len(heads) - 1
+        return rows, [W * 0.38] + [W * 0.62 / n] * n
+
+    if "summary" in sections:
+        story.append(Paragraph("1. Executive Summary", H2))
+        rows, cw = kpi_rows()
+        story.append(table(rows, cw))
+        story.append(Paragraph("Points that need attention", H2))
+        pts = [a for u in ulist for a in _mi_attention(data[u])]
+        if not pts:
+            story.append(Paragraph("No unusual point this month: no budget / limit crossed and no sudden jump found.", BL))
+        for a in pts[:18]:
+            col = {"red": "#B91C1C", "yellow": "#B45309", "info": "#1D4ED8"}.get(a["lvl"], "#334155")
+            story.append(Paragraph(f"<font color='{col}'>&#9679;</font> {esc(a['en'])}", BL))
+        for u in ulist:
+            d = data[u]
+            if d["issue"] > 0 and not d["cats"].empty:
+                story.append(Paragraph(f"Top 5 budget categories by issue value - {esc(d['short'])}", H2))
+                top = d["cats"].head(5)
+                rows = [["Category", "Issue value (Tk)", "% of unit issue"]] + [
+                    [str(r.category or "(No category)")[:40], tk(r.used), pc(r.used / d["issue"] * 100)] for r in top.itertuples()]
+                story.append(table(rows, [W * 0.5, W * 0.25, W * 0.25]))
+        story.append(PageBreak())
+
+    if "compare" in sections and len(ulist) > 1:
+        story.append(Paragraph("2. Unit Comparison", H2))
+        rows, cw = kpi_rows(extra=True)
+        story.append(table(rows, cw))
+        story.append(Spacer(1, 6))
+        story.append(Paragraph("Share of issue value: " + " | ".join(
+            f"{esc(data[u]['short'])} {data[u]['issue'] / max(sum(data[v]['issue'] for v in ulist), 1) * 100:.0f}%" for u in ulist), BL))
+        story.append(PageBreak())
+
+    if "budget" in sections:
+        story.append(Paragraph("3. Budget vs Issue value by Category", H2))
+        for u in ulist:
+            d = data[u]
+            cats = d["cats"]
+            story.append(Paragraph(f"<b>{esc(d['short'])}</b> - budget used {pc(d['bud_pct'])}", BL))
+            if cats is None or cats.empty:
+                story.append(Paragraph("No budget / issue data.", SM))
+                continue
+            cats = cats[(cats["budget"] > 0) | (cats["used"] > 0)].sort_values("pct", ascending=False).head(40)
+            rows = [["Category", "Budget (Tk)", "Issued (Tk)", "Remaining (Tk)", "Used %", "Status"]]
+            for r in cats.itertuples():
+                rows.append([str(r.category or "(No category)")[:34], tk(r.budget), tk(r.used), tk(r.budget - r.used),
+                             pc(r.pct if r.budget > 0 else None), status(r.pct) if r.budget > 0 else "NO BUDGET"])
+            story.append(table(rows, [W * 0.30, W * 0.15, W * 0.15, W * 0.16, W * 0.10, W * 0.14], status_col=5))
+            story.append(Spacer(1, 6))
+        story.append(PageBreak())
+
+    if "sections" in sections:
+        story.append(Paragraph("4. Section-wise issue vs monthly limit", H2))
+        for u in ulist:
+            d = data[u]
+            su = d["secs"]
+            story.append(Paragraph(f"<b>{esc(d['short'])}</b>", BL))
+            if su is None or su.empty:
+                story.append(Paragraph("No section data.", SM))
+                continue
+            rows = [["Section", "Monthly limit (Tk)", "Issued (Tk)", "Used %", "Status"]]
+            for r in su.head(30).itertuples():
+                pcv = None if (r.pct is None or (isinstance(r.pct, float) and math.isnan(r.pct))) else r.pct
+                rows.append([str(r.section)[:36], tk(r.limit) if r.limit > 0 else "-", tk(r.used), pc(pcv), status(pcv) if pcv is not None else "NO LIMIT"])
+            story.append(table(rows, [W * 0.34, W * 0.2, W * 0.2, W * 0.12, W * 0.14], status_col=4))
+            story.append(Spacer(1, 6))
+        story.append(PageBreak())
+
+    if "trend" in sections:
+        story.append(Paragraph("5. Consumption trend (last 6 months, issue value)", H2))
+        if trend_df is not None and not trend_df.empty and trend_months:
+            pv = trend_df.pivot_table(index="factory_name", columns="ym", values="used", aggfunc="sum", fill_value=0).reindex(columns=trend_months, fill_value=0)
+            rows = [["Unit"] + [datetime.strptime(mm, "%Y-%m").strftime("%b-%y") for mm in trend_months]]
+            series = []
+            for u in ulist:
+                vals = [float(pv.loc[u, mm]) if u in pv.index else 0.0 for mm in trend_months]
+                series.append((data[u]["short"], vals))
+                rows.append([data[u]["short"]] + [tk(v) for v in vals])
+            if len(ulist) > 1:
+                rows.append(["Total"] + [tk(sum(s[1][i] for s in series)) for i in range(len(trend_months))])
+            n = len(trend_months)
+            story.append(table(rows, [W * 0.16] + [W * 0.84 / n] * n))
+            try:
+                from reportlab.graphics.charts.linecharts import HorizontalLineChart
+                from reportlab.graphics.shapes import Drawing, String
+                dr = Drawing(W, 170)
+                lc = HorizontalLineChart()
+                lc.x, lc.y, lc.width, lc.height = 55, 28, W - 80, 120
+                lc.data = [s[1] for s in series]
+                lc.categoryAxis.categoryNames = [r for r in rows[0][1:]]
+                lc.categoryAxis.labels.fontSize = 7
+                lc.valueAxis.labels.fontSize = 7
+                lc.valueAxis.labelTextFormat = lambda v: f"{v:,.0f}"
+                lc.valueAxis.valueMin = 0
+                pal = ["#0F766E", "#EA580C", "#2563EB", "#9333EA"]
+                for i in range(len(series)):
+                    lc.lines[i].strokeColor = colors.HexColor(pal[i % 4])
+                    lc.lines[i].strokeWidth = 2
+                    dr.add(String(60 + i * 90, 158, "— " + series[i][0], fontSize=8, fillColor=colors.HexColor(pal[i % 4])))
+                dr.add(lc)
+                story.append(Spacer(1, 6))
+                story.append(dr)
+            except Exception:
+                pass
+        else:
+            story.append(Paragraph("No trend data.", SM))
+        story.append(Paragraph("Categories that jumped this month (vs average of the previous 3 months)", H2))
+        any_sp = False
+        for u in ulist:
+            d = data[u]
+            if d["spikes"]:
+                any_sp = True
+                rows = [[f"{d['short']} - category", "This month (Tk)", "3-mo average (Tk)", "Change"]] + [
+                    [str(sp["category"])[:38], tk(sp["cur"]), tk(sp["base"]), pc(sp["pct"]) if sp["pct"] is not None else "new"] for sp in d["spikes"][:12]]
+                story.append(table(rows, [W * 0.44, W * 0.19, W * 0.22, W * 0.15]))
+                story.append(Spacer(1, 5))
+        if not any_sp:
+            story.append(Paragraph("No category jumped sharply this month.", BL))
+
+    def footer(canvas, doc_):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7.5)
+        canvas.setFillColor(colors.HexColor("#64748B"))
+        canvas.drawString(14 * mm, 8 * mm, "KC & Windy Smart Inventory - Management Pack")
+        canvas.drawRightString(A4[0] - 14 * mm, 8 * mm, f"Page {doc_.page}")
+        canvas.restoreState()
+
+    buf = io.BytesIO()
+    SimpleDocTemplate(buf, pagesize=A4, leftMargin=14 * mm, rightMargin=14 * mm, topMargin=13 * mm, bottomMargin=14 * mm,
+                      title=f"Management Pack {label}").build(story, onFirstPage=footer, onLaterPages=footer)
+    return buf.getvalue()
+
+
+def _mi_pdf_button(key, label, fname, builder):
+    """Download button that builds the PDF only when clicked (falls back to a 2-step button on an old Streamlit)."""
+    ok = _lazy_download(st, "📥 PDF ডাউনলোড", builder, fname, "application/pdf", f"{key}_dl")
+    if ok:
+        return
+    if st.button("📄 PDF বানান", key=f"{key}_mk"):
+        try:
+            st.session_state[f"{key}_bytes"] = builder()
+        except Exception as e:
+            st.error(f"PDF বানানো যায়নি: {e}")
+    b = st.session_state.get(f"{key}_bytes")
+    if b:
+        st.download_button("📥 PDF ডাউনলোড", b, fname, "application/pdf", key=f"{key}_dl2")
+
+
+def _mi_pack_builder(data, units, label, sections, y, m, who):
+    def build():
+        ty, tm = _mi_shift(y, m, -5)
+        tdf = _mi_monthly(units, "unit", ty, tm, y, m)
+        tmonths = [_mi_ym(*_mi_shift(y, m, k)) for k in range(-5, 1)]
+        b = _mi_pack_pdf(data, units, label, sections, tdf, tmonths, who)
+        if b is None:
+            raise RuntimeError("PDF library (reportlab) is not installed on this server")
+        return b
+    return build
+
+
+# ---------------------------------------------------------------- PAGE 1: UNIT COMPARISON
+def tab_unit_compare():
+    st.markdown(_MI_CSS, unsafe_allow_html=True)
+    st.markdown("<div class='mi-hero'><div class='t'>🏭 Unit Comparison — KC vs Windy</div>"
+                "<div class='s'>দুই unit পাশাপাশি: খরচ, কেনা, stock, বাজেট, Section সীমা, সমস্যা — এক মাসের হিসাব, গত মাসের সাথে তুলনাসহ</div></div>",
+                unsafe_allow_html=True)
+    y, m = _mi_month_picker("uc")
+    units = list(FACTORIES)
+    data = _mi_collect(y, m, units)
+    label = _mi_label(y, m)
+    a, b = data[units[0]], data[units[1]]
+    tot_issue = a["issue"] + b["issue"]
+
+    cols = st.columns(4)
+    cols[0].markdown(_mi_card(f"{a['short']} — Issue", _mi_tk(a["issue"]), _mi_delta_html(a["issue"], a["issue_prev"])), unsafe_allow_html=True)
+    cols[1].markdown(_mi_card(f"{b['short']} — Issue", _mi_tk(b["issue"]), _mi_delta_html(b["issue"], b["issue_prev"])), unsafe_allow_html=True)
+    hi = a if a["issue"] >= b["issue"] else b
+    share = (hi["issue"] / tot_issue * 100) if tot_issue > 0 else 0
+    cols[2].markdown(_mi_card("বেশি খরচ করেছে", html_lib.escape(hi["short"]) if tot_issue > 0 else "-", f"মোট issue-র {share:.0f}%"), unsafe_allow_html=True)
+    cols[3].markdown(_mi_card("দুই unit মিলিয়ে", _mi_tk(tot_issue), _mi_delta_html(tot_issue, a["issue_prev"] + b["issue_prev"])), unsafe_allow_html=True)
+
+    def cell(d, key, kind="tk", prev=None, bad_up=True):
+        v = d[key]
+        txt_ = _mi_tk(v) if kind == "tk" else (f"{v:.0f}%" if kind == "pct" and v is not None else ("-" if kind == "pct" else f"{int(v):,}"))
+        if prev is not None:
+            txt_ += f"<br><small>{_mi_delta_html(v, d[prev], bad_up)}</small>"
+        return txt_
+
+    spec = [("💸 Issue value (খরচ)", lambda d: cell(d, "issue", "tk", "issue_prev")),
+            ("🧾 Issue transaction সংখ্যা", lambda d: cell(d, "issue_n", "n")),
+            ("📥 Purchase receipt (কেনা মাল)", lambda d: cell(d, "rcv", "tk", "rcv_prev", False)),
+            ("📦 এখন stock-এর মূল্য", lambda d: cell(d, "stock_val")),
+            ("🔢 Item সংখ্যা / zero stock", lambda d: f"{d['items']:,} / {d['zero_n']:,}"),
+            ("💰 Budget allocated (মাসিক)", lambda d: cell(d, "bud_total")),
+            ("📊 Budget used %", lambda d: cell(d, "bud_pct", "pct")),
+            ("🔴 Budget পার করা Category", lambda d: str(len(d["over_cats"]))),
+            ("🚦 Section সীমা পার / ৮০%+", lambda d: f"{len(d['sec_over'])} / {len(d['sec_warn'])}"),
+            ("📈 হঠাৎ বাড়া Category", lambda d: str(len(d["spikes"]))),
+            ("⚠️ ERP-র সাথে না মেলা item", lambda d: str(d["var_n"])),
+            ("📑 বাকি Requisition line", lambda d: str(d["req_n"])),
+            ("🧷 খোলা Hold Bill (সংখ্যা / টাকা)", lambda d: f"{d['hold_n']} / {_mi_tk(d['hold_val'])}")]
+    rows_html = "".join(f"<tr><td><b>{n}</b></td><td class='n'>{f(a)}</td><td class='n'>{f(b)}</td></tr>" for n, f in spec)
+    st.markdown(f"<div class='section-title'>তুলনা — {label}</div>"
+                f"<table class='mi-tbl'><tr><th>বিষয়</th><th style='text-align:right'>{html_lib.escape(a['unit'])}</th>"
+                f"<th style='text-align:right'>{html_lib.escape(b['unit'])}</th></tr>{rows_html}</table>", unsafe_allow_html=True)
+
+    # category-wise bar chart, both units side by side
+    ca = a["cats"].set_index("category")["used"] if not a["cats"].empty else pd.Series(dtype=float)
+    cb = b["cats"].set_index("category")["used"] if not b["cats"].empty else pd.Series(dtype=float)
+    cmp_df = pd.DataFrame({a["short"]: ca, b["short"]: cb}).fillna(0.0)
+    if not cmp_df.empty and cmp_df.values.sum() > 0:
+        cmp_df["_t"] = cmp_df.sum(axis=1)
+        cmp_df = cmp_df.sort_values("_t", ascending=False).drop(columns="_t")
+        cmp_df.index = [str(i) if str(i).strip() else "(No category)" for i in cmp_df.index]
+        st.markdown("<div class='section-title'>Category অনুযায়ী খরচ — KC বনাম Windy (Tk)</div>", unsafe_allow_html=True)
+        st.bar_chart(cmp_df.head(10), use_container_width=True)
+        with st.expander("সব Category-র তুলনা (টেবিল / Excel / PDF)"):
+            full = cmp_df.reset_index().rename(columns={"index": "Category"})
+            full["Difference (Windy - KC)"] = full[b["short"]] - full[a["short"]]
+            export_buttons(full.round(0), f"unit_comparison_{label}", f"Category-wise issue value - KC vs Windy - {label}")
+            st.dataframe(full.round(0), use_container_width=True, hide_index=True)
+
+    # 6 month total issue line, both units
+    ty, tm = _mi_shift(y, m, -5)
+    tdf = _mi_monthly(units, "unit", ty, tm, y, m)
+    if not tdf.empty:
+        months = [_mi_ym(*_mi_shift(y, m, k)) for k in range(-5, 1)]
+        pv = tdf.pivot_table(index="ym", columns="factory_name", values="used", aggfunc="sum", fill_value=0).reindex(months, fill_value=0)
+        pv.columns = [short_fac(c) for c in pv.columns]
+        st.markdown("<div class='section-title'>গত ৬ মাসের খরচের ধারা (Tk)</div>", unsafe_allow_html=True)
+        st.line_chart(pv, use_container_width=True)
+
+    c1, c2 = st.columns(2)
+    for col, d in ((c1, a), (c2, b)):
+        with col:
+            st.markdown(f"<div class='mi-unit'>{html_lib.escape(d['unit'])} — শীর্ষ ৫ Section</div>", unsafe_allow_html=True)
+            if d["secs"].empty:
+                st.caption("Section-এর তথ্য নেই।")
+            else:
+                t5 = d["secs"].head(5).copy()
+                t5["Used %"] = t5["pct"].map(lambda v: "—" if pd.isna(v) else f"{v:.0f}%")
+                st.dataframe(t5.rename(columns={"section": "Section", "used": "Issued (Tk)", "limit": "Limit (Tk)"})[["Section", "Issued (Tk)", "Limit (Tk)", "Used %"]].round(0),
+                             use_container_width=True, hide_index=True)
+
+
+# ---------------------------------------------------------------- PAGE 2: EXECUTIVE SUMMARY
+def tab_exec_summary():
+    st.markdown(_MI_CSS, unsafe_allow_html=True)
+    st.markdown("<div class='mi-hero'><div class='t'>📋 Executive Summary</div>"
+                "<div class='s'>ম্যানেজমেন্টের জন্য এক পেজ — কত খরচ হলো, কোথায় সমস্যা, কী নজরে রাখতে হবে</div></div>", unsafe_allow_html=True)
+    y, m = _mi_month_picker("es")
+    units = _mi_units()
+    data = _mi_collect(y, m, units)
+    label = _mi_label(y, m)
+    ul = [u for u in units if u in data]
+    iss, ip = sum(data[u]["issue"] for u in ul), sum(data[u]["issue_prev"] for u in ul)
+    rc, rp = sum(data[u]["rcv"] for u in ul), sum(data[u]["rcv_prev"] for u in ul)
+    sv = sum(data[u]["stock_val"] for u in ul)
+    tb, tu = sum(data[u]["bud_total"] for u in ul), sum(data[u]["bud_used"] for u in ul)
+    bp = (tu / tb * 100) if tb > 0 else None
+
+    c = st.columns(4)
+    c[0].markdown(_mi_card(f"Issue — {label}", _mi_tk(iss), _mi_delta_html(iss, ip)), unsafe_allow_html=True)
+    c[1].markdown(_mi_card("Purchase receipt", _mi_tk(rc), _mi_delta_html(rc, rp, False)), unsafe_allow_html=True)
+    c[2].markdown(_mi_card("Stock-এর মূল্য (এখন)", _mi_tk(sv), f"{sum(data[u]['items'] for u in ul):,} item"), unsafe_allow_html=True)
+    c[3].markdown(_mi_card("Budget used", "—" if bp is None else f"{bp:.0f}%",
+                           f"{_mi_tk(tu)} / {_mi_tk(tb)}" if tb > 0 else "বাজেট সেট করা নেই"), unsafe_allow_html=True)
+
+    st.markdown("<div class='section-title'>🚨 যা নজরে রাখতে হবে</div>", unsafe_allow_html=True)
+    pts = [a for u in ul for a in _mi_attention(data[u])]
+    if not pts:
+        st.markdown("<div class='mi-attn ok'>✅ এ মাসে অস্বাভাবিক কিছু পাওয়া যায়নি — কোনো বাজেট / সীমা পার হয়নি, হঠাৎ বাড়াও নেই।</div>", unsafe_allow_html=True)
+    for a in pts:
+        st.markdown(f"<div class='mi-attn {a['lvl']}'>{'🔴' if a['lvl'] == 'red' else ('🟡' if a['lvl'] == 'yellow' else '🔵')} {html_lib.escape(a['bn'])}</div>",
+                    unsafe_allow_html=True)
+
+    if len(ul) > 1:
+        st.markdown("<div class='section-title'>Unit অনুযায়ী</div>", unsafe_allow_html=True)
+        cc = st.columns(len(ul))
+        for col, u in zip(cc, ul):
+            d = data[u]
+            col.markdown(f"<div class='mi-unit'>{html_lib.escape(u)}</div>" +
+                         _mi_card("Issue", _mi_tk(d["issue"]), _mi_delta_html(d["issue"], d["issue_prev"])), unsafe_allow_html=True)
+
+    t1, t2 = st.columns(2)
+    allc = pd.concat([data[u]["cats"].assign(unit=short_fac(u)) for u in ul if not data[u]["cats"].empty], ignore_index=True) if any(not data[u]["cats"].empty for u in ul) else pd.DataFrame()
+    with t1:
+        st.markdown("<div class='section-title'>শীর্ষ ৫ খরচের Category</div>", unsafe_allow_html=True)
+        if allc.empty:
+            st.caption("তথ্য নেই।")
+        else:
+            g = allc.groupby("category", as_index=False).agg(used=("used", "sum"), budget=("budget", "sum")).sort_values("used", ascending=False).head(5)
+            g["Used %"] = g.apply(lambda r: f"{r['used'] / r['budget'] * 100:.0f}%" if r["budget"] > 0 else "—", axis=1)
+            g["category"] = g["category"].map(lambda v: v if str(v).strip() else "(No category)")
+            st.dataframe(g.rename(columns={"category": "Category", "used": "Issued (Tk)", "budget": "Budget (Tk)"}).round(0), use_container_width=True, hide_index=True)
+    with t2:
+        st.markdown("<div class='section-title'>শীর্ষ ৫ খরচের Section</div>", unsafe_allow_html=True)
+        alls = pd.concat([data[u]["secs"].assign(unit=short_fac(u)) for u in ul if not data[u]["secs"].empty], ignore_index=True) if any(not data[u]["secs"].empty for u in ul) else pd.DataFrame()
+        if alls.empty:
+            st.caption("তথ্য নেই।")
+        else:
+            g = alls.sort_values("used", ascending=False).head(5).copy()
+            g["Used %"] = g["pct"].map(lambda v: "—" if pd.isna(v) else f"{v:.0f}%")
+            st.dataframe(g.rename(columns={"unit": "Unit", "section": "Section", "used": "Issued (Tk)", "limit": "Limit (Tk)"})[["Unit", "Section", "Issued (Tk)", "Limit (Tk)", "Used %"]].round(0),
+                         use_container_width=True, hide_index=True)
+
+    st.markdown("<div class='section-title'>এই Summary PDF করুন</div>", unsafe_allow_html=True)
+    who = st.session_state.get("user", "")
+    _mi_pdf_button("es_pdf", label, f"Executive_Summary_{label}.pdf", _mi_pack_builder(data, ul, label, {"summary"}, y, m, who))
+    st.caption("পুরো মাসের রিপোর্ট (তুলনা, বাজেট, Section, ধারা সহ) চাইলে 📄 Management Pack পেজ থেকে নিন।")
+
+
+# ---------------------------------------------------------------- PAGE 3: MONTHLY MANAGEMENT PACK
+def tab_mgmt_pack():
+    st.markdown(_MI_CSS, unsafe_allow_html=True)
+    st.markdown("<div class='mi-hero'><div class='t'>📄 Monthly Management Pack</div>"
+                "<div class='s'>মাস বাছুন → এক ক্লিকে সম্পূর্ণ PDF: Executive Summary, Unit তুলনা, Budget, Section, খরচের ধারা</div></div>", unsafe_allow_html=True)
+    y, m = _mi_month_picker("mp", default_last=True)   # default = last (closed) month
+    label = _mi_label(y, m)
+    c = st.columns([1.4, 3])
+    scope = c[0].radio("কোন Unit", ["দুই Unit (KC + Windy)"] + [short_fac(f) for f in FACTORIES], key="mp_scope")
+    units = list(FACTORIES) if scope.startswith("দুই") else [f for f in FACTORIES if short_fac(f) == scope]
+    opts = {"summary": "1. Executive Summary", "compare": "2. Unit Comparison", "budget": "3. Budget by Category",
+            "sections": "4. Section limits", "trend": "5. ৬ মাসের ধারা + হঠাৎ বাড়া"}
+    sel = c[1].multiselect("PDF-এ কী কী থাকবে", list(opts), default=list(opts), format_func=lambda k: opts[k], key="mp_secs")
+    if "compare" in sel and len(units) < 2:
+        st.caption("ℹ️ Unit Comparison শুধু দুই Unit বাছলেই আসবে।")
+    data = _mi_collect(y, m, units)
+    ul = [u for u in units if u in data]
+    tot = sum(data[u]["issue"] for u in ul)
+    st.markdown("<div class='section-title'>প্রিভিউ — PDF-এ যা যাবে</div>", unsafe_allow_html=True)
+    cols = st.columns(len(ul) + 1)
+    for col, u in zip(cols, ul):
+        d = data[u]
+        col.markdown(_mi_card(f"{d['short']} — Issue", _mi_tk(d["issue"]), _mi_delta_html(d["issue"], d["issue_prev"])), unsafe_allow_html=True)
+    cols[-1].markdown(_mi_card("মোট", _mi_tk(tot), f"{len([a for u in ul for a in _mi_attention(data[u])])}টি নজরে রাখার বিষয়"), unsafe_allow_html=True)
+    if tot <= 0:
+        st.warning(f"{label} মাসে কোনো issue পাওয়া যায়নি — অন্য মাস বেছে দেখুন।")
+    who = st.session_state.get("user", "")
+    st.markdown("<div class='section-title'>PDF</div>", unsafe_allow_html=True)
+    if not sel:
+        st.info("অন্তত একটা অংশ বাছুন।")
+        return
+    _mi_pdf_button("mp_pdf", label, f"Management_Pack_{label}.pdf", _mi_pack_builder(data, ul, label, set(sel), y, m, who))
+    st.caption("PDF ইংরেজিতে বানানো হয় (ছাপা / ইমেইলের জন্য)। টাকার অঙ্ক = qty × item rate, Budget ও Section Budget পেজের মতোই।")
+
+
+# ---------------------------------------------------------------- PAGE 4: CONSUMPTION TREND
+def _mi_drill(units, dim, grp, ym, factory=None):
+    sd = _sql_date("t.date")
+    flt = f"{_MI_GRP[dim]} = %s"
+    params = [list(units), list(ISSUE_TYPES), ym, grp]
+    extra = ""
+    if factory:
+        extra = " AND t.factory_name = %s"
+        params.append(factory)
+    base = (f"{_MI_JOIN} WHERE t.factory_name = ANY(%s) AND t.trans_type = ANY(%s) AND to_char({sd}, 'YYYY-MM') = %s AND {flt}{extra}")
+    try:
+        items = qdf_c(f"""SELECT t.factory_name AS unit, t.item_name AS item, SUM(COALESCE(t.qty,0)) AS qty, SUM({_MI_VAL}) AS value, COUNT(*) AS issues
+                          {base} GROUP BY 1,2 ORDER BY value DESC LIMIT 20""", tuple(params))
+        days = qdf_c(f"""SELECT {sd} AS day, SUM({_MI_VAL}) AS value, COUNT(*) AS issues {base} GROUP BY 1 ORDER BY value DESC LIMIT 8""", tuple(params))
+    except Exception:
+        return pd.DataFrame(), pd.DataFrame()
+    return items, days
+
+
+def tab_consumption_trend():
+    st.markdown(_MI_CSS, unsafe_allow_html=True)
+    st.markdown("<div class='mi-hero'><div class='t'>📈 Consumption Trend</div>"
+                "<div class='s'>প্রতিটি Budget Category / Section-এর ৬ বা ১২ মাসের line chart — কোন মাসে হঠাৎ বাড়লে সাথে সাথে ধরা পড়ে, আর ক্লিক করলে কোন item-এ বাড়ল দেখা যায়</div></div>",
+                unsafe_allow_html=True)
+    units = _mi_units()
+    today = local_now().date()
+    c = st.columns([1.6, 1, 1.2, 1.2])
+    dim_lbl = c[0].radio("কিসের ভিত্তিতে", ["Budget Category", "Section", "Unit total"], key="ct_dim", horizontal=True)
+    dim = {"Budget Category": "category", "Section": "section", "Unit total": "unit"}[dim_lbl]
+    n = c[1].radio("সময়", [6, 12], key="ct_n", horizontal=True, format_func=lambda v: f"{v} মাস")
+    ends = [_mi_shift(today.year, today.month, -k) for k in range(0, 24)]
+    ey, em = ends[c[2].selectbox("শেষ মাস", list(range(len(ends))), format_func=lambda i: _mi_label(*ends[i]), key="ct_end")]
+    split = bool(is_cons_view and dim != "unit" and c[3].checkbox("Unit আলাদা দেখান", key="ct_split"))
+
+    sy, sm = _mi_shift(ey, em, -(n - 1))
+    fy, fm = _mi_shift(sy, sm, -3)                      # 3 extra months before the window = baseline for the spike finder
+    df = _mi_monthly(units, dim, fy, fm, ey, em)
+    if df.empty:
+        st.info("এই সময়ে কোনো issue পাওয়া যায়নি।")
+        return
+    meta = {}
+    gcol = []
+    for r in df.itertuples():
+        if dim == "unit":
+            g = short_fac(r.grp)
+            meta[g] = (r.grp, None)
+        elif split:
+            g = f"{short_fac(r.factory_name)} · {r.grp}"
+            meta[g] = (r.grp, r.factory_name)
+        else:
+            g = r.grp
+            meta[g] = (r.grp, None)
+        gcol.append(g)
+    df["g"] = gcol
+    all_months = [_mi_ym(*_mi_shift(ey, em, -(n - 1) + k - 0)) for k in range(-3, n)]
+    win = all_months[3:]
+    pv = df.groupby(["g", "ym"], as_index=False)["used"].sum().pivot_table(index="g", columns="ym", values="used", fill_value=0).reindex(columns=all_months, fill_value=0)
+    pv["_tot"] = pv[win].sum(axis=1)
+    pv = pv[pv["_tot"] > 0].sort_values("_tot", ascending=False)
+    if pv.empty:
+        st.info("এই সময়ে কোনো issue পাওয়া যায়নি।")
+        return
+
+    k = st.columns(3)
+    tot_by_m = pv[win].sum()
+    k[0].markdown(_mi_card(f"শেষ মাস ({_mi_label(ey, em)})", _mi_tk(tot_by_m.iloc[-1]),
+                           _mi_delta_html(tot_by_m.iloc[-1], tot_by_m.iloc[-2] if len(tot_by_m) > 1 else 0)), unsafe_allow_html=True)
+    k[1].markdown(_mi_card(f"{n} মাসের গড়", _mi_tk(tot_by_m.mean()), "মাসে গড় খরচ"), unsafe_allow_html=True)
+    pk = tot_by_m.idxmax()
+    k[2].markdown(_mi_card("সবচেয়ে বেশি মাস", datetime.strptime(pk, "%Y-%m").strftime("%b-%Y"), _mi_tk(tot_by_m.max())), unsafe_allow_html=True)
+
+    names = list(pv.index)
+    default = names[:5]
+    sel = st.multiselect(f"কোন {dim_lbl} দেখবেন (বেশি খরচ আগে)", names, default=default, key=f"ct_sel_{dim}_{int(split)}")
+    if sel:
+        st.markdown("<div class='section-title'>মাসওয়ারি খরচ (Tk)</div>", unsafe_allow_html=True)
+        st.line_chart(pv.loc[sel, win].T, use_container_width=True)
+
+    # table with spike flags
+    tbl = pv[win].copy()
+    tbl["Average"] = tbl.mean(axis=1)
+    tbl["Latest vs avg"] = tbl.apply(lambda r: "—" if r["Average"] <= 0 else f"{(r[win[-1]] - r['Average']) / r['Average'] * 100:+.0f}%", axis=1)
+    tbl.columns = [datetime.strptime(c_, "%Y-%m").strftime("%b-%y") if c_ in win else c_ for c_ in tbl.columns]
+    with st.expander("📋 সব মাসের টেবিল (Excel / PDF সহ)", expanded=False):
+        out = tbl.round(0).reset_index().rename(columns={"g": dim_lbl})
+        export_buttons(out, f"consumption_trend_{dim}_{_mi_label(ey, em)}", f"Consumption trend by {dim_lbl} - {n} months to {_mi_label(ey, em)}")
+        st.dataframe(out, use_container_width=True, hide_index=True)
+
+    # spike finder
+    st.markdown("<div class='section-title'>🔎 হঠাৎ বাড়া মাস (আগের ৩ মাসের গড়ের তুলনায়)</div>", unsafe_allow_html=True)
+    sc = st.columns(2)
+    x = sc[0].number_input("কত গুণ বাড়লে ধরবে", min_value=1.1, max_value=10.0, value=float(MI_SPIKE_X), step=0.1, key="ct_x")
+    mn = sc[1].number_input("ন্যূনতম বাড়তি টাকা (Tk)", min_value=0.0, value=float(MI_SPIKE_MIN), step=1000.0, key="ct_min")
+    hits = []
+    for g, row in pv.iterrows():
+        vals = [float(row[mm]) for mm in all_months]
+        for i, cur, base, pc_ in _mi_find_spikes(vals, x, mn):
+            hits.append({"g": g, "ym": all_months[i], "cur": cur, "base": base, "pct": pc_, "extra": cur - base})
+    if not hits:
+        st.markdown("<div class='mi-attn ok'>✅ এই সময়ে কোনো হঠাৎ বাড়া পাওয়া যায়নি।</div>", unsafe_allow_html=True)
+    else:
+        hits.sort(key=lambda z: (z["ym"], z["extra"]), reverse=True)
+        sp = pd.DataFrame([{dim_lbl: h["g"], "Month": datetime.strptime(h["ym"], "%Y-%m").strftime("%b-%Y"), "Value (Tk)": h["cur"],
+                            "3-mo average (Tk)": h["base"], "Change": ("নতুন বড় খরচ" if h["pct"] is None else f"+{h['pct']:.0f}%")} for h in hits if h["ym"] in win])
+        if sp.empty:
+            st.markdown("<div class='mi-attn ok'>✅ এই সময়ে কোনো হঠাৎ বাড়া পাওয়া যায়নি।</div>", unsafe_allow_html=True)
+        else:
+            st.dataframe(sp.round(0), use_container_width=True, hide_index=True)
+            if ey == today.year and em == today.month:
+                st.caption("ℹ️ চলতি মাস এখনো শেষ হয়নি — মাস শেষে এই অঙ্ক আরও বাড়তে পারে।")
+
+    # drill-down
+    st.markdown("<div class='section-title'>🧭 কোথায় বাড়ল? Item-wise দেখুন</div>", unsafe_allow_html=True)
+    dc = st.columns(2)
+    flagged = [h for h in hits if h["ym"] in win]
+    d_names = names
+    d_def = d_names.index(flagged[0]["g"]) if flagged and flagged[0]["g"] in d_names else 0
+    dg = dc[0].selectbox(dim_lbl, d_names, index=d_def, key=f"ct_dg_{dim}_{int(split)}")
+    mlabels = {mm: datetime.strptime(mm, "%Y-%m").strftime("%b-%Y") for mm in win}
+    d_mdef = win.index(flagged[0]["ym"]) if flagged and flagged[0]["g"] == dg and flagged[0]["ym"] in win else len(win) - 1
+    dm = dc[1].selectbox("মাস", win, index=d_mdef, format_func=lambda v: mlabels[v], key="ct_dm")
+    grp_val, fac_val = meta.get(dg, (dg, None))
+    items, days = _mi_drill(units, dim, grp_val, dm, fac_val)
+    if items is None or items.empty:
+        st.caption("এই মাসে এর কোনো issue নেই।")
+    else:
+        i1, i2 = st.columns([3, 2])
+        with i1:
+            st.markdown("**সবচেয়ে বেশি খরচের item**")
+            it = items.copy()
+            it["unit"] = it["unit"].map(short_fac)
+            st.dataframe(it.rename(columns={"unit": "Unit", "item": "Item", "qty": "Qty", "value": "Value (Tk)", "issues": "Issues"}).round(2),
+                         use_container_width=True, hide_index=True)
+        with i2:
+            st.markdown("**কোন কোন দিনে বেশি**")
+            dd = days.copy()
+            dd["day"] = dd["day"].astype(str)
+            st.dataframe(dd.rename(columns={"day": "Date", "value": "Value (Tk)", "issues": "Issues"}).round(0), use_container_width=True, hide_index=True)
+
+
 # Brand and account/login appear first; Workspace and Management remain clearly grouped below.
 try:   # home-screen shortcut:  <app link>/?page=count  opens Physical Count directly (once per session)
     _pg = str(st.query_params.get("page", "")).strip().lower()
@@ -21486,6 +22398,10 @@ NAV_GROUPS = [
         ("Budget", "💰 Budget"),
         ("Section Budget", NAV_SEC_BUDGET),
         ("Machine Cost", NAV_MACHINE),
+        ("Unit Comparison", NAV_UNIT_CMP),
+        ("Executive Summary", NAV_EXEC_SUM),
+        ("Management Pack (PDF)", NAV_MGMT_PACK),
+        ("Consumption Trend", NAV_TREND),
     ]),
 ]
 _NAV_GROUP_NAMES = [_g for _g, _p in NAV_GROUPS]
@@ -21654,7 +22570,8 @@ RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, t
              tab_transfer_history, tab_requisition, tab_repair, tab_ledger, tab_forecast, tab_budget, tab_daily_sheet,
              tab_stock_cover, tab_data_health, tab_log_sheet, tab_high_value, tab_req_issue, tab_gate_pass, tab_hold_bills,
              tab_monthly_stock_check, tab_machine_cost, tab_shift_handover, tab_section_budget,
-             tab_warranty, tab_scrap, tab_old_materials, tab_price_history, tab_item_audit]
+             tab_warranty, tab_scrap, tab_old_materials, tab_price_history, tab_item_audit,
+             tab_unit_compare, tab_exec_summary, tab_mgmt_pack, tab_consumption_trend]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
 # --- tab switch: no stacked blank space at the top + always start at the top of the new page (CSS/JS only, no extra DB work) ---
 st.markdown("""<style>
