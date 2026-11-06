@@ -2711,15 +2711,15 @@ def sidebar_clock():
     with st.sidebar:
         components.html("""
         <div style="font-family:Inter,system-ui,sans-serif;display:flex;align-items:center;gap:10px;
-                    background:linear-gradient(135deg,#1e40af 0%,#2563eb 100%);
-                    border:1px solid rgba(255,255,255,.45);border-left:4px solid #fff;border-radius:10px;
+                    background:#1D4278;
+                    border:1px solid #C9A44C;border-left:4px solid #C9A44C;border-radius:10px;
                     padding:8px 11px;box-shadow:0 4px 12px rgba(2,12,24,.16);">
-          <div style="font-size:20px;line-height:1;color:#fff;">◷</div>
+          <div style="font-size:20px;line-height:1;color:#C9A44C;">◷</div>
           <div style="min-width:0;">
             <div id="clk" style="font-size:16px;font-weight:800;letter-spacing:.6px;color:#FFFFFF;line-height:1.2;">--:--:--</div>
-            <div id="dt" style="font-size:11px;color:#C7D4E2;margin-top:3px;white-space:nowrap;">--</div>
+            <div id="dt" style="font-size:11px;color:#FFFFFF;margin-top:3px;white-space:nowrap;">--</div>
           </div>
-          <div style="margin-left:auto;font-size:9px;font-weight:800;letter-spacing:.8px;color:#BFDBFE;">LOCAL</div>
+          <div style="margin-left:auto;font-size:9px;font-weight:800;letter-spacing:.8px;color:#C9A44C;">LOCAL</div>
         </div>
         <script>
           function tick(){
@@ -21568,43 +21568,36 @@ section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind=
   section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button { min-height: 48px !important; }
   section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button { min-height: 44px !important; }
 }
-/* ===== PREMIUM SIDEBAR v3: same blue as the login page, white accents ===== */
-html body section[data-testid="stSidebar"]{background:radial-gradient(300px 300px at 0% 0%,rgba(255,255,255,.18) 0%,transparent 70%),radial-gradient(260px 260px at 100% 100%,rgba(255,255,255,.14) 0%,transparent 70%),linear-gradient(165deg,#3a78f2 0%,#5a9bf8 50%,#7db4fb 100%)!important;border-right:1px solid rgba(255,255,255,.35)!important;box-shadow:6px 0 26px rgba(29,78,216,.35)}
+/* ===== PREMIUM CORPORATE SIDEBAR v4 (Windy Group): #102B59 base, #1D4278 cards, #C9A44C gold, #FFFFFF text ===== */
+html body section[data-testid="stSidebar"]{background:#102B59!important;border-right:1px solid #C9A44C!important;box-shadow:none!important}
 html body section[data-testid="stSidebar"]>div{background:transparent!important}
-html body section[data-testid="stSidebar"] .brand-card{background:rgba(255,255,255,.14)!important;border:1px solid rgba(255,255,255,.40)!important;box-shadow:0 10px 24px rgba(15,35,110,.30)!important;backdrop-filter:blur(4px)}
-html body section[data-testid="stSidebar"] .nav-section-title{color:#DBEAFE!important;letter-spacing:.14em}
-html body section[data-testid="stSidebar"] hr{border-color:rgba(255,255,255,.28)!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]{background:rgba(255,255,255,.14)!important;border:1px solid rgba(255,255,255,.30)!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 6px 14px rgba(15,35,110,.25)!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]:hover{background:rgba(255,255,255,.24)!important;border-color:#fff!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button p code{background:rgba(255,255,255,.22)!important;color:#fff!important;border:1px solid rgba(255,255,255,.50)!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button::after{color:#fff!important}
+html body section[data-testid="stSidebar"] .brand-card{background:#1D4278!important;border:1px solid #C9A44C!important;border-radius:14px!important;box-shadow:0 6px 16px rgba(0,0,0,.22)!important}
+html body section[data-testid="stSidebar"] .brand-card .b-t,html body section[data-testid="stSidebar"] .brand-card .b-s{color:#FFFFFF!important}
+html body section[data-testid="stSidebar"] .brand-logo-wrap{border-radius:10px!important;border-bottom:3px solid #C9A44C!important}
+html body section[data-testid="stSidebar"] .nav-section-title{color:#C9A44C!important;letter-spacing:.16em!important;border-bottom:1px solid rgba(201,164,76,.55)!important;padding-bottom:7px!important}
+html body section[data-testid="stSidebar"] hr{border-color:rgba(201,164,76,.55)!important}
+/* navigation cards (group headings) */
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]{background:#1D4278!important;border:1px solid rgba(201,164,76,.35)!important;border-radius:12px!important;min-height:44px!important;box-shadow:0 3px 8px rgba(0,0,0,.18)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]:hover{border-color:#C9A44C!important;filter:brightness(1.08);box-shadow:0 5px 12px rgba(0,0,0,.28)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"] p{color:#FFFFFF!important;font-weight:700!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button p code{background:#102B59!important;color:#C9A44C!important;border:1px solid #C9A44C!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button::after{color:#C9A44C!important}
+/* active group: gold frame + solid gold badge */
 html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"],
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"]:hover{background:linear-gradient(90deg,rgba(255,255,255,.36),rgba(255,255,255,.12))!important;border:1px solid rgba(255,255,255,.75)!important;border-left:4px solid #fff!important;box-shadow:0 10px 22px rgba(15,35,110,.35)!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button p code{background:#fff!important;color:#1d4ed8!important;border-color:#fff!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"]{border-left:1px solid rgba(255,255,255,.45)!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"] p{color:#EAF2FF!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"]:hover{background:rgba(255,255,255,.18)!important;border-color:rgba(255,255,255,.45)!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"]{background:#fff!important;border:1px solid #fff!important;border-left:4px solid #93c5fd!important;box-shadow:0 10px 22px rgba(15,35,110,.38)!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] p{color:#1d4ed8!important;font-weight:800!important}
-/* ---- black text on the blue sidebar ---- */
-html body section[data-testid="stSidebar"] .brand-card{background:rgba(255,255,255,.62)!important;border:1px solid rgba(255,255,255,.9)!important}
-html body section[data-testid="stSidebar"] .brand-card .b-t,html body section[data-testid="stSidebar"] .brand-card .b-s{color:#07122B!important}
-html body section[data-testid="stSidebar"] .nav-section-title{color:#07122B!important}
-html body section[data-testid="stSidebar"] hr{border-color:rgba(7,18,43,.25)!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]{background:rgba(255,255,255,.34)!important;border:1px solid rgba(7,18,43,.20)!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]:hover{background:rgba(255,255,255,.55)!important;border-color:#07122B!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"] p{color:#07122B!important;font-weight:800!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button p code{background:rgba(255,255,255,.75)!important;color:#07122B!important;border:1px solid rgba(7,18,43,.25)!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button::after{color:#07122B!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"],
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"]:hover{background:rgba(255,255,255,.72)!important;border:1px solid #fff!important;border-left:4px solid #07122B!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button p code{background:#07122B!important;color:#fff!important;border-color:#07122B!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"]{border-left:1px solid rgba(7,18,43,.40)!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"] p{color:#07122B!important;font-weight:700!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"]:hover{background:rgba(255,255,255,.45)!important;border-color:rgba(7,18,43,.25)!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"]{background:#fff!important;border-left:4px solid #07122B!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] p{color:#07122B!important;font-weight:800!important}
-html body section[data-testid="stSidebar"] label p,html body section[data-testid="stSidebar"] [data-testid="stCheckbox"] p,html body section[data-testid="stSidebar"] [data-testid="stCheckbox"] span{color:#07122B!important;font-weight:700!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"]:hover{background:#1D4278!important;border:1px solid #C9A44C!important;border-left:4px solid #C9A44C!important;box-shadow:0 6px 16px rgba(0,0,0,.28)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button p code{background:#C9A44C!important;color:#102B59!important;border-color:#C9A44C!important}
+/* pages under a group */
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"]{border-left:1px solid rgba(201,164,76,.55)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"]{background:transparent!important;border:1px solid transparent!important;box-shadow:none!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"] p{color:#FFFFFF!important;font-weight:600!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"]:hover{background:#1D4278!important;border-color:rgba(201,164,76,.45)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"]:hover p{color:#FFFFFF!important}
+/* active page: white card, deep-blue text, gold edge */
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"]{background:#FFFFFF!important;border:1px solid #FFFFFF!important;border-left:4px solid #C9A44C!important;box-shadow:0 6px 16px rgba(0,0,0,.28)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] p{color:#102B59!important;font-weight:800!important}
+/* other sidebar text + keyboard focus */
+html body section[data-testid="stSidebar"] label p,html body section[data-testid="stSidebar"] [data-testid="stCheckbox"] p,html body section[data-testid="stSidebar"] [data-testid="stCheckbox"] span,html body section[data-testid="stSidebar"] div[data-testid="stCaptionContainer"] *{color:#FFFFFF!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button:focus-visible{outline:2px solid #C9A44C!important;outline-offset:2px}
 </style>""", unsafe_allow_html=True)
     st.markdown('<div class="nav-section-title">Navigation</div>', unsafe_allow_html=True)
 
