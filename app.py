@@ -21571,15 +21571,15 @@ section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind=
 /* ===== PREMIUM CORPORATE SIDEBAR v4 (Windy Group): #102B59 base, #1D4278 cards, #C9A44C gold, #FFFFFF text ===== */
 html body section[data-testid="stSidebar"]{background:#102B59!important;border-right:1px solid #C9A44C!important;box-shadow:none!important}
 html body section[data-testid="stSidebar"]>div{background:transparent!important}
-html body section[data-testid="stSidebar"] .brand-card{background:#1D4278!important;border:1px solid #C9A44C!important;border-radius:14px!important;box-shadow:0 6px 16px rgba(0,0,0,.22)!important}
+html body section[data-testid="stSidebar"] .brand-card{background:#1D4278!important;border:.75px solid rgba(201,164,76,.85)!important;border-radius:14px!important;box-shadow:0 6px 16px rgba(0,0,0,.22)!important}
 html body section[data-testid="stSidebar"] .brand-card .b-t,html body section[data-testid="stSidebar"] .brand-card .b-s{color:#FFFFFF!important}
-html body section[data-testid="stSidebar"] .brand-logo-wrap{border-radius:10px!important;border-bottom:3px solid #C9A44C!important}
+html body section[data-testid="stSidebar"] .brand-logo-wrap{border-radius:10px!important;border-bottom:1px solid #C9A44C!important}
 html body section[data-testid="stSidebar"] .nav-section-title{color:#C9A44C!important;letter-spacing:.16em!important;border-bottom:1px solid rgba(201,164,76,.55)!important;padding-bottom:7px!important}
-html body section[data-testid="stSidebar"] hr{border-color:rgba(201,164,76,.55)!important}
+html body section[data-testid="stSidebar"] hr{border:0!important;height:1px!important;background:linear-gradient(90deg,#C9A44C 0%,rgba(201,164,76,.30) 100%)!important;opacity:.9;margin:1.1rem 0!important}
 /* navigation cards (group headings) */
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]{background:#1D4278!important;border:1px solid rgba(201,164,76,.35)!important;border-radius:12px!important;min-height:44px!important;box-shadow:0 3px 8px rgba(0,0,0,.18)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]{background:#1D4278!important;border:1px solid rgba(201,164,76,.35)!important;border-radius:14px!important;min-height:44px!important;box-shadow:0 3px 8px rgba(0,0,0,.18)!important}
 html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]:hover{border-color:#C9A44C!important;filter:brightness(1.08);box-shadow:0 5px 12px rgba(0,0,0,.28)!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"] p{color:#FFFFFF!important;font-weight:700!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"] p{color:#FFFFFF!important;font-weight:600!important;letter-spacing:.01em!important;line-height:1.3!important;-webkit-font-smoothing:antialiased}
 html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button p code{background:#102B59!important;color:#C9A44C!important;border:1px solid #C9A44C!important}
 html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button::after{color:#C9A44C!important}
 /* active group: gold frame + solid gold badge */
@@ -21589,12 +21589,12 @@ html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][cl
 /* pages under a group */
 html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"]{border-left:1px solid rgba(201,164,76,.55)!important}
 html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"]{background:transparent!important;border:1px solid transparent!important;box-shadow:none!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"] p{color:#FFFFFF!important;font-weight:600!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"] p{color:#FFFFFF!important;font-weight:600!important;letter-spacing:.01em!important;line-height:1.3!important;-webkit-font-smoothing:antialiased}
 html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"]:hover{background:#1D4278!important;border-color:rgba(201,164,76,.45)!important}
 html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"]:hover p{color:#FFFFFF!important}
 /* active page: white card, deep-blue text, gold edge */
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"]{background:#FFFFFF!important;border:1px solid #FFFFFF!important;border-left:4px solid #C9A44C!important;box-shadow:0 6px 16px rgba(0,0,0,.28)!important}
-html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] p{color:#102B59!important;font-weight:800!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"]{background:#FFFFFF!important;border:1px solid rgba(201,164,76,.40)!important;border-left:3px solid #C9A44C!important;box-shadow:0 5px 14px rgba(0,0,0,.26)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] p{color:#102B59!important;font-weight:700!important;letter-spacing:.01em!important;line-height:1.3!important;-webkit-font-smoothing:antialiased}
 /* other sidebar text + keyboard focus */
 html body section[data-testid="stSidebar"] label p,html body section[data-testid="stSidebar"] [data-testid="stCheckbox"] p,html body section[data-testid="stSidebar"] [data-testid="stCheckbox"] span,html body section[data-testid="stSidebar"] div[data-testid="stCaptionContainer"] *{color:#FFFFFF!important}
 html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] button:focus-visible{outline:2px solid #C9A44C!important;outline-offset:2px}
