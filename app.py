@@ -17895,6 +17895,55 @@ def rp_budget(P):
     return _rp_blocks(P, build), notes
 
 
+def rp_section_budget(P):
+    try:
+        mc_schema()
+    except Exception:
+        pass
+    all_dates = not P["d1"]
+    d1 = P["d1"] or date(2000, 1, 1)
+    d2 = P["d2"] or local_now().date()
+    months = 1 if all_dates else max(1, (d2.year - d1.year) * 12 + d2.month - d1.month + 1)
+    units = list(P["units"])
+    used_df = _sb_used_df(units, d1, d2)
+    lims = qdf_c("SELECT factory_name, section_name, monthly_limit FROM section_budget_limits WHERE factory_name = ANY(%s)", (units,))
+    lim_map = {(r["factory_name"], r["section_name"]): float(r["monthly_limit"] or 0) for _, r in lims.iterrows()} if not lims.empty else {}
+    used_map = {(r["factory_name"], r["section"]): float(r["used"]) for _, r in used_df.iterrows()} if not used_df.empty else {}
+    cols = [("SL", "i"), ("Section", "t"), ("Monthly Limit (Tk)", "a"), ("Period Limit (Tk)", "a"), ("Issued Value (Tk)", "a"),
+            ("Remaining (Tk)", "a"), ("Used %", "p"), ("Status", "t")]
+    _ord = {"OVER LIMIT": 0, "WARNING": 1, "SAFE": 2, "NO LIMIT SET": 3}
+
+    def build(u):
+        names = {s for (f, s) in lim_map if f == u} | {s for (f, s) in used_map if f == u}
+        items = []
+        for s in names:
+            ml, used = lim_map.get((u, s), 0.0), used_map.get((u, s), 0.0)
+            if ml <= 0 and used <= 0:
+                continue
+            if P.get("section") and s != P["section"]:
+                continue
+            pl = ml * months
+            pct = (used / pl * 100) if pl > 0 else None
+            stt = "NO LIMIT SET" if pct is None else ("OVER LIMIT" if pct >= SB_RED_PCT else ("WARNING" if pct >= SB_YELLOW_PCT else "SAFE"))
+            if P.get("status") in _ord and stt != P["status"]:
+                continue
+            items.append((s or "(Section not given)", ml, pl, used, (pl - used) if pl > 0 else None, pct, stt))
+        if not items:
+            return []
+        items.sort(key=lambda x: (_ord[x[6]], -x[3], x[0].lower()))
+        rows = [[i + 1] + list(x) for i, x in enumerate(items)]
+        tm, tp, tu = sum(x[1] for x in items), sum(x[2] for x in items), sum(x[3] for x in items)
+        tot = [f"TOTAL - {u}", None, tm, tp, tu, (tp - tu) if tp > 0 else None, (tu / tp * 100) if tp > 0 else None, None]
+        return [_rp_sec(cols, rows, tot)]
+    notes = ["Issued Value = issued quantity x item rate, per Section (same calculation as the Section Budget page).",
+             f"Status: WARNING = {SB_YELLOW_PCT:g}% or more of the limit used, OVER LIMIT = {SB_RED_PCT:g}% or more."]
+    if all_dates:
+        notes.append("All dates selected: Used % compares all issues with ONE month's limit. Pick a From/To date for a month-wise comparison.")
+    elif months > 1:
+        notes.append(f"Period covers {months} calendar months, so Period Limit = Monthly Limit x {months}.")
+    return _rp_blocks(P, build), notes
+
+
 def rp_requisition(P):
     psql, pp = period_sql("req_date", P["d1"], P["d2"])
     st_sql = " AND status=%s" if P.get("status") not in (None, "All") else ""
@@ -18179,6 +18228,8 @@ RP_REGISTRY = [
     dict(key="transfer", label="Transfer History Report", type="Transfer Report", dates=True, flt=("item", "status"), orient="L", fn=rp_transfer, status="transfer"),
     dict(key="gatepass", label="Gate Pass Report (Management)", title="GATE PASS REPORT - RECEIVED, CONSUMPTION & BALANCE", type="Gate Pass Management Report",
          dates=True, flt=("item", "pcat", "bcat", "status"), orient="L", fn=rp_gate_pass, status=["All", "Balance still in store", "Fully consumed"]),
+    dict(key="secbudget", label="Section Budget Report", type="Section Budget Report", dates=True, flt=("section", "status"), orient="P", fn=rp_section_budget,
+         status=["All", "OVER LIMIT", "WARNING", "SAFE", "NO LIMIT SET"]),
 ]
 
 
@@ -19924,13 +19975,79 @@ def sb_save_limits(fac, limits):
     return True
 
 
+_SBP_CSS = """<style>
+.st-key-sb_root{--n:#0A1F4D;--g:#C9A24B}
+.sbp-hero{display:flex;align-items:center;gap:16px;padding:18px 22px;border-radius:18px;margin:2px 0 14px;border:1px solid #D9DEE8;
+ background:radial-gradient(800px 200px at 100% 0%,rgba(201,162,75,.22),rgba(201,162,75,0) 60%),linear-gradient(120deg,#FBFAF6,#EEF2FA);box-shadow:0 6px 22px rgba(10,31,77,.09)}
+.sbp-ic{width:54px;height:54px;border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:26px;color:#F4E3B2;
+ background:linear-gradient(135deg,#07142F,#13367F);box-shadow:0 8px 18px rgba(10,31,77,.38),inset 0 0 0 1.5px #C9A24B}
+.sbp-t{font-size:22px;font-weight:800;color:#0A1F4D;line-height:1.2}.sbp-s{font-size:13px;color:#51638A;margin-top:3px}
+.sbp-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:0 0 14px}
+.sbp-k{background:#fff;border:1px solid #D9DEE8;border-radius:14px;padding:14px 16px;box-shadow:0 4px 16px rgba(10,31,77,.07);position:relative;overflow:hidden}
+.sbp-k::before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--c,#13367F)}
+.sbp-k .l{font-size:12px;font-weight:700;color:#51638A;letter-spacing:.3px}.sbp-k .v{font-size:25px;font-weight:800;color:#0A1F4D;margin-top:4px}
+.sbp-wrap{background:#fff;border:1px solid #D9DEE8;border-radius:16px;box-shadow:0 6px 24px rgba(10,31,77,.09);overflow:hidden;margin:0 0 10px}
+.sbp-scroll{overflow-x:auto}
+table.sbp{width:100%;border-collapse:collapse;font-size:13.5px;min-width:720px}
+table.sbp th{background:linear-gradient(100deg,#07142F,#0A1F4D 55%,#13367F);color:#F4E3B2;text-align:left;padding:11px 14px;font-size:12px;letter-spacing:.4px;border-bottom:3px solid #C9A24B;white-space:nowrap}
+table.sbp td{padding:11px 14px;border-bottom:1px solid #E6EAF2;color:#172033;vertical-align:middle}
+table.sbp tr:nth-child(even) td{background:#FAFBFE}table.sbp tr:hover td{background:#F3F0E6}
+table.sbp td.n,table.sbp th.n{text-align:right;font-variant-numeric:tabular-nums}
+.sbp-bar{height:9px;border-radius:99px;background:#E6EAF2;min-width:120px;overflow:hidden}.sbp-bar i{display:block;height:100%;border-radius:99px}
+.sbp-pct{font-weight:800;font-size:12.5px;margin-top:3px}
+.sbp-pill{display:inline-block;padding:3px 11px;border-radius:99px;font-size:12px;font-weight:800;white-space:nowrap}
+@media(max-width:800px){.sbp-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* filters: always-visible borders */
+.st-key-sb_root div[data-baseweb="select"]>div,.st-key-sb_root div[data-baseweb="input"]{background:#fff!important;border:1.5px solid #7C93BD!important;border-radius:10px!important;box-shadow:0 1px 2px rgba(10,31,77,.06)!important}
+.st-key-sb_root div[data-baseweb="base-input"]{border:0!important;background:transparent!important}
+.st-key-sb_root div[data-baseweb="select"]>div:focus-within,.st-key-sb_root div[data-baseweb="input"]:focus-within{border-color:#0A1F4D!important;box-shadow:0 0 0 3px rgba(201,162,75,.38)!important}
+.st-key-sb_root div[data-testid="stWidgetLabel"] p{color:#243B6B!important;font-weight:700!important}
+.st-key-sb_root div[data-testid="stExpander"]{border:1px solid #D9DEE8!important;border-radius:14px!important;box-shadow:0 4px 16px rgba(10,31,77,.07)}
+.st-key-sb_root .stButton>button,.st-key-sb_root div[data-testid="stFormSubmitButton"] button{background:linear-gradient(135deg,#07142F,#13367F)!important;border:1px solid #C9A24B!important;color:#F4E3B2!important;border-radius:10px!important}
+.st-key-sb_root .stButton>button p,.st-key-sb_root div[data-testid="stFormSubmitButton"] button p{color:#F4E3B2!important;font-weight:700!important}
+</style>"""
+_SBP_COL = {"red": ("#DC2626", "#FEE2E2", "#991B1B"), "yellow": ("#D99A06", "#FEF3C7", "#92400E"),
+            "ok": ("#16A34A", "#DCFCE7", "#166534"), "none": ("#94A3B8", "#EEF2F7", "#475569")}
+
+
+def _sbp_table(rows, show_unit):
+    h = ["<div class='sbp-wrap'><div class='sbp-scroll'><table class='sbp'><tr>"]
+    if show_unit:
+        h.append("<th>Unit</th>")
+    h.append("<th>Section</th><th class='n'>Monthly Limit (৳)</th><th class='n'>Used (৳)</th><th class='n'>Remaining (৳)</th><th>Usage</th><th>Status</th></tr>")
+    for r in rows:
+        c, bg, fg = _SBP_COL[r["_lv"]]
+        pct = r["ব্যবহার %"]
+        w = 0 if pct is None else min(max(pct, 0), 100)
+        rem = r["বাকি (৳)"]
+        h.append("<tr>")
+        if show_unit:
+            h.append(f"<td>{html_lib.escape(str(r['Unit']))}</td>")
+        h.append(f"<td><b>{html_lib.escape(str(r['Section']))}</b></td>"
+                 f"<td class='n'>{r['মাসিক সীমা (৳)']:,.0f}</td><td class='n'>{r['ব্যবহার (৳)']:,.0f}</td>"
+                 f"<td class='n' style='color:{'#B91C1C' if (rem is not None and rem < 0) else '#172033'}'>{'-' if rem is None else format(rem, ',.0f')}</td>"
+                 f"<td><div class='sbp-bar'><i style='width:{w:.0f}%;background:{c}'></i></div>"
+                 f"<div class='sbp-pct' style='color:{fg}'>{'—' if pct is None else format(pct, '.1f') + '%'}</div></td>"
+                 f"<td><span class='sbp-pill' style='background:{bg};color:{fg}'>{html_lib.escape(r['অবস্থা'])}</span></td></tr>")
+    h.append("</table></div></div>")
+    return "".join(h)
+
+
 def tab_section_budget():
-    st.markdown("#### 🚦 Section-ভিত্তিক মাসিক বাজেট সীমা")
+    st.markdown(_SBP_CSS, unsafe_allow_html=True)
+    st.markdown("<div class='sbp-hero'><div class='sbp-ic'>🚦</div><div><div class='sbp-t'>Section Budget</div>"
+                "<div class='sbp-s'>Section-ভিত্তিক মাসিক বাজেট সীমা · Reports ট্যাবের “Section Budget Report” থেকে প্রিন্ট / Excel / PDF নেওয়া যাবে</div></div></div>",
+                unsafe_allow_html=True)
     try:
         mc_schema()
     except Exception as e:
         st.error(f"Section budget setup failed: {e}")
         return
+    with st.container(key="sb_root"):
+        _tab_section_budget_body()
+
+
+def _tab_section_budget_body():
     units = list(FACTORIES) if is_cons_view else [FAC]
     is_mgr = st.session_state.get("role") == "Store Manager"
     today = local_now().date()
@@ -19963,20 +20080,22 @@ def tab_section_budget():
     else:
         red = sum(1 for r in rows if r["_lv"] == "red")
         yel = sum(1 for r in rows if r["_lv"] == "yellow")
-        k1, k2, k3 = st.columns(3)
-        k1.metric(f"🔴 সীমা পার ({mm[:3]}-{yy})", red)
-        k2.metric("🟡 ৮০% পার", yel)
-        k3.metric("মোট ব্যবহার", f"৳{sum(r['ব্যবহার (৳)'] for r in rows):,.0f}")
+        tot_used = sum(r["ব্যবহার (৳)"] for r in rows)
+        tot_lim = sum(r["মাসিক সীমা (৳)"] for r in rows)
+        grn = sum(1 for r in rows if r["_lv"] == "ok")
+        st.markdown("<div class='sbp-kpis'>"
+                    f"<div class='sbp-k' style='--c:#DC2626'><div class='l'>🔴 সীমা পার ({mm[:3]}-{yy})</div><div class='v'>{red}</div></div>"
+                    f"<div class='sbp-k' style='--c:#D99A06'><div class='l'>🟡 ৮০% পার</div><div class='v'>{yel}</div></div>"
+                    f"<div class='sbp-k' style='--c:#16A34A'><div class='l'>🟢 ঠিক আছে</div><div class='v'>{grn}</div></div>"
+                    f"<div class='sbp-k' style='--c:#13367F'><div class='l'>মোট ব্যবহার / মোট সীমা</div><div class='v'>৳{tot_used:,.0f}"
+                    f"<span style='font-size:13px;color:#51638A;font-weight:700'> / ৳{tot_lim:,.0f}</span></div></div></div>", unsafe_allow_html=True)
         out = pd.DataFrame(rows).drop(columns=["_lv"])
         if not is_cons_view:
             out = out.drop(columns=["Unit"])
         order = {"🔴 সীমা পার": 0, "🟡 ৮০%+": 1, "🟢 ঠিক আছে": 2, "⚪ সীমা সেট নেই": 3}
+        rows_sorted = sorted(rows, key=lambda r: (order.get(r["অবস্থা"], 9), -float(r["ব্যবহার (৳)"] or 0)))
         out = out.sort_values("অবস্থা", key=lambda s: s.map(order), kind="stable")
-        st.dataframe(out, hide_index=True, use_container_width=True, height=min(90 + 35 * len(out), 560),
-                     column_config={"মাসিক সীমা (৳)": st.column_config.NumberColumn(format="%.0f"),
-                                    "ব্যবহার (৳)": st.column_config.NumberColumn(format="%.0f"),
-                                    "বাকি (৳)": st.column_config.NumberColumn(format="%.0f"),
-                                    "ব্যবহার %": st.column_config.NumberColumn(format="%.1f")})
+        st.markdown(_sbp_table(rows_sorted, is_cons_view), unsafe_allow_html=True)
         st.caption("ব্যবহার = ওই মাসে ঐ Section-এ Issue হওয়া মালের পরিমাণ × item-এর Rate (Budget পেজের একই হিসাব)। "
                    "🟡 = সীমার ৮০% পার, 🔴 = ১০০% পার। Requisition Issue স্লিপে Section বাছলেই এই সতর্কতা দেখা যায় (সংরক্ষণ আটকায় না)।")
         export_buttons(out, f"section_budget_{mm}_{yy}", f"Section budget {mm} {yy}")
@@ -21453,24 +21572,24 @@ section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind=
   section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button { min-height: 44px !important; }
 }
 /* ===== PREMIUM SIDEBAR v3: same blue as the login page, white accents ===== */
-section[data-testid="stSidebar"]{background:radial-gradient(300px 300px at 0% 0%,rgba(255,255,255,.18) 0%,transparent 70%),radial-gradient(260px 260px at 100% 100%,rgba(255,255,255,.14) 0%,transparent 70%),linear-gradient(165deg,#1d4ed8 0%,#2f6df0 52%,#4b8df8 100%)!important;border-right:1px solid rgba(255,255,255,.35)!important;box-shadow:6px 0 26px rgba(29,78,216,.35)}
-section[data-testid="stSidebar"]>div{background:transparent!important}
-section[data-testid="stSidebar"] .brand-card{background:rgba(255,255,255,.14)!important;border:1px solid rgba(255,255,255,.40)!important;box-shadow:0 10px 24px rgba(15,35,110,.30)!important;backdrop-filter:blur(4px)}
-section[data-testid="stSidebar"] .nav-section-title{color:#DBEAFE!important;letter-spacing:.14em}
-section[data-testid="stSidebar"] hr{border-color:rgba(255,255,255,.28)!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]{background:rgba(255,255,255,.14)!important;border:1px solid rgba(255,255,255,.30)!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 6px 14px rgba(15,35,110,.25)!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]:hover{background:rgba(255,255,255,.24)!important;border-color:#fff!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button p code{background:rgba(255,255,255,.22)!important;color:#fff!important;border:1px solid rgba(255,255,255,.50)!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button::after{color:#fff!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"],
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"]:hover{background:linear-gradient(90deg,rgba(255,255,255,.36),rgba(255,255,255,.12))!important;border:1px solid rgba(255,255,255,.75)!important;border-left:4px solid #fff!important;box-shadow:0 10px 22px rgba(15,35,110,.35)!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button p code{background:#fff!important;color:#1d4ed8!important;border-color:#fff!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"]{border-left:1px solid rgba(255,255,255,.45)!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"] p{color:#EAF2FF!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"]:hover{background:rgba(255,255,255,.18)!important;border-color:rgba(255,255,255,.45)!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"]{background:#fff!important;border:1px solid #fff!important;border-left:4px solid #93c5fd!important;box-shadow:0 10px 22px rgba(15,35,110,.38)!important}
-section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] p{color:#1d4ed8!important;font-weight:800!important}
-section[data-testid="stSidebar"] label p,section[data-testid="stSidebar"] [data-testid="stCheckbox"] p{color:#EAF2FF!important}
+html body section[data-testid="stSidebar"]{background:radial-gradient(300px 300px at 0% 0%,rgba(255,255,255,.18) 0%,transparent 70%),radial-gradient(260px 260px at 100% 100%,rgba(255,255,255,.14) 0%,transparent 70%),linear-gradient(165deg,#1d4ed8 0%,#2f6df0 52%,#4b8df8 100%)!important;border-right:1px solid rgba(255,255,255,.35)!important;box-shadow:6px 0 26px rgba(29,78,216,.35)}
+html body section[data-testid="stSidebar"]>div{background:transparent!important}
+html body section[data-testid="stSidebar"] .brand-card{background:rgba(255,255,255,.14)!important;border:1px solid rgba(255,255,255,.40)!important;box-shadow:0 10px 24px rgba(15,35,110,.30)!important;backdrop-filter:blur(4px)}
+html body section[data-testid="stSidebar"] .nav-section-title{color:#DBEAFE!important;letter-spacing:.14em}
+html body section[data-testid="stSidebar"] hr{border-color:rgba(255,255,255,.28)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]{background:rgba(255,255,255,.14)!important;border:1px solid rgba(255,255,255,.30)!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 6px 14px rgba(15,35,110,.25)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]:hover{background:rgba(255,255,255,.24)!important;border-color:#fff!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button p code{background:rgba(255,255,255,.22)!important;color:#fff!important;border:1px solid rgba(255,255,255,.50)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button::after{color:#fff!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"],
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"]:hover{background:linear-gradient(90deg,rgba(255,255,255,.36),rgba(255,255,255,.12))!important;border:1px solid rgba(255,255,255,.75)!important;border-left:4px solid #fff!important;box-shadow:0 10px 22px rgba(15,35,110,.35)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button p code{background:#fff!important;color:#1d4ed8!important;border-color:#fff!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"]{border-left:1px solid rgba(255,255,255,.45)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"] p{color:#EAF2FF!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"]:hover{background:rgba(255,255,255,.18)!important;border-color:rgba(255,255,255,.45)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"]{background:#fff!important;border:1px solid #fff!important;border-left:4px solid #93c5fd!important;box-shadow:0 10px 22px rgba(15,35,110,.38)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] p{color:#1d4ed8!important;font-weight:800!important}
+html body section[data-testid="stSidebar"] label p,section[data-testid="stSidebar"] [data-testid="stCheckbox"] p{color:#EAF2FF!important}
 </style>""", unsafe_allow_html=True)
     st.markdown('<div class="nav-section-title">Navigation</div>', unsafe_allow_html=True)
 
