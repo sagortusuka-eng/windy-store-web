@@ -14170,6 +14170,22 @@ _RI_PREM_CSS = """<style>
 .st-key-pv_root div[class*="st-key-ri_search_"] input{font-weight:600!important;color:#0f2a6b!important}
 .st-key-pv_root div[class*="st-key-ri_search_"] input::placeholder{color:#6b82b3!important;font-weight:500}
 .st-key-pv_root div[class*="st-key-ri_search_"] div[data-testid="stWidgetLabel"] p{color:#1d4ed8!important;font-weight:800!important}
+/* ---- bigger text (Daily Issue Slip & Receipt Entry): notifications, save message, mode buttons, header ---- */
+.st-key-pv_root .pv-note{font-size:17px!important;padding:12px 18px!important;font-weight:600!important;line-height:1.5!important}
+.st-key-pv_root .pv-note.ok{font-size:23px!important;padding:18px 24px!important;font-weight:700!important;border-left-width:9px!important;line-height:1.5!important;box-shadow:0 6px 18px rgba(19,106,61,.18)}
+.st-key-pv_root .pv-note.ok b{font-weight:900!important}
+.st-key-pv_root .pv-nav{font-size:20px!important;padding:15px 20px!important}
+.st-key-pv_root .pv-nav .r{font-size:14px!important}
+.st-key-pv_root .pv-hero-t{font-size:30px!important}
+.st-key-pv_root .pv-hero-s{font-size:16px!important}
+.st-key-pv_root .pv-fac{font-size:14px!important}
+.st-key-pv_root .pv-hero-r{font-size:14px!important}
+.st-key-pv_root .st-key-ri_mode label[data-baseweb="radio"] p{font-size:17px!important}
+.st-key-pv_root .st-key-ri_mode label[data-baseweb="radio"]{padding:10px 18px!important}
+.st-key-pv_root .st-key-pv_strip button p{font-size:16px!important;font-weight:700!important}
+.st-key-pv_root div[data-testid="stAlert"] p{font-size:17px!important}
+.st-key-pv_root div[data-testid="stWidgetLabel"] p{font-size:15px!important}
+.st-key-pv_root .pv-kpi-l{font-size:14.5px!important}
 </style>"""
 
 
