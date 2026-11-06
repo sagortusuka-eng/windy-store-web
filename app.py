@@ -14244,6 +14244,30 @@ _RI_PREM_CSS = """<style>
 /* ---- all warnings in ONE bar, ONE line ---- */
 .st-key-pv_root .pv-note.pv-one{display:flex!important;flex-wrap:wrap;align-items:center;gap:4px 14px;padding:10px 16px!important;font-size:15px!important}
 .st-key-pv_root .pv-note .pv-sep{opacity:.4;font-weight:400}
+/* ---- MEDIUM size mode tabs (Issue / Supplier Receipt / Pending / SR Center / Skip Watch): same colours, smaller + cleaner ---- */
+.st-key-pv_root .st-key-ri_modebar{padding:9px 12px 11px!important}
+.st-key-pv_root .st-key-ri_modebar div[data-testid="stHorizontalBlock"]{gap:8px!important}
+.st-key-pv_root [class*="st-key-ri_tab_"] button{min-height:42px!important;border-radius:10px!important;border-top-width:3px!important;padding:4px 8px!important;box-shadow:0 2px 6px rgba(7,20,47,.08)!important}
+.st-key-pv_root [class*="st-key-ri_tab_"] button p{font-size:13.5px!important;font-weight:700!important}
+.st-key-pv_root [class*="st-key-ri_tab_"] button:hover{transform:translateY(-1px)!important;box-shadow:0 5px 12px rgba(7,20,47,.14)!important}
+.st-key-pv_root [class*="st-key-ri_tab_"] button[kind="primary"],.st-key-pv_root [class*="st-key-ri_tab_"] button[data-testid="stBaseButton-primary"]{transform:none!important;box-shadow:0 5px 12px rgba(7,20,47,.20),inset 0 -3px 0 rgba(255,255,255,.35)!important}
+.st-key-pv_root .pv-hero{padding:14px 20px!important}
+.st-key-pv_root .pv-hero-t{font-size:23px!important}
+.st-key-pv_root .pv-hero-s{font-size:13.5px!important}
+/* ---- THICK, clearly visible borders on the input boxes inside the cards (category / search / item / quantity) ---- */
+.st-key-pv_root [class*="st-key-pv_card_"] div[data-baseweb="input"],
+.st-key-pv_root [class*="st-key-pv_card_"] div[data-baseweb="textarea"],
+.st-key-pv_root [class*="st-key-pv_card_"] div[data-baseweb="select"]>div{border:3px solid #1E3A8A!important;border-radius:11px!important;background:#FFFFFF!important;min-height:46px!important;box-shadow:0 2px 6px rgba(30,58,138,.18)!important}
+.st-key-pv_root [class*="st-key-pv_card_"] div[data-baseweb="input"]:hover,
+.st-key-pv_root [class*="st-key-pv_card_"] div[data-baseweb="select"]>div:hover{border-color:#1D4ED8!important}
+.st-key-pv_root [class*="st-key-pv_card_"] div[data-baseweb="input"]:focus-within,
+.st-key-pv_root [class*="st-key-pv_card_"] div[data-baseweb="textarea"]:focus-within,
+.st-key-pv_root [class*="st-key-pv_card_"] div[data-baseweb="select"]>div:focus-within{border-color:#2563EB!important;box-shadow:0 0 0 4px rgba(37,99,235,.28)!important}
+.st-key-pv_root [class*="st-key-pv_card_"] div[data-baseweb="base-input"]{border:0!important;background:transparent!important;box-shadow:none!important}
+.st-key-pv_root [class*="st-key-pv_card_"] div[class*="st-key-ri_search_"] div[data-baseweb="input"],
+.st-key-pv_root [class*="st-key-pv_card_"] div[class*="st-key-rr_search_"] div[data-baseweb="input"]{border:3px solid #1D4ED8!important;background:#EFF6FF!important}
+.st-key-pv_root [class*="st-key-pv_card_"] div[class*="st-key-ri_search_"] div[data-baseweb="input"]:focus-within,
+.st-key-pv_root [class*="st-key-pv_card_"] div[class*="st-key-rr_search_"] div[data-baseweb="input"]:focus-within{border-color:#1E40AF!important;background:#FFFFFF!important}
 </style>"""
 
 
