@@ -14171,21 +14171,31 @@ _RI_PREM_CSS = """<style>
 .st-key-pv_root div[class*="st-key-ri_search_"] input::placeholder{color:#6b82b3!important;font-weight:500}
 .st-key-pv_root div[class*="st-key-ri_search_"] div[data-testid="stWidgetLabel"] p{color:#1d4ed8!important;font-weight:800!important}
 /* ---- bigger text (Daily Issue Slip & Receipt Entry): notifications, save message, mode buttons, header ---- */
-.st-key-pv_root .pv-note{font-size:17px!important;padding:12px 18px!important;font-weight:600!important;line-height:1.5!important}
-.st-key-pv_root .pv-note.ok{font-size:23px!important;padding:18px 24px!important;font-weight:700!important;border-left-width:9px!important;line-height:1.5!important;box-shadow:0 6px 18px rgba(19,106,61,.18)}
+.st-key-pv_root .pv-note{font-size:15px!important;padding:10px 16px!important;font-weight:600!important;line-height:1.45!important;border-radius:12px!important}
+.st-key-pv_root .pv-note.ok{font-size:18px!important;padding:14px 20px!important;font-weight:700!important;border-left-width:7px!important;line-height:1.45!important;box-shadow:0 4px 14px rgba(19,106,61,.15)}
 .st-key-pv_root .pv-note.ok b{font-weight:900!important}
-.st-key-pv_root .pv-nav{font-size:20px!important;padding:15px 20px!important}
+.st-key-pv_root .pv-nav{font-size:18px!important;padding:13px 20px!important}
 .st-key-pv_root .pv-nav .r{font-size:14px!important}
-.st-key-pv_root .pv-hero-t{font-size:30px!important}
-.st-key-pv_root .pv-hero-s{font-size:16px!important}
+.st-key-pv_root .pv-hero-t{font-size:27px!important}
+.st-key-pv_root .pv-hero-s{font-size:15px!important}
 .st-key-pv_root .pv-fac{font-size:14px!important}
 .st-key-pv_root .pv-hero-r{font-size:14px!important}
-.st-key-pv_root .st-key-ri_mode label[data-baseweb="radio"] p{font-size:17px!important}
+.st-key-pv_root .st-key-ri_mode label[data-baseweb="radio"] p{font-size:16px!important}
 .st-key-pv_root .st-key-ri_mode label[data-baseweb="radio"]{padding:10px 18px!important}
-.st-key-pv_root .st-key-pv_strip button p{font-size:16px!important;font-weight:700!important}
-.st-key-pv_root div[data-testid="stAlert"] p{font-size:17px!important}
+.st-key-pv_root .st-key-ri_mode,.st-key-pv_root .st-key-ri_mode div[data-testid="stRadio"],.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]{width:100%!important;max-width:100%!important}
+.st-key-pv_root .st-key-pv_strip div[data-testid="stHorizontalBlock"]{align-items:center!important}
+.st-key-pv_root .st-key-pv_strip button p{font-size:15px!important;font-weight:700!important}
+.st-key-pv_root .st-key-pv_strip button{min-height:46px!important;border-radius:12px!important}
+.st-key-pv_root div[data-testid="stAlert"] p{font-size:15.5px!important}
 .st-key-pv_root div[data-testid="stWidgetLabel"] p{font-size:15px!important}
 .st-key-pv_root .pv-kpi-l{font-size:14.5px!important}
+/* ---- premium mode tabs: ivory-pearl bar, white cards with gold edge, navy + gold when selected ---- */
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]{background:linear-gradient(180deg,#FCFAF3 0%,#F2ECDA 100%)!important;border:1px solid #E0D4B0!important;border-top:0!important;border-radius:0 0 18px 18px!important;padding:14px 16px!important;gap:12px!important;box-shadow:0 12px 28px rgba(7,20,47,.14),inset 0 1px 0 #fff!important}
+.st-key-pv_root .st-key-ri_mode label[data-baseweb="radio"]{flex:1 1 auto!important;justify-content:center!important;background:linear-gradient(180deg,#FFFFFF,#F8F5EA)!important;border:1px solid #D9CDA6!important;border-radius:14px!important;padding:11px 20px!important;box-shadow:0 3px 8px rgba(7,20,47,.07)!important;transition:all .18s ease!important}
+.st-key-pv_root .st-key-ri_mode label[data-baseweb="radio"] p{font-size:16px!important;font-weight:750!important;color:#0A1F4D!important;letter-spacing:.01em}
+.st-key-pv_root .st-key-ri_mode label[data-baseweb="radio"]:hover{background:linear-gradient(180deg,#FFFBEA,#FBEFC8)!important;border-color:#C9A24B!important;transform:translateY(-2px);box-shadow:0 8px 18px rgba(201,162,75,.28)!important}
+.st-key-pv_root .st-key-ri_mode label[data-baseweb="radio"]:has(input:checked){background:linear-gradient(135deg,#07142F 0%,#0F2C6B 60%,#1B4599 100%)!important;border:1px solid #C9A24B!important;box-shadow:0 10px 24px rgba(10,31,77,.42),inset 0 -4px 0 #C9A24B!important;transform:translateY(-1px)}
+.st-key-pv_root .st-key-ri_mode label[data-baseweb="radio"]:has(input:checked) p{color:#F7E7B4!important;font-weight:800!important;text-shadow:0 1px 2px rgba(0,0,0,.35)}
 </style>"""
 
 
