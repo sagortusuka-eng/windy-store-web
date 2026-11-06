@@ -841,6 +841,20 @@ DATE_FMT = "%d-%b-%Y"
 ISSUE_TYPES = ("Issued", "Internal Issue")
 RECEIPT_TYPES = ("Supplier. Rec", "Internal Rec", "Stock Adjustment (+)")
 ADJ_OUT = "Stock Adjustment (-)"
+# Software go-live: the first month with real data. Reports never compare with / average over months before this.
+GO_LIVE_DATE = date(2026, 11, 1)
+GO_LIVE_YM = f"{GO_LIVE_DATE.year:04d}-{GO_LIVE_DATE.month:02d}"
+
+
+def usage_days(window=90):
+    """Days to divide a 'last N days' consumption by: N, but never more than the days since go-live (no data exists before that)."""
+    try:
+        live = (local_now().date() - GO_LIVE_DATE).days + 1
+    except Exception:
+        live = window
+    return float(max(1, min(int(window), live)))
+
+
 OPENING_TYPE = "Opening Balance"   # sets Physical + ERP stock together; always written to transactions
 COOLDOWN_DAYS = 3
 PO_ALERT_DAYS = 7
@@ -5910,7 +5924,7 @@ def tab_global_inventory():
             minimum = float(num(r["min_stock"], 0) or 0)
             lead = int(num(r["lead_time_days"], 0) or 0)
             moq = float(num(r["moq"], 0) or 0)
-            avg_daily = usage_90.get((factory, r["sl_no"]), 0.0) / 90.0
+            avg_daily = usage_90.get((factory, r["sl_no"]), 0.0) / usage_days(90)
             qty = max(math.ceil(minimum + avg_daily*lead - on_hand), 0)
             if qty > 0 and moq > 0:
                 qty = math.ceil(qty/moq)*moq
@@ -7877,7 +7891,9 @@ def compute_forecast(mi):
     cy, cm = now.year, now.month
     sy, sm = (cy, cm - 3) if cm > 3 else (cy - 1, cm + 9)
     l3_start, cur_start = datetime(sy, sm, 1), datetime(cy, cm, 1)
-    l3_days = max((cur_start - l3_start).days, 1)
+    l3_start = max(l3_start, datetime(GO_LIVE_DATE.year, GO_LIVE_DATE.month, GO_LIVE_DATE.day))   # never count months before go-live
+    use_mtd = l3_start >= cur_start        # no finished live month yet (first month): use running month so far
+    l3_days = max(now.day, 1) if use_mtd else max((cur_start - l3_start).days, 1)
     cur_c, l3_c = {}, {}
     for t in q_c(f"SELECT factory_name, sl_no, qty, date FROM transactions WHERE trans_type IN ('Issued','Internal Issue'){FSQL}", FP):
         dt = parse_date(t["date"])
@@ -7888,6 +7904,8 @@ def compute_forecast(mi):
             cur_c[k] = cur_c.get(k, 0) + float(t["qty"] or 0)
         elif l3_start <= dt < cur_start:
             l3_c[k] = l3_c.get(k, 0) + float(t["qty"] or 0)
+    if use_mtd:
+        l3_c = dict(cur_c)
     plans = {(p["factory_name"], p["plan_month"]): float(p["plan_qty"] or 0)
              for p in q_c("SELECT factory_name, plan_month, plan_qty FROM production_plans")}
     out = []
@@ -7952,7 +7970,7 @@ def tab_forecast():
                    f"Total net qty: {fc['Net Requisition'].sum():,.0f} | Est. cost: {fc['Est. Cost'].sum():,.2f} BDT")
     st.dataframe(fc, hide_index=True, use_container_width=True, height=420)
     export_buttons(fc, "forecast")
-    st.caption("Formula: Avg Daily = Last 3M consumption ÷ days  |  Projected = Avg Daily × days in next month × Factor  |  "
+    st.caption("Formula: Avg Daily = Last 3M consumption ÷ days (go-live Nov-2026 er age-r mash dhora hoy na; prothom mash-e running mash-er hisab)  |  Projected = Avg Daily × days in next month × Factor  |  "
                "Net Requisition = Projected − Stock (rounded up)  |  Est. Cost = Net × Unit Price")
 
 
@@ -9788,7 +9806,7 @@ def _cover_base(stamp, today_s):
     df["n90"] = pd.to_numeric(df["n90"], errors="coerce").fillna(0).astype(int)
     for col in ("stock", "erp", "price", "min_stock"):
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-    df["avg_daily"] = df["q90"] / float(USAGE_WINDOW_DAYS)
+    df["avg_daily"] = df["q90"] / usage_days(USAGE_WINDOW_DAYS)
     df["cover_days"] = float("nan")
     has_use = df["avg_daily"] > 0
     df.loc[has_use & (df["stock"] > 0), "cover_days"] = df["stock"] / df["avg_daily"]
@@ -21836,9 +21854,13 @@ def _mi_pending(units):
 def _mi_find_spikes(vals, x=MI_SPIKE_X, min_extra=MI_SPIKE_MIN):
     """vals = chronological list of monthly values. Returns [(index, value, base, pct)] of months that jumped vs the 3 months before."""
     hits = []
-    for i in range(3, len(vals)):
-        base = sum(vals[i - 3:i]) / 3.0
+    ok = lambda v: v is not None and v == v          # None / NaN = month before go-live (no data, never a baseline)
+    for i in range(1, len(vals)):
         cur = vals[i]
+        prior = [v for v in vals[max(0, i - 3):i] if ok(v)]
+        if not ok(cur) or not prior:
+            continue
+        base = sum(prior) / len(prior)
         if base > 0 and cur >= base * x and cur - base >= min_extra:
             hits.append((i, cur, base, (cur - base) / base * 100))
         elif base <= 0 and cur >= min_extra * 5:
@@ -21852,7 +21874,8 @@ def _mi_collect(y, m, units):
     d1, d2 = _mi_range(y, m)
     py, pm = _mi_shift(y, m, -1)
     pd1, pd2 = _mi_range(py, pm)
-    cur, prv = _mi_flow(units, d1, d2), _mi_flow(units, pd1, pd2)
+    cur = _mi_flow(units, d1, d2)
+    prv = _mi_flow(units, pd1, pd2) if pd1 >= GO_LIVE_DATE else {}      # month before go-live: nothing to compare with
     stock, pend = _mi_stock(units), _mi_pending(units)
     bud, sec = _mi_budget(units, d1, d2), _mi_sections(units, d1, d2)
     by, bm = _mi_shift(y, m, -3)
@@ -21872,7 +21895,7 @@ def _mi_collect(y, m, units):
         if not cm.empty:
             pv = cm.pivot_table(index="grp", columns="ym", values="used", aggfunc="sum", fill_value=0).reindex(columns=months, fill_value=0)
             for g, row in pv.iterrows():
-                hit = _mi_find_spikes([float(v) for v in row.tolist()])
+                hit = _mi_find_spikes([float(v) if mm_ >= GO_LIVE_YM else None for mm_, v in zip(months, row.tolist())])
                 if hit and hit[-1][0] == 3:
                     i, v, b, pc = hit[-1]
                     spikes.append({"category": g, "cur": v, "base": b, "pct": pc, "extra": v - b})
@@ -22439,10 +22462,11 @@ def tab_consumption_trend():
         return
 
     k = st.columns(3)
+    live_win = [w_ for w_ in win if w_ >= GO_LIVE_YM] or win        # averages only over months since go-live
     tot_by_m = pv[win].sum()
     k[0].markdown(_mi_card(f"শেষ মাস ({_mi_label(ey, em)})", _mi_tk(tot_by_m.iloc[-1]),
                            _mi_delta_html(tot_by_m.iloc[-1], tot_by_m.iloc[-2] if len(tot_by_m) > 1 else 0)), unsafe_allow_html=True)
-    k[1].markdown(_mi_card(f"{n} মাসের গড়", _mi_tk(tot_by_m.mean()), "মাসে গড় খরচ"), unsafe_allow_html=True)
+    k[1].markdown(_mi_card(f"{len(live_win)} মাসের গড়", _mi_tk(tot_by_m[live_win].mean()), "মাসে গড় খরচ"), unsafe_allow_html=True)
     pk = tot_by_m.idxmax()
     k[2].markdown(_mi_card("সবচেয়ে বেশি মাস", datetime.strptime(pk, "%Y-%m").strftime("%b-%Y"), _mi_tk(tot_by_m.max())), unsafe_allow_html=True)
 
@@ -22455,7 +22479,7 @@ def tab_consumption_trend():
 
     # table with spike flags
     tbl = pv[win].copy()
-    tbl["Average"] = tbl.mean(axis=1)
+    tbl["Average"] = tbl[live_win].mean(axis=1)
     tbl["Latest vs avg"] = tbl.apply(lambda r: "—" if r["Average"] <= 0 else f"{(r[win[-1]] - r['Average']) / r['Average'] * 100:+.0f}%", axis=1)
     tbl.columns = [datetime.strptime(c_, "%Y-%m").strftime("%b-%y") if c_ in win else c_ for c_ in tbl.columns]
     with st.expander("📋 সব মাসের টেবিল (Excel / PDF সহ)", expanded=False):
@@ -22470,7 +22494,7 @@ def tab_consumption_trend():
     mn = sc[1].number_input("ন্যূনতম বাড়তি টাকা (Tk)", min_value=0.0, value=float(MI_SPIKE_MIN), step=1000.0, key="ct_min")
     hits = []
     for g, row in pv.iterrows():
-        vals = [float(row[mm]) for mm in all_months]
+        vals = [float(row[mm]) if mm >= GO_LIVE_YM else None for mm in all_months]
         for i, cur, base, pc_ in _mi_find_spikes(vals, x, mn):
             hits.append({"g": g, "ym": all_months[i], "cur": cur, "base": base, "pct": pc_, "extra": cur - base})
     if not hits:
