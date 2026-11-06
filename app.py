@@ -10728,7 +10728,9 @@ def item_history_view(df):
 #  9. Unusual-issue detector (Dashboard, for the manager)
 # ------------------------------------------------------------------
 RECENT_ANOM_DAYS = 7     # how many recent days are checked
-SAME_DAY_MIN = 3         # same item issued this many times in one day -> flagged
+SAME_DAY_MIN = None      # বার-ভিত্তিক নিয়ম বন্ধ: Requisition অনুযায়ী একই আইটেম দিনে ১০ বারও Issue হতে পারে (সংখ্যা দিলে আবার চালু হবে, যেমন 3)
+MONTH_WINDOW = 30        # মাসিক পরিমাণ যাচাইয়ের জন্য কত দিনের rolling যোগফল দেখা হবে
+MONTH_FACTOR = 2.5       # গত ৩০ দিনের মোট Qty আইটেমের স্বাভাবিক মাসিক Qty-র এর বেশি গুণ হলে চিহ্নিত
 BN_MONTHS = ["জানুয়ারি", "ফেব্রুয়ারি", "মার্চ", "এপ্রিল", "মে", "জুন", "জুলাই", "আগস্ট", "সেপ্টেম্বর", "অক্টোবর", "নভেম্বর", "ডিসেম্বর"]
 
 
@@ -10762,15 +10764,23 @@ def _issue_hist(stamp, today_s, days=120):
 
 
 def _anomalies_from_df(iss, today, recent_days=RECENT_ANOM_DAYS, same_day_min=SAME_DAY_MIN):
-    """Rule 1: same item issued `same_day_min`+ times on one day.  Rule 2: that day's total is far above the item's own normal day
-    (needs 5+ earlier issue-days: more than 3x the median and clearly above the usual spread)."""
+    """Quantity-based detector (Issue কতবার হয়েছে সেটা নয়, কতটুকু Qty গেছে সেটাই দেখা হয়).
+    Rule 1 (দৈনিক): ওই দিনের মোট Qty আইটেমের নিজের স্বাভাবিক দিনের চেয়ে অনেক বেশি
+            (5+ আগের Issue-দিন লাগে; median-এর 3 গুণের বেশি এবং স্বাভাবিক ওঠানামার বাইরে).
+    Rule 2 (মাসিক): গত MONTH_WINDOW দিনের মোট Qty আইটেমের নিজের স্বাভাবিক মাসিক Qty-র MONTH_FACTOR গুণের বেশি
+            (আইটেমের কমপক্ষে ~২ মাসের ইতিহাস লাগে).
+    Rule 3 (ঐচ্ছিক, এখন বন্ধ): একই দিনে `same_day_min`+ বার Issue — SAME_DAY_MIN = None থাকলে প্রযোজ্য নয়."""
     if iss is None or iss.empty:
         return []
+    import numpy as np
     daily = iss.groupby(["factory_name", "sl_no", "d"]).agg(
         n=("qty", "size"), q=("qty", "sum"), item=("item_name", "first"), size=("size", "first"), prod=("prod_id", "first"),
         price=("price", "first"), unit=("unit", "first"),
         officers=("officer", lambda s: ", ".join(sorted({str(x) for x in s if str(x).strip()})))).reset_index()
     start = pd.Timestamp(today) - pd.Timedelta(days=recent_days - 1)
+    win0 = pd.Timestamp(daily["d"].min())
+    n_days = int((pd.Timestamp(today) - win0).days) + 1
+    start_idx = int((start - win0).days)
     flags = []
     for (fac, sl), g in daily.groupby(["factory_name", "sl_no"]):
         recent = g[g["d"] >= start]
@@ -10781,9 +10791,30 @@ def _anomalies_from_df(iss, today, recent_days=RECENT_ANOM_DAYS, same_day_min=SA
         if len(base) >= 5:
             med = float(base.median())
             mad = float((base - med).abs().median())
+        # ---- মাসিক: গত MONTH_WINDOW দিনের rolling মোট Qty বনাম আইটেমের নিজের আগের মাসিক মোট ----
+        m_hit = None      # (index of latest recent issue-day over the limit, rolling total, usual monthly)
+        if len(base) >= 5 and n_days > MONTH_WINDOW and start_idx > MONTH_WINDOW:
+            idx = (g["d"] - win0).dt.days.to_numpy().astype(int)
+            arr = np.bincount(idx, weights=g["q"].to_numpy(dtype=float), minlength=n_days)[:n_days]
+            cs = np.concatenate(([0.0], np.cumsum(arr)))
+            first_i = int(idx.min())
+            lo = max(MONTH_WINDOW - 1, first_i + MONTH_WINDOW - 1)    # full windows, only after the item's first issue
+            hi = start_idx - 1
+            if hi - lo + 1 >= 30:                                      # about a month of earlier rolling samples at least
+                pts = cs[lo + 1:hi + 2] - cs[lo + 1 - MONTH_WINDOW:hi + 2 - MONTH_WINDOW]
+                m_med = float(np.median(pts))
+                if m_med > 0:
+                    m_mad = float(np.median(np.abs(pts - m_med)))
+                    m_thr = max(MONTH_FACTOR * m_med, m_med + 3.0 * 1.4826 * m_mad)
+                    for i in sorted(set(int(x) for x in idx if x >= start_idx), reverse=True):
+                        tot = float(cs[i + 1] - cs[i + 1 - MONTH_WINDOW])
+                        if tot > m_thr and (tot - m_med) >= 2:
+                            m_hit = (i, tot, m_med)
+                            break
+        m_day = (win0 + pd.Timedelta(days=m_hit[0])) if m_hit else None
         for r in recent.itertuples():
             reasons = []
-            if r.n >= same_day_min:
+            if same_day_min and r.n >= same_day_min:
                 reasons.append(f"একই দিনে {bn(int(r.n))} বার Issue")
             usual = None
             if med is not None:
@@ -10791,6 +10822,8 @@ def _anomalies_from_df(iss, today, recent_days=RECENT_ANOM_DAYS, same_day_min=SA
                 if r.q > thr and (r.q - med) >= 2:
                     usual = med
                     reasons.append(f"স্বাভাবিকের চেয়ে অনেক বেশি: ওই দিন মোট {r.q:g} {r.unit}, সাধারণত দিনে ~{med:g}")
+            if m_hit is not None and r.d == m_day:
+                reasons.append(f"মাসিক পরিমাণ বেশি: গত {bn(MONTH_WINDOW)} দিনে মোট {m_hit[1]:g} {r.unit}, সাধারণত মাসে ~{m_hit[2]:g}")
             if reasons:
                 flags.append({"factory": fac, "sl_no": int(sl), "item": r.item, "size": r.size, "prod_id": r.prod,
                               "date": r.d, "times": int(r.n), "qty": float(r.q), "usual": usual, "unit": r.unit,
