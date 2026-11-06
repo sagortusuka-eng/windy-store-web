@@ -22422,41 +22422,82 @@ def isc_sessions(fac):
     return [s for s in msc_sessions(fac) if str(s.get("note") or "").startswith(ISC_TAG)]
 
 
+def isc_issued_detail(fac, from_d, upto_d, include_internal=True):
+    """One row per item issued between from_d and upto_d (from_d=None -> from the beginning): qty, entries, last issue date."""
+    types = list(ISSUE_TYPES) if include_internal else ["Issued"]
+    rows = q_c("""SELECT t.sl_no, t.item_name, t.date, t.qty,
+                  (SELECT COALESCE(i.size,'') FROM inventory i WHERE i.sl_no=t.sl_no AND i.factory_name=t.factory_name LIMIT 1) AS size,
+                  (SELECT COALESCE(i.current_stock,0) FROM inventory i WHERE i.sl_no=t.sl_no AND i.factory_name=t.factory_name LIMIT 1) AS stock_now
+                  FROM transactions t WHERE t.factory_name=%s AND t.trans_type = ANY(%s) AND t.sl_no IS NOT NULL""", (fac, types))
+    agg = {}
+    for r in rows:
+        d = _msc_pdate(r["date"])
+        if d is None or d > upto_d or (from_d is not None and d < from_d):
+            continue
+        a = agg.setdefault(int(r["sl_no"]), {"SL": int(r["sl_no"]), "Item": r["item_name"], "Size": r["size"] or "", "Issued qty": 0.0,
+                                             "Entries": 0, "Last issue": d, "Stock now": float(r["stock_now"] or 0)})
+        a["Issued qty"] += float(r["qty"] or 0)
+        a["Entries"] += 1
+        if d > a["Last issue"]:
+            a["Last issue"] = d
+    out = sorted(agg.values(), key=lambda a: (a["Item"] or "", a["Size"]))
+    for a in out:
+        a["Last issue"] = a["Last issue"].strftime(DATE_FMT)
+    return out
+
+
 def isc_new_view(fac):
-    st.markdown("**Kibhabe kaj kore:** je item gulu *Issue* hoyeche (nirdishto tarikh porjonto) sudhu sei item gulur "
-                "**closing stock (check-er tarikhe)** software theke ber hobe. Tarpor store-e giye physical count entry korben.")
+    st.markdown("**Kibhabe kaj kore:** apni ja bachhai korben sudhu sei issue-hoye-jaoa item gulur **closing stock (check-er tarikhe)** "
+                "software theke ber hobe. Tarpor store-e giye physical count entry korben. Shob item check korte hobe na.")
     today = local_now().date()
-    c1, c2, c3 = st.columns(3)
-    upto_d = c1.date_input("Issue hoyeche — ei tarikh porjonto", value=today - timedelta(days=1), key="isc_upto", max_value=today)
-    chk_d = c2.date_input("Closing stock check-er tarikh", value=today, key="isc_chk", max_value=today)
-    use_from = c3.checkbox("Shuru-r tarikh dibo (na dile shuru theke)", value=False, key="isc_usefrom")
-    from_d = None
-    if use_from:
-        from_d = c3.date_input("Issue shuru", value=upto_d.replace(day=1), key="isc_from", max_value=upto_d)
+    c1, c2 = st.columns(2)
+    upto_d = c1.date_input("Issue-r shesh tarikh (e.g. 05-Nov)", value=today - timedelta(days=1), key="isc_upto", max_value=today)
+    chk_d = c2.date_input("Closing stock check-er tarikh (e.g. 06-Nov)", value=today, key="isc_chk", max_value=today)
+    mode = st.radio("Kon shomoy-er issue-r item?",
+                    [f"Shudhu {upto_d.strftime('%d-%b')} tarikher issue", "Shesh 7 din", "Shuru theke (shob issue)", "Nijer tarikh dibo"],
+                    key="isc_mode", horizontal=True)
+    if mode.startswith("Shudhu"):
+        from_d = upto_d
+    elif mode == "Shesh 7 din":
+        from_d = upto_d - timedelta(days=6)
+    elif mode.startswith("Shuru"):
+        from_d = None
+    else:
+        from_d = st.date_input("Issue shuru", value=upto_d.replace(day=1), key="isc_from", max_value=upto_d)
     inc_int = st.checkbox("Internal Issue (onno unit-e pathano) item-ao dhorbo", value=True, key="isc_inc_int")
     note = st.text_input("Note (optional)", key="isc_note")
     try:
-        n_found = len(isc_issued_sls(fac, from_d, upto_d, inc_int))
-        st.info(f"📌 {upto_d.strftime(DATE_FMT)} porjonto **{n_found}** ti item issue hoyeche. Closing stock: **{chk_d.strftime(DATE_FMT)}**.")
+        detail = isc_issued_detail(fac, from_d, upto_d, inc_int)
     except Exception as e:
-        st.warning(f"Issue item count ber kora jay nai: {e}")
-    if st.button("✅ Issued items-er stock check toiri korun", type="primary", key="isc_create_btn", use_container_width=True):
+        st.warning(f"Issue item list ber kora jay nai: {e}")
+        return
+    span_txt = f"{from_d.strftime(DATE_FMT) if from_d else 'shuru'} theke {upto_d.strftime(DATE_FMT)}"
+    if not detail:
+        st.info(f"{span_txt} -er moddhe kono issue kora item paoa jay nai.")
+        return
+    st.info(f"📌 {span_txt}: **{len(detail)}** ti item issue hoyeche. Je item check korben na tar tick tule din.")
+    all_on = st.checkbox("Shob item tick", value=True, key="isc_all")
+    pv = pd.DataFrame(detail)
+    pv.insert(0, "Check", all_on)
+    ed = st.data_editor(pv, hide_index=True, use_container_width=True, height=min(520, 60 + 36 * len(pv)),
+                        key=f"isc_pv_{int(all_on)}_{from_d}_{upto_d}_{int(inc_int)}",
+                        disabled=[c for c in pv.columns if c != "Check"],
+                        column_config={"Check": st.column_config.CheckboxColumn("Check?"), "SL": st.column_config.NumberColumn(format="%d")})
+    picked = {int(r["SL"]) for _, r in ed.iterrows() if r["Check"]}
+    st.caption(f"{len(picked)} ti item physical check list-e jabe.")
+    if st.button(f"✅ {len(picked)} ti item-er stock check toiri korun", type="primary", key="isc_create_btn",
+                 use_container_width=True, disabled=not picked):
         if upto_d > chk_d:
-            st.error("Issue-er shesh tarikh check-er tarikh-er por hote pare na.")
+            st.error("Issue-r shesh tarikh check-er tarikh-er por hote pare na.")
         elif guard():
-            with st.spinner("Issued item gulur closing stock hishab hocche..."):
-                sls = isc_issued_sls(fac, from_d, upto_d, inc_int)
-                if not sls:
-                    st.error("Ei tarikhe kono issue kora item paoa jay nai.")
-                    return
+            with st.spinner("Closing stock hishab hocche..."):
                 rows, flags = msc_compute(fac, chk_d, chk_d)     # closing at end of check date; nothing 'after' it is counted
-                rows = [r for r in rows if int(r["sl_no"]) in sls]
+                rows = [r for r in rows if int(r["sl_no"]) in picked]
                 if not rows:
                     st.error("Item list khali.")
                     return
                 label = f"Issued items {upto_d.strftime('%d-%b')} → closing {chk_d.strftime('%d-%b-%Y')}"
-                tag_note = f"{ISC_TAG} issued {(from_d.strftime(DATE_FMT) + ' to ') if from_d else 'up to '}{upto_d.strftime(DATE_FMT)}" \
-                           + (f" | {note.strip()}" if note.strip() else "")
+                tag_note = f"{ISC_TAG} issued {span_txt}" + (f" | {note.strip()}" if note.strip() else "")
                 sid = msc_create(fac, chk_d, chk_d, label, "Software", "", rows, tag_note)
             if sid:
                 st.session_state["isc_sid"] = sid
