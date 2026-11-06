@@ -14196,6 +14196,30 @@ _RI_PREM_CSS = """<style>
 .st-key-pv_root .st-key-ri_mode label[data-baseweb="radio"]:hover{background:linear-gradient(180deg,#FFFBEA,#FBEFC8)!important;border-color:#C9A24B!important;transform:translateY(-2px);box-shadow:0 8px 18px rgba(201,162,75,.28)!important}
 .st-key-pv_root .st-key-ri_mode label[data-baseweb="radio"]:has(input:checked){background:linear-gradient(135deg,#07142F 0%,#0F2C6B 60%,#1B4599 100%)!important;border:1px solid #C9A24B!important;box-shadow:0 10px 24px rgba(10,31,77,.42),inset 0 -4px 0 #C9A24B!important;transform:translateY(-1px)}
 .st-key-pv_root .st-key-ri_mode label[data-baseweb="radio"]:has(input:checked) p{color:#F7E7B4!important;font-weight:800!important;text-shadow:0 1px 2px rgba(0,0,0,.35)}
+/* ---- each mode tab has its own colour: blue / green / amber / purple / rose ---- */
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label{flex:1 1 0!important;min-width:165px!important;justify-content:center!important;margin:0!important;padding:12px 16px!important;border-radius:14px!important;border:1px solid var(--tcl)!important;border-top:5px solid var(--tc)!important;background:linear-gradient(180deg,#FFFFFF 0%,var(--tcbg) 100%)!important;box-shadow:0 4px 10px rgba(7,20,47,.08)!important;cursor:pointer;transition:all .18s ease!important}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label>div:first-child:not(:has(p)),.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label>span:first-child:not(:has(p)){display:none!important}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label p{font-size:16px!important;font-weight:800!important;color:var(--tc2)!important;white-space:nowrap}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label:hover{background:var(--tcbg)!important;transform:translateY(-2px);box-shadow:0 10px 20px rgba(7,20,47,.16)!important}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label:nth-of-type(1){--tc:#1F63D6;--tc2:#0B3D91;--tcbg:#EAF2FD;--tcl:#C7DBF7}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label:nth-of-type(1):has(input:checked){background:linear-gradient(135deg,#0B3D91 0%,#1F63D6 100%)!important;border-color:#0B3D91!important;border-top-color:#0B3D91!important;transform:translateY(-1px);box-shadow:0 12px 24px #1F63D666,inset 0 -4px 0 rgba(255,255,255,.38)!important}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label:nth-of-type(1):has(input:checked) p{color:#FFFFFF!important;text-shadow:0 1px 2px rgba(0,0,0,.30)}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label:nth-of-type(2){--tc:#16864B;--tc2:#0E6A3A;--tcbg:#E6F6EC;--tcl:#BFE5CE}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label:nth-of-type(2):has(input:checked){background:linear-gradient(135deg,#0E6A3A 0%,#16864B 100%)!important;border-color:#0E6A3A!important;border-top-color:#0E6A3A!important;transform:translateY(-1px);box-shadow:0 12px 24px #16864B66,inset 0 -4px 0 rgba(255,255,255,.38)!important}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label:nth-of-type(2):has(input:checked) p{color:#FFFFFF!important;text-shadow:0 1px 2px rgba(0,0,0,.30)}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label:nth-of-type(3){--tc:#E07B0B;--tc2:#B45309;--tcbg:#FFF1DE;--tcl:#F6D5A6}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label:nth-of-type(3):has(input:checked){background:linear-gradient(135deg,#B45309 0%,#E07B0B 100%)!important;border-color:#B45309!important;border-top-color:#B45309!important;transform:translateY(-1px);box-shadow:0 12px 24px #E07B0B66,inset 0 -4px 0 rgba(255,255,255,.38)!important}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label:nth-of-type(3):has(input:checked) p{color:#FFFFFF!important;text-shadow:0 1px 2px rgba(0,0,0,.30)}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label:nth-of-type(4){--tc:#7C4DDB;--tc2:#5629B0;--tcbg:#F0EAFD;--tcl:#D8CBF5}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label:nth-of-type(4):has(input:checked){background:linear-gradient(135deg,#5629B0 0%,#7C4DDB 100%)!important;border-color:#5629B0!important;border-top-color:#5629B0!important;transform:translateY(-1px);box-shadow:0 12px 24px #7C4DDB66,inset 0 -4px 0 rgba(255,255,255,.38)!important}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label:nth-of-type(4):has(input:checked) p{color:#FFFFFF!important;text-shadow:0 1px 2px rgba(0,0,0,.30)}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label:nth-of-type(5){--tc:#D33B55;--tc2:#A11D33;--tcbg:#FDECEF;--tcl:#F4BFC8}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label:nth-of-type(5):has(input:checked){background:linear-gradient(135deg,#A11D33 0%,#D33B55 100%)!important;border-color:#A11D33!important;border-top-color:#A11D33!important;transform:translateY(-1px);box-shadow:0 12px 24px #D33B5566,inset 0 -4px 0 rgba(255,255,255,.38)!important}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]>label:nth-of-type(5):has(input:checked) p{color:#FFFFFF!important;text-shadow:0 1px 2px rgba(0,0,0,.30)}
+/* ---- ONE header: the hero card and the mode tabs form a single unit (the duplicate navy title bar is gone) ---- */
+.st-key-pv_root .pv-hero{border-radius:18px 18px 0 0!important;border-bottom:0!important;box-shadow:inset 0 -4px 0 #C9A24B,0 6px 18px rgba(7,20,47,.10)!important}
+.st-key-pv_root .st-key-ri_mode{margin-top:-.7rem!important}
+.st-key-pv_root .st-key-ri_mode div[role="radiogroup"]{border-radius:0 0 18px 18px!important;border-top:0!important}
 </style>"""
 
 
@@ -14475,9 +14499,8 @@ def _tab_req_issue_body():
     _modes = ["📤 Issue (SR slip)", "📥 Supplier Receipt (Challan)", "⏳ Pending Issue (stock nei)", "🧰 SR Center (edit / fix)"]
     if st.session_state.get("role") in IW_VIEW_ROLES:
         _modes.append("🕵️ Skip Watch (Manager)")
-    _pv_slot = st.container()
-    _ri_navbar()
-    mode = st.radio("Ki korben?", _modes, horizontal=True, key="ri_mode", label_visibility="collapsed")
+    mode = st.radio("Ki korben?", _modes, horizontal=True, key="ri_mode", label_visibility="collapsed")   # tabs sit right under the one header card
+    _pv_slot = st.container()          # notifications / save message come below the tabs
     with _pv_slot:
         if mode.startswith("📤") or mode.startswith("📥"):
             _ri_status_strip(mode)
