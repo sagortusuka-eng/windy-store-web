@@ -9706,7 +9706,7 @@ def render_today_work_card():
         ("Issue PO Pending", c["po_issue_n"], "টি", f"Received PO Pending: {c['po_recv_n']}",
          NAV_ERP_AUDIT, AUD_PO, "ERP PO Pending খুলুন →"),
         ("ফিজিক্যাল যাচাই বাকি", c["verif_n"], "আইটেম", f"{VERIFY_AFTER_DAYS} দিন ধরে যাচাই ছাড়া Issue চলছে",
-         NAV_TRANSACTIONS, None, "Transactions খুলুন →"),
+         NAV_PHYSICAL, None, "Physical Count খুলুন →"),
         ("রিভিউয়ের অপেক্ষায় গণনা", c["review_n"], "টি", "Physical Count — Manager review বাকি",
          NAV_PHYSICAL, None, "Physical Count খুলুন →"),
     ]
@@ -9724,12 +9724,9 @@ def render_today_work_card():
                     f'<span style="font-size:13px;color:#64748B;font-weight:600;"> {unit}</span></div>'
                     f'<div style="font-size:12px;color:#64748B;margin-bottom:6px;">{html_lib.escape(hint)}</div>',
                     unsafe_allow_html=True)
-                if page == NAV_TRANSACTIONS:   # UI only: Transactions shortcut hidden here; spacer keeps the 4 cards aligned
-                    st.markdown('<div style="height:40px;"></div>', unsafe_allow_html=True)
-                else:
-                    st.button(btn if (n is None or int(n) > 0) else "খুলুন →", key=f"tw_go_{i}", on_click=go_page,
-                              args=(page, view), use_container_width=True,
-                              type="primary" if (n is not None and int(n) > 0) else "secondary")
+                st.button(btn if (n is None or int(n) > 0) else "খুলুন →", key=f"tw_go_{i}", on_click=go_page,
+                          args=(page, view), use_container_width=True,
+                          type="primary" if (n is not None and int(n) > 0) else "secondary")
     if total == 0:
         st.success("🎉 আজকের জন্য কোনো বাকি কাজ নেই।")
     else:
@@ -21572,7 +21569,7 @@ section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind=
   section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button { min-height: 44px !important; }
 }
 /* ===== PREMIUM SIDEBAR v3: same blue as the login page, white accents ===== */
-html body section[data-testid="stSidebar"]{background:radial-gradient(300px 300px at 0% 0%,rgba(255,255,255,.18) 0%,transparent 70%),radial-gradient(260px 260px at 100% 100%,rgba(255,255,255,.14) 0%,transparent 70%),linear-gradient(165deg,#1d4ed8 0%,#2f6df0 52%,#4b8df8 100%)!important;border-right:1px solid rgba(255,255,255,.35)!important;box-shadow:6px 0 26px rgba(29,78,216,.35)}
+html body section[data-testid="stSidebar"]{background:radial-gradient(300px 300px at 0% 0%,rgba(255,255,255,.18) 0%,transparent 70%),radial-gradient(260px 260px at 100% 100%,rgba(255,255,255,.14) 0%,transparent 70%),linear-gradient(165deg,#3a78f2 0%,#5a9bf8 50%,#7db4fb 100%)!important;border-right:1px solid rgba(255,255,255,.35)!important;box-shadow:6px 0 26px rgba(29,78,216,.35)}
 html body section[data-testid="stSidebar"]>div{background:transparent!important}
 html body section[data-testid="stSidebar"] .brand-card{background:rgba(255,255,255,.14)!important;border:1px solid rgba(255,255,255,.40)!important;box-shadow:0 10px 24px rgba(15,35,110,.30)!important;backdrop-filter:blur(4px)}
 html body section[data-testid="stSidebar"] .nav-section-title{color:#DBEAFE!important;letter-spacing:.14em}
@@ -21589,7 +21586,25 @@ html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] bu
 html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"]:hover{background:rgba(255,255,255,.18)!important;border-color:rgba(255,255,255,.45)!important}
 html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"]{background:#fff!important;border:1px solid #fff!important;border-left:4px solid #93c5fd!important;box-shadow:0 10px 22px rgba(15,35,110,.38)!important}
 html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] p{color:#1d4ed8!important;font-weight:800!important}
-html body section[data-testid="stSidebar"] label p,section[data-testid="stSidebar"] [data-testid="stCheckbox"] p{color:#EAF2FF!important}
+/* ---- black text on the blue sidebar ---- */
+html body section[data-testid="stSidebar"] .brand-card{background:rgba(255,255,255,.62)!important;border:1px solid rgba(255,255,255,.9)!important}
+html body section[data-testid="stSidebar"] .brand-card .b-t,html body section[data-testid="stSidebar"] .brand-card .b-s{color:#07122B!important}
+html body section[data-testid="stSidebar"] .nav-section-title{color:#07122B!important}
+html body section[data-testid="stSidebar"] hr{border-color:rgba(7,18,43,.25)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]{background:rgba(255,255,255,.34)!important;border:1px solid rgba(7,18,43,.20)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"]:hover{background:rgba(255,255,255,.55)!important;border-color:#07122B!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button[kind="secondary"] p{color:#07122B!important;font-weight:800!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button p code{background:rgba(255,255,255,.75)!important;color:#07122B!important;border:1px solid rgba(7,18,43,.25)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"] button::after{color:#07122B!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"],
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button[kind="secondary"]:hover{background:rgba(255,255,255,.72)!important;border:1px solid #fff!important;border-left:4px solid #07122B!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_g"][class*="_act"] button p code{background:#07122B!important;color:#fff!important;border-color:#07122B!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"]{border-left:1px solid rgba(7,18,43,.40)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"] p{color:#07122B!important;font-weight:700!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="secondary"]:hover{background:rgba(255,255,255,.45)!important;border-color:rgba(7,18,43,.25)!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"]{background:#fff!important;border-left:4px solid #07122B!important}
+html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_p"] button[kind="primary"] p{color:#07122B!important;font-weight:800!important}
+html body section[data-testid="stSidebar"] label p,html body section[data-testid="stSidebar"] [data-testid="stCheckbox"] p,html body section[data-testid="stSidebar"] [data-testid="stCheckbox"] span{color:#07122B!important;font-weight:700!important}
 </style>""", unsafe_allow_html=True)
     st.markdown('<div class="nav-section-title">Navigation</div>', unsafe_allow_html=True)
 
