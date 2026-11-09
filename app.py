@@ -18226,7 +18226,8 @@ def rp_section_budget(P):
             ("Remaining (Tk)", "a"), ("Used %", "p"), ("Status", "t")]
     _ord = {"OVER LIMIT": 0, "WARNING": 1, "SAFE": 2, "NO LIMIT SET": 3}
 
-    idf = _rp_tx(P, list(ISSUE_TYPES))          # every issue line in the period (Section filter already applied)
+    itemwise = bool(P.get("itemwise"))
+    idf = _rp_tx(P, list(ISSUE_TYPES)) if itemwise else pd.DataFrame()   # item lines are read only when "Item-wise details" is ticked
     cols_it = [("SL", "i"), ("Item Code", "t"), ("Item Name", "t"), ("Size", "t"), ("UOM", "t"), ("No. of Issues", "i"),
                ("Issued Qty", "q"), ("Avg Rate (Tk)", "r"), ("Issued Value (Tk)", "a"), ("% of Section", "p")]
 
@@ -18252,8 +18253,8 @@ def rp_section_budget(P):
         tm, tp, tu = sum(x[1] for x in items), sum(x[2] for x in items), sum(x[3] for x in items)
         tot = [f"TOTAL - {u}", None, tm, tp, tu, (tp - tu) if tp > 0 else None, (tu / tp * 100) if tp > 0 else None, None]
         secs = [_rp_sec(cols, rows, tot, heading="SECTION-WISE BUDGET")]
-        d_it = idf[idf["factory_name"] == u].copy() if not idf.empty else idf
-        if not d_it.empty:
+        d_it = idf[idf["factory_name"] == u].copy() if (itemwise and not idf.empty) else idf
+        if itemwise and not d_it.empty:
             d_it["sec_disp"] = d_it["section"].where(d_it["section"] != "", "(Section not given)")
             for x in items:                         # same order as the summary table above
                 g = d_it[d_it["sec_disp"] == x[0]].copy()
@@ -18282,7 +18283,8 @@ def rp_section_budget(P):
                                     sub=f"{lim_txt} · Issued value {x[3]:,.0f} Tk", note=nt or None))
         return secs
     notes = ["Issued Value = issued quantity x item rate, per Section (same calculation as the Section Budget page).",
-             "Below the summary, one item-wise table per Section shows exactly which items were issued to that Section (highest value first).",
+             ("Item-wise details are included: one table per Section shows which items were issued to it (highest value first)." if itemwise
+              else "Section-wise summary only. Tick “Item-wise details” in the filters to also list the items issued to each Section."),
              f"Status: WARNING = {SB_YELLOW_PCT:g}% or more of the limit used, OVER LIMIT = {SB_RED_PCT:g}% or more."]
     if all_dates:
         notes.append("All dates selected: Used % compares all issues with ONE month's limit. Pick a From/To date for a month-wise comparison.")
@@ -18575,7 +18577,7 @@ RP_REGISTRY = [
     dict(key="transfer", label="Transfer History Report", type="Transfer Report", dates=True, flt=("item", "status"), orient="L", fn=rp_transfer, status="transfer"),
     dict(key="gatepass", label="Gate Pass Report (Management)", title="GATE PASS REPORT - RECEIVED, CONSUMPTION & BALANCE", type="Gate Pass Management Report",
          dates=True, flt=("item", "pcat", "bcat", "status"), orient="L", fn=rp_gate_pass, status=["All", "Balance still in store", "Fully consumed"]),
-    dict(key="secbudget", label="Section Budget Report", type="Section Budget Report", dates=True, flt=("section", "status"), orient="P", fn=rp_section_budget,
+    dict(key="secbudget", label="Section Budget Report", type="Section Budget Report", dates=True, flt=("section", "status", "itemwise"), orient="P", fn=rp_section_budget,
          status=["All", "OVER LIMIT", "WARNING", "SAFE", "NO LIMIT SET"]),
 ]
 
@@ -18630,9 +18632,32 @@ def _rp_show(doc):
     components.html(_rp_html(doc), height=820, scrolling=True)
 
 
+_RPT_CSS = """<style>
+.rpt-hero{display:flex;align-items:center;gap:16px;padding:18px 22px;border-radius:18px;margin:2px 0 14px;border:1px solid #D9DEE8;
+ background:radial-gradient(800px 200px at 100% 0%,rgba(201,162,75,.22),rgba(201,162,75,0) 60%),linear-gradient(120deg,#FBFAF6,#EEF2FA);box-shadow:0 6px 22px rgba(10,31,77,.09)}
+.rpt-ic{width:54px;height:54px;border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:26px;color:#F4E3B2;
+ background:linear-gradient(135deg,#07142F,#13367F);box-shadow:0 8px 18px rgba(10,31,77,.38),inset 0 0 0 1.5px #C9A24B}
+.rpt-t{font-size:22px;font-weight:800;color:#0A1F4D;line-height:1.2}.rpt-s{font-size:13px;color:#51638A;margin-top:3px}
+.st-key-rpt_root div[data-baseweb="select"]>div,.st-key-rpt_root div[data-baseweb="input"]{background:#fff!important;border:1.5px solid #7C93BD!important;border-radius:10px!important;box-shadow:0 1px 2px rgba(10,31,77,.06)!important}
+.st-key-rpt_root div[data-baseweb="base-input"]{border:0!important;background:transparent!important}
+.st-key-rpt_root div[data-baseweb="select"]>div:focus-within,.st-key-rpt_root div[data-baseweb="input"]:focus-within{border-color:#0A1F4D!important;box-shadow:0 0 0 3px rgba(201,162,75,.38)!important}
+.st-key-rpt_root div[data-testid="stWidgetLabel"] p{color:#243B6B!important;font-weight:700!important}
+.st-key-rpt_root .stButton>button,.st-key-rpt_root .stDownloadButton>button{background:linear-gradient(135deg,#07142F,#13367F)!important;border:1px solid #C9A24B!important;color:#F4E3B2!important;border-radius:10px!important}
+.st-key-rpt_root .stButton>button p,.st-key-rpt_root .stDownloadButton>button p{color:#F4E3B2!important;font-weight:700!important}
+.st-key-rpt_root iframe{border:1px solid #D9DEE8!important;border-radius:16px!important;box-shadow:0 6px 24px rgba(10,31,77,.09)}
+</style>"""
+
+
 def tab_reports():
-    st.title("🧾 Reports")
-    st.caption("Read-only report centre: choose a report, set the filters, press Generate. Reports never change stock, transactions or any other record.")
+    st.markdown(_RPT_CSS, unsafe_allow_html=True)
+    st.markdown("<div class='rpt-hero'><div class='rpt-ic'>🧾</div><div><div class='rpt-t'>Reports</div>"
+                "<div class='rpt-s'>Report বাছুন, filter দিন, Generate চাপুন — Print / PDF / Excel নিন। Report কখনো stock, transaction বা অন্য কোনো record বদলায় না।</div></div></div>",
+                unsafe_allow_html=True)
+    with st.container(key="rpt_root"):
+        _tab_reports_body()
+
+
+def _tab_reports_body():
     labels = [f"{i + 1}. {r['label']}" for i, r in enumerate(RP_REGISTRY)]
     top = st.columns([2.4, 1.8, 1.1, 1.1])
     R = RP_REGISTRY[labels.index(top[0].selectbox("Report", labels, key="rp_pick"))]
@@ -18662,7 +18687,7 @@ def tab_reports():
         top[3].markdown(f"**{today:%d-%b-%Y}**")
     fl = list(R["flt"]) + (["alld"] if R["dates"] else [])
     cols = st.columns(len(fl))
-    P = {"units": units, "d1": d1, "d2": d2, "item": "", "sup_raw": None, "pcat": None, "bcat": None, "ttypes": None, "status": None, "section": None, "group": None}
+    P = {"units": units, "d1": d1, "d2": d2, "item": "", "sup_raw": None, "pcat": None, "bcat": None, "ttypes": None, "status": None, "section": None, "group": None, "itemwise": False}
     lines = []
     for c, f in zip(cols, fl):
         if f == "alld":
@@ -18699,6 +18724,11 @@ def tab_reports():
             if sel != "All sections":
                 P["section"] = sel
                 lines.append(("Section", sel))
+        elif f == "itemwise":
+            P["itemwise"] = c.checkbox("Item-wise details", key="rp_itemwise",
+                                       help="Tick করলে প্রতিটি Section-এর নিচে কোন item কত Issue হয়েছে তার তালিকা আসবে। না করলে শুধু Section-wise Budget / Issue আসবে।")
+            if P["itemwise"]:
+                lines.append(("Detail level", "Section summary + item-wise"))
         elif f == "group":
             P["group"] = c.selectbox("Group by", ["Budget Category", "Section"], key="rp_group")
             lines.append(("Grouped by", P["group"]))
@@ -18713,7 +18743,7 @@ def tab_reports():
             if P["status"] not in ("All", "All items"):
                 lines.append(("Status", P["status"]))
     period = (f"{d1:%d-%b-%Y} to {d2:%d-%b-%Y}" if d1 else "All dates") if R["dates"] else f"As on {today:%d-%b-%Y} (current balance)"
-    sig = repr((R["key"], units, d1, d2, P["item"], P["sup_raw"], P["pcat"], P["bcat"], P["ttypes"], P["status"], P["section"], P["group"]))
+    sig = repr((R["key"], units, d1, d2, P["item"], P["sup_raw"], P["pcat"], P["bcat"], P["ttypes"], P["status"], P["section"], P["group"], P["itemwise"]))
     if st.button("▶ Generate Report", type="primary", key="rp_gen"):
         with st.spinner("Preparing report..."):
             try:
