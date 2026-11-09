@@ -883,8 +883,10 @@ DS_KG_KEYWORDS = ("super enamel wire", "enamel paint", "anamel paint", "weather 
                   "blizing rod", "thermocol ball")
 REQ_FIELDS = [("req_no", "Requisition No"), ("item", "Item Description"), ("code", "ERP Code (optional)"),
               ("qty", "Req Qty"), ("size", "Size (optional)"), ("uom", "UOM / Unit (optional)"),
-              ("dept", "Department (optional)"), ("date", "Req Date (optional)")]
+              ("dept", "Department (optional)"), ("date", "Req Date (optional)"),
+              ("cat", "Budget / Item Category (optional)")]
 REQ_KEYS = {
+    "cat": ["budgetcategory", "itemcategory", "category"],
     "req_no": ["reqno", "requisitionno", "requisitionnumber", "reqnumber", "indentno", "rqsnno", "requisition"],
     "item": ["itemname", "itemdescription", "productname", "materialdescription", "description", "item", "product"],
     "code": ["erpcode", "itemcode", "productcode", "materialcode", "partno", "code"],
@@ -1316,7 +1318,8 @@ def ensure_req_tracker_schema():
         with conn.cursor() as cur:
             for col, typ in (("size", "TEXT DEFAULT ''"), ("uom", "TEXT DEFAULT ''"), ("sourcing_manager", "TEXT DEFAULT ''"),
                              ("handover_date", "TEXT"), ("handover_by", "TEXT DEFAULT ''"), ("supplier_name", "TEXT DEFAULT ''"),
-                             ("order_date", "TEXT"), ("order_note", "TEXT DEFAULT ''")):
+                             ("order_date", "TEXT"), ("order_note", "TEXT DEFAULT ''"),
+                             ("budget_category", "TEXT DEFAULT ''")):
                 cur.execute(f"ALTER TABLE requisition_tracking ADD COLUMN IF NOT EXISTS {col} {typ}")
         conn.commit()
     except Exception:
@@ -6628,7 +6631,7 @@ def load_requisitions():
 def _load_requisition_rows():
     rows = q_c(f"""SELECT id, factory_name, req_no, department, req_date, item_name, req_qty, audit_approved_qty AS aud_qty,
                  actual_received_qty AS rec_qty, po_date, received_date, COALESCE(prod_id,'') AS prod_id,
-                 COALESCE(size,'') AS size,
+                 COALESCE(size,'') AS size, COALESCE(budget_category,'') AS budget_category,
                  COALESCE(uom,'') AS uom, COALESCE(sourcing_manager,'') AS sourcing_manager, COALESCE(handover_date,'') AS handover_date,
                  COALESCE(supplier_name,'') AS supplier_name, COALESCE(order_date,'') AS order_date, COALESCE(order_note,'') AS order_note
                  FROM requisition_tracking WHERE 1=1{FSQL} ORDER BY id DESC""", FP)
@@ -6636,13 +6639,14 @@ def _load_requisition_rows():
 
 
 @tx
-def create_req_item(fac, code, name, dept, size="", uom=""):
+def create_req_item(fac, code, name, dept, size="", uom="", cat="", inv_dept=""):
     mx = q("SELECT COALESCE(MAX(sl_no),0) AS m FROM inventory WHERE factory_name=%s", (fac,))[0]["m"]
     if is_blank_code(code):
         code = next_free_temp(fac)
     run("""INSERT INTO inventory (sl_no, prod_id, factory_name, item_name, department, category, erp_stock,
            current_stock, unit_price, erp_status, size, unit_name) VALUES (%s,%s,%s,%s,%s,%s,0,0,0,'ERP Pending',%s,%s)""",
-        (int(mx) + 1, code, fac, name, dept, "Uncategorized (Edit Later)", (size or "").strip(), (uom or "").strip() or "Pcs"))
+        (int(mx) + 1, code, fac, name, (inv_dept or dept), (cat or "").strip() or "Uncategorized (Edit Later)",
+         (size or "").strip(), (uom or "").strip() or "Pcs"))
     return code
 
 
@@ -6814,9 +6818,82 @@ def find_inv_for_req(fac, code, name, size=""):
     return None
 
 
+_UNCAT = "Uncategorized (Edit Later)"
+
+
+def req_departments(fac=None):
+    """Departments for the Requisition screens: the standard list + every department already used in a requisition
+    (e.g. RND) + every department that has a Budget line. Nothing is removed from DEPARTMENTS."""
+    fsql, fp = fw(fac)
+    out, seen = list(DEPARTMENTS), {d.lower() for d in DEPARTMENTS}
+    for sql in (f"SELECT DISTINCT department AS d FROM requisition_tracking WHERE COALESCE(department,'')<>''{fsql}",
+                f"SELECT DISTINCT department_name AS d FROM category_budgets WHERE COALESCE(department_name,'')<>''{fsql}"):
+        try:
+            rows = q_c(sql, fp)
+        except Exception:
+            rows = []
+        for r in rows:
+            d = _clean(r["d"])
+            if d and d.lower() not in seen:
+                seen.add(d.lower())
+                out.append(d)
+    return out
+
+
+def budget_line_map(fac=None):
+    """{Budget category: Budget department} straight from the Budget tab (category_budgets)."""
+    fsql, fp = fw(fac)
+    try:
+        rows = q_c(f"SELECT category_name, department_name FROM category_budgets WHERE 1=1{fsql} "
+                   "ORDER BY department_name, category_name", fp)
+    except Exception:
+        return {}
+    out = {}
+    for r in rows:
+        c = _clean(r["category_name"])
+        if c and c not in out:
+            out[c] = _clean(r["department_name"])
+    return out
+
+
+_BC_STOP = {"item", "items", "goods", "and", "others", "other", "the", "of"}
+
+
+def _bc_words(t):
+    return {w for w in re.sub(r"[^a-z0-9]+", " ", str(t or "").lower()).split() if w and w not in _BC_STOP}
+
+
+def guess_budget_category(cats, *hints):
+    """'Production Consumable' (PDF line 'Category : ...') -> 'Production Consumable Items'. Returns '' when nothing
+    matches or when two Budget lines match equally (the person then picks)."""
+    for h in hints:
+        hw = _bc_words(h)
+        if not hw:
+            continue
+        hit = [c for c in cats if hw <= _bc_words(c)]
+        if len(hit) == 1:
+            return hit[0]
+    return ""
+
+
+def inv_budget_category(fac, sl=None, code=""):
+    """Current Budget category (inventory.category) of an existing item; '' if none / not found."""
+    try:
+        if sl is not None:
+            r = q("SELECT COALESCE(category,'') AS c FROM inventory WHERE factory_name=%s AND sl_no=%s", (fac, int(sl)))
+        elif not is_blank_code(code):
+            r = q("SELECT COALESCE(category,'') AS c FROM inventory WHERE factory_name=%s AND prod_id=%s", (fac, code))
+        else:
+            return ""
+    except Exception:
+        return ""
+    return _clean(r[0]["c"]) if r else ""
+
+
 @tx
 def import_requisition(fac, rows, create_items):
     new_items = 0
+    bmap = budget_line_map(fac)
     for p in rows:
         inv = None
         if p.get("use_sl"):   # the person chose an existing (similar) item for this line -> no new item; remember the name
@@ -6830,18 +6907,26 @@ def import_requisition(fac, rows, create_items):
                          local_now().strftime("%d-%b-%Y %I:%M %p")))
         if inv is None:
             inv = find_inv_for_req(fac, p["code"], p["item"], p.get("size", ""))
+        bcat = _clean(p.get("bud_cat"))
         if inv:
             code = inv["prod_id"]
+            cur_cat = inv_budget_category(fac, sl=inv["sl_no"])
+            if cur_cat and cur_cat != _UNCAT:
+                bcat = cur_cat              # Budget always follows the ITEM's own Budget line - never overwritten here
+            elif bcat:                      # item had no Budget line yet -> give it the one chosen on this requisition
+                run("UPDATE inventory SET category=%s WHERE factory_name=%s AND sl_no=%s", (bcat, fac, int(inv["sl_no"])))
+                audit("SET_BUDGET_CAT", f"{fac}: {inv['item_name']} category '{cur_cat}' -> '{bcat}' (requisition import)")
         elif create_items:
-            code = create_req_item(fac, p["code"], p["item"], p["dept"], p.get("size", ""), p.get("uom", ""))
+            code = create_req_item(fac, p["code"], p["item"], p["dept"], p.get("size", ""), p.get("uom", ""),
+                                   cat=bcat, inv_dept=bmap.get(bcat, ""))
             new_items += 1
         else:
             code = p["code"]
         run("""INSERT INTO requisition_tracking (factory_name, req_no, department, req_date, item_name, req_qty,
-               audit_approved_qty, actual_received_qty, status, po_delay_days, prod_id, size, uom)
-               VALUES (%s,%s,%s,%s,%s,%s,0,0,'Req Created - Audit Pending',0,%s,%s,%s)""",
+               audit_approved_qty, actual_received_qty, status, po_delay_days, prod_id, size, uom, budget_category)
+               VALUES (%s,%s,%s,%s,%s,%s,0,0,'Req Created - Audit Pending',0,%s,%s,%s,%s)""",
             (fac, p["req_no"], p["dept"], p["date"], p["item"], p["qty"], code,
-             (p.get("size") or "").strip(), (p.get("uom") or "").strip()))
+             (p.get("size") or "").strip(), (p.get("uom") or "").strip(), bcat))
     audit("IMPORT_REQUISITION", f"Imported {len(rows)} line(s) into {fac}, new items {new_items}")
     return new_items
 
@@ -6945,6 +7030,10 @@ def pdf_to_raw(upload):
     m = re.search(r"(?:requisition|req\.?)\s*(?:no\.?|number|#)\s*[:\-]?\s*#?\s*([A-Za-z0-9][A-Za-z0-9\-/]*)", text, re.I)
     if m:
         meta["req_no"] = m.group(1)
+    m = re.search(r"department\s*:\s*(.+?)\s+(?:section|store\s*name)\s*:", text.replace("\n", " "), re.I) \
+        or re.search(r"department\s*:\s*([^\n]+)", text, re.I)
+    if m and _clean(m.group(1)):
+        meta["dept"] = _clean(m.group(1))
     m = re.search(r"date\s*[:\-]?\s*(\d{1,2}[-/ ][A-Za-z]{3}[-/ ]\d{4}|\d{1,2}[-/]\d{1,2}[-/]\d{4}|\d{4}-\d{2}-\d{2})", text, re.I)
     if m:
         d = parse_date(m.group(1).replace(" ", "-"))
@@ -6969,6 +7058,11 @@ def req_import_view():
                 st.session_state["req_fx_no"] = meta["req_no"]
             if meta.get("date"):
                 st.session_state["req_fx_date"] = meta["date"]
+            _dd = meta.get("dept", "")
+            if _dd:   # keep the spelling of an existing department (RND == rnd); otherwise it is a new department
+                _dd = next((d for d in req_departments(FAC) if d.lower() == _dd.lower()), _dd)
+                st.session_state["req_fx_dept"] = _dd
+            st.session_state["_req_pdf_dept"] = _dd
         st.caption("📄 PDF থেকে টেবিল পড়া হয়েছে — নিচে Header row ও কলাম মিলিয়ে নিন (PDF-এর ওপরের লেখা থেকে পাওয়া Requisition No / তারিখ নিচে বসানো হয়েছে, ভুল হলে বদলান)। "
                    "মিললে ‘Import requisition’ চাপুন।")
         with st.expander("PDF থেকে পড়া কাঁচা টেবিল"):
@@ -6993,11 +7087,22 @@ def req_import_view():
         mp[key] = int(sel.split(":")[0]) - 1 if sel != "(none)" else None
     c1, c2, c3 = st.columns(3)
     fx_no = c1.text_input("Requisition No (fallback)", f"RQSN-{datetime.now():%m%d-%H%M}", key="req_fx_no")
-    fx_dept = c2.selectbox("Department (fallback)", DEPARTMENTS, key="req_fx_dept")
+    _dopts = req_departments(FAC)
+    _pd = st.session_state.get("_req_pdf_dept", "") if f.name.lower().endswith(".pdf") else ""
+    if _pd and _pd.lower() not in {d.lower() for d in _dopts}:
+        _dopts.append(_pd)
+    if st.session_state.get("req_fx_dept") not in _dopts:
+        st.session_state.pop("req_fx_dept", None)
+    fx_dept = c2.selectbox("Department (fallback)", _dopts, key="req_fx_dept")
+    _nd = c2.text_input("Notun Department (list-e na thakle likhun)", key="req_new_dept",
+                        help="Requisition-er department (jemon RND). Budget category alada - ta line-wise niche bachai korben.")
+    if _nd.strip():
+        fx_dept = _nd.strip()
     fx_date = c3.date_input("Req date (fallback)", value=date.today(), key="req_fx_date")
     create = st.checkbox("Inventory-te na thaka item auto create korun", value=True, key="req_create")
 
     parsed, last, ncols = [], {"req_no": "", "dept": "", "date": ""}, raw.shape[1]
+    cur_cat = ""
 
     def cell(row, field):
         ci = mp.get(field)
@@ -7007,6 +7112,11 @@ def req_import_view():
         row = raw.iloc[ridx]
         item, code, qty_t = cell(row, "item"), cell(row, "code"), cell(row, "qty")
         size_t, uom_t = cell(row, "size"), cell(row, "uom")
+        _cells = [txt(v) for v in row if txt(v)]
+        _cm = re.match(r"^category\s*[:\-]\s*(.+)$", _cells[0], re.I) if _cells else None
+        if _cm and not re.search(r"\d", qty_t):   # ERP group header row, e.g. "Category : Production Consumable"
+            cur_cat = _clean(_cm.group(1))
+            continue
         if code.upper() in ("N/A", "NA", "NONE", "-"):
             code = ""
         vals = {}
@@ -7021,7 +7131,8 @@ def req_import_view():
         d = parse_date(vals["date"]) or datetime.combine(fx_date, datetime.min.time())
         p = {"line": ridx + 1, "req_no": vals["req_no"] or fx_no, "item": item, "code": code, "qty": qty,
              "size": size_t, "uom": uom_t,
-             "dept": vals["dept"] or fx_dept, "date": d.strftime(DATE_FMT), "ok": False, "result": ""}
+             "dept": vals["dept"] or fx_dept, "date": d.strftime(DATE_FMT), "ok": False, "result": "",
+             "cat_hint": cell(row, "cat") or cur_cat}
         if not item:
             p["result"] = "Skipped: item description nei"
         elif qty <= 0:
@@ -7059,9 +7170,58 @@ def req_import_view():
             p["use_sl"] = opts[pick]
             p["result"] = "OK (existing item chosen)" if opts[pick] else "OK (new item)"
         sim_ack = st.checkbox("Kachakachi item gulo dekhe nilam - jegulo notun, shegulo sotti-i alada item.", key=f"req_sim_ack_{hi}")
+    # ---- Budget category per line: one requisition can hold lines of different Budget lines (e.g. Consumable + Electrical) ----
+    bc_ok = True
+    bmap = budget_line_map(FAC) if "CONSOLIDATED" not in str(FAC) else {}
+    if ok_rows and bmap:
+        bcats = list(bmap)
+        ed_rows, locked = [], {}
+        for p in ok_rows:
+            cur = ""
+            try:
+                if p.get("use_sl"):
+                    cur = inv_budget_category(FAC, sl=p["use_sl"])
+                else:
+                    _iv = find_inv_for_req(FAC, p["code"], p["item"], p.get("size", ""))
+                    cur = inv_budget_category(FAC, sl=_iv["sl_no"]) if _iv else ""
+                    status = "Inventory item" if _iv else "New item"
+                if p.get("use_sl"):
+                    status = "Inventory item"
+            except Exception:
+                status = "New item"
+            is_lock = bool(cur) and cur != _UNCAT and cur in bmap
+            locked[p["line"]] = cur if is_lock else ""
+            ed_rows.append({"Line": p["line"], "Item": p["item"], "Size": p.get("size", ""), "Qty": p["qty"], "Item status": status,
+                            "Budget Category": cur if is_lock else guess_budget_category(bcats, p.get("cat_hint", ""))})
+        st.markdown("**💰 Budget Category (line-wise)** — Department: "
+                    f"**{ok_rows[0]['dept']}** (requisition-er department). Budget category line-wise alada hote pare.")
+        st.caption("Inventory-te thaka item-er Budget line oi item-er category theke ashe (ekhane bodlano jabe na — Budget line "
+                   "fixer use korun). Notun / category-hin item-er jonno nijer Budget category bachai korun.")
+        ed_in = pd.DataFrame(ed_rows)
+        ed_out = st.data_editor(ed_in, hide_index=True, use_container_width=True,
+                                height=min(80 + 35 * len(ed_in), 420),
+                                key=f"req_bc_{hi}_{FAC}_{ok_rows[0]['req_no']}_{len(ok_rows)}",
+                                disabled=["Line", "Item", "Size", "Qty", "Item status"],
+                                column_config={"Budget Category": st.column_config.SelectboxColumn(
+                                    "Budget Category", options=[""] + bcats)})
+        picked = {int(r["Line"]): _clean(r["Budget Category"]) for _, r in ed_out.iterrows()}
+        for p in ok_rows:
+            p["bud_cat"] = locked[p["line"]] or picked.get(p["line"], "")
+        need = [p for p in ok_rows if not p["bud_cat"] and (create or locked[p["line"]])]
+        need = [p for p in need if not locked[p["line"]]]
+        if need:
+            bc_ok = False
+            st.warning(f"⚠️ {len(need)} ti line-er Budget Category bachai kora hoyni (Line: "
+                       + ", ".join(str(p["line"]) for p in need) + ").")
+        summ = {}
+        for p in ok_rows:
+            g = summ.setdefault(p["bud_cat"] or "(bachai hoyni)", [0, 0.0])
+            g[0] += 1
+            g[1] += p["qty"]
+        st.caption("Budget-wise: " + " | ".join(f"{k}: {v[0]} line, qty {v[1]:g}" for k, v in summ.items()))
     st.caption(f"Lines to import: {len(ok_rows)} | Skipped/already: {len(parsed) - len(ok_rows)}")
-    st.dataframe(pd.DataFrame(parsed), hide_index=True, use_container_width=True)
-    if st.button("✅ Import requisition", type="primary", disabled=not (ok_rows and sim_ack), key="req_import_btn"):
+    st.dataframe(pd.DataFrame(parsed).drop(columns=["cat_hint"], errors="ignore"), hide_index=True, use_container_width=True)
+    if st.button("✅ Import requisition", type="primary", disabled=not (ok_rows and sim_ack and bc_ok), key="req_import_btn"):
         n = import_requisition(FAC, ok_rows, create)
         if n is not None:
             done(f"Requisition import done: {len(ok_rows)} line(s), new inventory items {n}. "
@@ -7121,7 +7281,7 @@ def set_po_receiving(rid, po_s, rec_q, rec_s, req_no, name):
 
 
 @tx
-def edit_requisition(rid, req_no, dept, req_date, req_qty, item, code, old_code):
+def edit_requisition(rid, req_no, dept, req_date, req_qty, item, code, old_code, bud_cat=None):
     if code and code != old_code:
         if q("SELECT item_name FROM inventory WHERE factory_name=%s AND prod_id=%s", (FAC, code)):
             st.error(f"ERP Code '{code}' already used in {FAC}.")
@@ -7130,6 +7290,11 @@ def edit_requisition(rid, req_no, dept, req_date, req_qty, item, code, old_code)
         run("UPDATE transactions SET prod_id=%s WHERE factory_name=%s AND prod_id=%s", (code, FAC, old_code))
     run("""UPDATE requisition_tracking SET req_no=%s, department=%s, req_date=%s, req_qty=%s, item_name=%s, prod_id=%s
            WHERE id=%s""", (req_no, dept, req_date, req_qty, item, code or old_code, rid))
+    if bud_cat is not None:
+        run("UPDATE requisition_tracking SET budget_category=%s WHERE id=%s", (bud_cat, rid))
+        if bud_cat:   # only an item that has no real Budget line yet gets this one
+            run("""UPDATE inventory SET category=%s WHERE factory_name=%s AND prod_id=%s
+                   AND (COALESCE(category,'')='' OR category=%s)""", (bud_cat, FAC, code or old_code, _UNCAT))
     audit("EDIT_REQUISITION", f"Req ID {rid}: {req_no} / {item}")
     return True
 
@@ -7690,6 +7855,15 @@ def req_dept_report():
         _rp_show(_rq_doc_dept(df, ddf if dsel == ALL else None, _units, _per, _fl, view[2:].strip()))
 
 
+def _req_inv_cat_map():
+    """(factory, ERP code) -> Budget category, used to show the Budget line for older requisitions that were imported before this column existed."""
+    try:
+        rows = q_c(f"SELECT factory_name, prod_id, COALESCE(category,'') AS c FROM inventory WHERE COALESCE(prod_id,'')<>''{FSQL}", FP)
+    except Exception:
+        return {}
+    return {(r["factory_name"], r["prod_id"]): r["c"] for r in rows if r["c"] and r["c"] != _UNCAT}
+
+
 def tab_requisition():
     _lbls = ["📋 Requisition list", "🎯 Req Tracker (Premium)", "🧾 Audit Reconciliation (item search)", "🏷 Department Report"]
     _top = _lbls[lazy_tab_select(_lbls, "lz_reqtop")]
@@ -7735,6 +7909,7 @@ def tab_requisition():
         _req_item_summary(rows)
         return
     df = pd.DataFrame([{"ID": r["id"], "Factory": r["factory_name"], "Req No": r["req_no"], "Department": r["department"],
+                        "Budget Category": r.get("budget_category") or _req_inv_cat_map().get((r["factory_name"], r["prod_id"]), ""),
                         "Req Date": r["req_date"], "Item": r["item_name"], "Size": r.get("size") or "", "ERP Code": r["prod_id"], "Req Qty": r["req_qty"],
                         "Audit Approved": r["aud_qty"], "Received": r["rec_qty"], "Pending": r["pending"],
                         "PO Date": r["po_date"] or "Pending PO", "Status": r["calc_status"],
@@ -7798,17 +7973,31 @@ def tab_requisition():
             with st.form(f"req_edit_{k}"):
                 c1, c2, c3 = st.columns(3)
                 no = c1.text_input("Requisition No", r["req_no"] or "", key=f"rn_{k}")
-                dept = c2.selectbox("Department", DEPARTMENTS,
-                                    index=DEPARTMENTS.index(r["department"]) if r["department"] in DEPARTMENTS else 0, key=f"rdp_{k}")
+                _rdopts = req_departments(r["factory_name"])
+                if (r["department"] or "").strip() and r["department"] not in _rdopts:
+                    _rdopts.append(r["department"])
+                dept = c2.selectbox("Department", _rdopts,
+                                    index=_rdopts.index(r["department"]) if r["department"] in _rdopts else 0, key=f"rdp_{k}")
                 rdate = c3.text_input("Req Date (DD-Mon-YYYY)", r["req_date"] or "", key=f"rdt_{k}")
                 qty = c1.number_input("Req Qty", min_value=0.0, value=float(r["req_qty"]), key=f"rqty_{k}")
                 item = c2.text_input("Item", r["item_name"] or "", key=f"ri_{k}")
                 code = c3.text_input("ERP Code", r["prod_id"] or "", key=f"rc_{k}")
+                _bm = budget_line_map(r["factory_name"])
+                _ic = inv_budget_category(r["factory_name"], code=r["prod_id"])
+                _lock = bool(_ic) and _ic != _UNCAT and _ic in _bm
+                _bopts = [""] + list(_bm)
+                _bcur = _ic if _lock else (r.get("budget_category") or "")
+                if _bcur and _bcur not in _bopts:
+                    _bopts.append(_bcur)
+                bcat_new = c1.selectbox("Budget Category", _bopts, index=_bopts.index(_bcur) if _bcur in _bopts else 0,
+                                        disabled=_lock or not _bm, key=f"rbc_{k}",
+                                        help="Item-er nijer Budget line thakle ta-i dhora hoy (ekhane bodlay na).")
                 if st.form_submit_button("💾 Save"):
                     d = parse_date(rdate)
                     if not d or qty <= 0 or not item.strip():
                         st.error("Req date (DD-Mon-YYYY), Qty ar Item thik kore din.")
-                    elif edit_requisition(r["id"], no.strip(), dept, d.strftime(DATE_FMT), qty, item.strip(), code.strip(), r["prod_id"]):
+                    elif edit_requisition(r["id"], no.strip(), dept, d.strftime(DATE_FMT), qty, item.strip(), code.strip(), r["prod_id"],
+                                          None if _lock else bcat_new):
                         done("Requisition updated.")
             pw = mgr_check(f"req_pw_{k}")
             conf = confirm_box(f"req_conf_{k}")
