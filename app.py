@@ -7739,7 +7739,80 @@ def delete_repair(rid):
     return True
 
 
+_RPX_OVERDUE_DAYS = 30      # a Pending Return older than this many days is shown as "overdue"
+
+_RPX_CSS = """<style>
+.rpx-hero{display:flex;align-items:center;gap:16px;padding:18px 22px;border-radius:18px;margin:2px 0 14px;border:1px solid #D9DEE8;
+ background:radial-gradient(800px 200px at 100% 0%,rgba(201,162,75,.22),rgba(201,162,75,0) 60%),linear-gradient(120deg,#FBFAF6,#EEF2FA);box-shadow:0 6px 22px rgba(10,31,77,.09)}
+.rpx-ic{width:54px;height:54px;border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:26px;color:#F4E3B2;
+ background:linear-gradient(135deg,#07142F,#13367F);box-shadow:0 8px 18px rgba(10,31,77,.38),inset 0 0 0 1.5px #C9A24B}
+.rpx-t{font-size:22px;font-weight:800;color:#0A1F4D;line-height:1.2}.rpx-s{font-size:13px;color:#51638A;margin-top:3px}
+.rpx-kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:0 0 14px}
+.rpx-k{background:#fff;border:1px solid #D9DEE8;border-radius:14px;padding:14px 16px;box-shadow:0 4px 16px rgba(10,31,77,.07);position:relative;overflow:hidden}
+.rpx-k::before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--c,#13367F)}
+.rpx-k .l{font-size:12px;font-weight:700;color:#51638A;letter-spacing:.3px}.rpx-k .v{font-size:25px;font-weight:800;color:#0A1F4D;margin-top:4px}
+.rpx-k .d{font-size:11.5px;color:#64748B;margin-top:2px}
+.rpx-wrap{background:#fff;border:1px solid #D9DEE8;border-radius:16px;box-shadow:0 6px 24px rgba(10,31,77,.09);overflow:hidden;margin:0 0 10px}
+.rpx-scroll{overflow:auto;max-height:430px}
+table.rpx{width:100%;border-collapse:collapse;font-size:13px;min-width:980px}
+table.rpx th{position:sticky;top:0;z-index:1;background:linear-gradient(100deg,#07142F,#0A1F4D 55%,#13367F);color:#F4E3B2;text-align:left;padding:11px 12px;font-size:11.5px;letter-spacing:.4px;border-bottom:3px solid #C9A24B;white-space:nowrap}
+table.rpx td{padding:10px 12px;border-bottom:1px solid #E6EAF2;color:#172033;vertical-align:middle}
+table.rpx tr:nth-child(even) td{background:#FAFBFE}table.rpx tr:hover td{background:#F3F0E6}
+table.rpx td.n,table.rpx th.n{text-align:right;font-variant-numeric:tabular-nums}
+.rpx-code{font-weight:800;color:#0A1F4D;white-space:nowrap}
+.rpx-pill{display:inline-block;padding:3px 11px;border-radius:99px;font-size:12px;font-weight:800;white-space:nowrap}
+.rpx-chip{display:inline-block;padding:2px 9px;border-radius:8px;font-size:11.5px;font-weight:700;background:#EEF2F7;color:#334155;white-space:nowrap}
+.rpx-age{font-weight:800;white-space:nowrap}
+@media(max-width:900px){.rpx-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.st-key-rpx_root div[data-baseweb="select"]>div,.st-key-rpx_root div[data-baseweb="input"]{background:#fff!important;border:1.5px solid #7C93BD!important;border-radius:10px!important;box-shadow:0 1px 2px rgba(10,31,77,.06)!important}
+.st-key-rpx_root div[data-baseweb="base-input"]{border:0!important;background:transparent!important}
+.st-key-rpx_root div[data-baseweb="select"]>div:focus-within,.st-key-rpx_root div[data-baseweb="input"]:focus-within{border-color:#0A1F4D!important;box-shadow:0 0 0 3px rgba(201,162,75,.38)!important}
+.st-key-rpx_root div[data-testid="stWidgetLabel"] p{color:#243B6B!important;font-weight:700!important}
+.st-key-rpx_root div[data-testid="stExpander"]{border:1px solid #D9DEE8!important;border-radius:14px!important;box-shadow:0 4px 16px rgba(10,31,77,.07)}
+.st-key-rpx_root div[data-testid="stForm"]{border:1px solid #E2E8F0!important;border-radius:14px!important;background:#FBFCFE!important}
+.st-key-rpx_root .stButton>button,.st-key-rpx_root div[data-testid="stFormSubmitButton"] button{background:linear-gradient(135deg,#07142F,#13367F)!important;border:1px solid #C9A24B!important;color:#F4E3B2!important;border-radius:10px!important}
+.st-key-rpx_root .stButton>button p,.st-key-rpx_root div[data-testid="stFormSubmitButton"] button p{color:#F4E3B2!important;font-weight:700!important}
+</style>"""
+_RPX_PILL = {"Pending Return": ("#FEF3C7", "#92400E"), "Returned": ("#DCFCE7", "#166534"), "Closed": ("#E2E8F0", "#334155")}
+
+
+def _rpx_table(rp, show_unit):
+    e = html_lib.escape
+    h = ["<div class='rpx-wrap'><div class='rpx-scroll'><table class='rpx'><tr><th>Tracking</th>"]
+    if show_unit:
+        h.append("<th>Unit</th>")
+    h.append("<th>Gate Pass</th><th>Item</th><th class='n'>Qty</th><th>Type</th><th>Return Type</th><th>Supplier</th>"
+             "<th>Sent</th><th>Returned</th><th>Status</th><th class='n'>Aging</th><th>অনুমতি দিয়েছেন</th><th>Gate Pass এনেছেন</th></tr>")
+    for r in rp.to_dict("records"):
+        bg, fg = _RPX_PILL.get(str(r.get("status") or ""), ("#EEF2F7", "#475569"))
+        ag = r.get("aging_days")
+        ag_html = "—"
+        if ag is not None and not pd.isna(ag):
+            late = str(r.get("status")) == "Pending Return" and float(ag) > _RPX_OVERDUE_DAYS
+            ag_html = f"<span class='rpx-age' style='color:{'#B91C1C' if late else '#172033'}'>{int(ag)} d{' ⚠' if late else ''}</span>"
+        q = float(r.get("qty") or 0)
+        h.append(f"<tr><td class='rpx-code'>{e(str(r.get('tracking_code') or ''))}</td>"
+                 + (f"<td>{e(short_fac(str(r.get('factory_name') or '')))}</td>" if show_unit else "")
+                 + f"<td>{e(str(r.get('gate_pass_no') or ''))}</td><td><b>{e(str(r.get('item_name') or ''))}</b></td>"
+                 f"<td class='n'>{q:g}</td><td><span class='rpx-chip'>{e(str(r.get('source_type') or ''))}</span></td>"
+                 f"<td>{e(str(r.get('return_type') or ''))}</td><td>{e(str(r.get('supplier_name') or ''))}</td>"
+                 f"<td>{e(str(r.get('sent_date') or ''))}</td><td>{e(str(r.get('return_date') or ''))}</td>"
+                 f"<td><span class='rpx-pill' style='background:{bg};color:{fg}'>{e(str(r.get('status') or ''))}</span></td>"
+                 f"<td class='n'>{ag_html}</td><td>{e(str(r.get('approved_by') or ''))}</td><td>{e(str(r.get('gatepass_carrier') or ''))}</td></tr>")
+    h.append("</table></div></div>")
+    return "".join(h)
+
+
 def tab_repair():
+    st.markdown(_RPX_CSS, unsafe_allow_html=True)
+    st.markdown("<div class='rpx-hero'><div class='rpx-ic'>🛠</div><div><div class='rpx-t'>Repair &amp; Returns</div>"
+                "<div class='rpx-s'>Gate Pass, Repair, Warranty ও Return — কোন মাল কার অনুমতিতে বাইরে গেল, কবে ফিরল, কত দিন পড়ে আছে</div></div></div>",
+                unsafe_allow_html=True)
+    with st.container(key="rpx_root"):
+        _tab_repair_body()
+
+
+def _tab_repair_body():
     if lazy_tab_select(["🛠 Repair / Gate Pass", "↩️ Return to Store (Issue ফেরত)"], "lz_rp") == 1:
         try:
             return_to_store_view()
@@ -7759,7 +7832,22 @@ def tab_repair():
         rp = rp[m]
     if not rp.empty:
         rp["aging_days"] = rp.apply(lambda r: age_days(r["sent_date"], r["return_date"]), axis=1)
-    st.dataframe(rp, hide_index=True, use_container_width=True, height=380)
+        _n_pend = int((rp["status"] == "Pending Return").sum())
+        _n_late = int(((rp["status"] == "Pending Return") & (pd.to_numeric(rp["aging_days"], errors="coerce").fillna(0) > _RPX_OVERDUE_DAYS)).sum())
+        _q_pend = float(pd.to_numeric(rp.loc[rp["status"] == "Pending Return", "qty"], errors="coerce").fillna(0).sum())
+        st.markdown("<div class='rpx-kpis'>"
+                    f"<div class='rpx-k' style='--c:#13367F'><div class='l'>মোট Record</div><div class='v'>{len(rp):,}</div></div>"
+                    f"<div class='rpx-k' style='--c:#D99A06'><div class='l'>ফেরত বাকি (Pending)</div><div class='v'>{_n_pend:,}</div><div class='d'>মোট Qty {_q_pend:g}</div></div>"
+                    f"<div class='rpx-k' style='--c:#DC2626'><div class='l'>{_RPX_OVERDUE_DAYS} দিনের বেশি বাকি</div><div class='v'>{_n_late:,}</div></div>"
+                    f"<div class='rpx-k' style='--c:#16A34A'><div class='l'>ফেরত এসেছে</div><div class='v'>{int((rp['status'] == 'Returned').sum()):,}</div></div>"
+                    f"<div class='rpx-k' style='--c:#64748B'><div class='l'>Closed</div><div class='v'>{int((rp['status'] == 'Closed').sum()):,}</div></div></div>",
+                    unsafe_allow_html=True)
+        _show_n = 300
+        st.markdown(_rpx_table(rp.head(_show_n), is_cons_view), unsafe_allow_html=True)
+        if len(rp) > _show_n:
+            st.caption(f"সর্বশেষ {_show_n}টি দেখানো হচ্ছে (মোট {len(rp):,}) — সব Record Search বা নিচের Excel / PDF-এ পাবেন।")
+    else:
+        st.info("এই সময়ে কোনো Repair / Gate Pass record নেই।")
     export_buttons(rp, "repair_returns")
 
     if not guard():
@@ -18138,6 +18226,10 @@ def rp_section_budget(P):
             ("Remaining (Tk)", "a"), ("Used %", "p"), ("Status", "t")]
     _ord = {"OVER LIMIT": 0, "WARNING": 1, "SAFE": 2, "NO LIMIT SET": 3}
 
+    idf = _rp_tx(P, list(ISSUE_TYPES))          # every issue line in the period (Section filter already applied)
+    cols_it = [("SL", "i"), ("Item Code", "t"), ("Item Name", "t"), ("Size", "t"), ("UOM", "t"), ("No. of Issues", "i"),
+               ("Issued Qty", "q"), ("Avg Rate (Tk)", "r"), ("Issued Value (Tk)", "a"), ("% of Section", "p")]
+
     def build(u):
         names = {s for (f, s) in lim_map if f == u} | {s for (f, s) in used_map if f == u}
         items = []
@@ -18159,8 +18251,38 @@ def rp_section_budget(P):
         rows = [[i + 1] + list(x) for i, x in enumerate(items)]
         tm, tp, tu = sum(x[1] for x in items), sum(x[2] for x in items), sum(x[3] for x in items)
         tot = [f"TOTAL - {u}", None, tm, tp, tu, (tp - tu) if tp > 0 else None, (tu / tp * 100) if tp > 0 else None, None]
-        return [_rp_sec(cols, rows, tot)]
+        secs = [_rp_sec(cols, rows, tot, heading="SECTION-WISE BUDGET")]
+        d_it = idf[idf["factory_name"] == u].copy() if not idf.empty else idf
+        if not d_it.empty:
+            d_it["sec_disp"] = d_it["section"].where(d_it["section"] != "", "(Section not given)")
+            for x in items:                         # same order as the summary table above
+                g = d_it[d_it["sec_disp"] == x[0]].copy()
+                if g.empty:
+                    continue
+                g["eff"] = g["tx_rate"].where(g["tx_rate"] > 0, g["price"].where(g["price"] > 0))
+                g["val"] = (g["qty"] * g["eff"]).fillna(0.0)
+                g["pq"] = g["qty"].where(g["eff"].notna(), 0.0)
+                g["no_rate"] = g["eff"].isna().astype(int)
+                agg = (g.groupby(["code", "item", "size", "uom"], as_index=False)
+                        .agg(n=("qty", "size"), qty=("qty", "sum"), pq=("pq", "sum"), val=("val", "sum"), miss=("no_rate", "sum"))
+                        .sort_values(["val", "qty"], ascending=False, kind="stable"))
+                sec_val = float(agg["val"].sum())
+                irows = []
+                for k, r in enumerate(agg.itertuples(), 1):
+                    irows.append([k, r.code, r.item, r.size, r.uom, int(r.n), float(r.qty),
+                                  (r.val / r.pq) if r.pq > 0 and r.val > 0 else None, float(r.val),
+                                  (r.val / sec_val * 100) if sec_val > 0 else None])
+                itot = [f"Total - {x[0]} ({len(agg)} item(s))", None, None, None, None, int(agg["n"].sum()), _rp_qty_tot(g, "qty"),
+                        None, sec_val, 100.0 if sec_val > 0 else None]
+                lim_txt = f"Period limit {x[2]:,.0f} Tk · {x[6]}" if x[2] > 0 else "No limit set"
+                miss = int(agg["miss"].sum())
+                nt = " ".join(t for t in (_rp_uom_note(g, "qty") if g["uom"].nunique() > 1 else None,
+                                          f"{miss} issue line(s) have no rate; their value is not included." if miss else None) if t)
+                secs.append(_rp_sec(cols_it, irows, itot, heading=f"ITEMS ISSUED - SECTION: {x[0]}",
+                                    sub=f"{lim_txt} · Issued value {x[3]:,.0f} Tk", note=nt or None))
+        return secs
     notes = ["Issued Value = issued quantity x item rate, per Section (same calculation as the Section Budget page).",
+             "Below the summary, one item-wise table per Section shows exactly which items were issued to that Section (highest value first).",
              f"Status: WARNING = {SB_YELLOW_PCT:g}% or more of the limit used, OVER LIMIT = {SB_RED_PCT:g}% or more."]
     if all_dates:
         notes.append("All dates selected: Used % compares all issues with ONE month's limit. Pick a From/To date for a month-wise comparison.")
@@ -20200,6 +20322,51 @@ def sb_save_limits(fac, limits):
     return True
 
 
+def _sb_clean_name(v):
+    return " ".join(str(v or "").split())
+
+
+@tx
+def sb_add_section(facs, name, limit_fac, limit):
+    """Add a Section to the Section list (same table the Requisition Issue Section dropdown reads) and optionally set its monthly limit."""
+    user = st.session_state.get("user", "")
+    for f in facs:
+        run("INSERT INTO ri_sections (factory_name, section_name) VALUES (%s,%s) ON CONFLICT DO NOTHING", (f, name))
+    if limit and float(limit) > 0:
+        run("""INSERT INTO section_budget_limits (factory_name, section_name, monthly_limit, updated_by, updated_at)
+               VALUES (%s,%s,%s,%s,%s) ON CONFLICT (factory_name, section_name)
+               DO UPDATE SET monthly_limit=EXCLUDED.monthly_limit, updated_by=EXCLUDED.updated_by, updated_at=EXCLUDED.updated_at""",
+            (limit_fac, name, float(limit), user, local_now().strftime("%d-%b-%Y %I:%M %p")))
+    audit("SECTION_ADD", f"{', '.join(facs)}: {name}" + (f" · monthly limit {float(limit):g}" if limit and float(limit) > 0 else ""))
+    return True
+
+
+@tx
+def sb_edit_section(fac, old, new, limit, move_history):
+    """Rename a Section and / or change its monthly limit. With move_history the old issue records, machines and pending
+    lines of this unit also get the new name, so the Section-wise figures stay in ONE line."""
+    user = st.session_state.get("user", "")
+    stamp = local_now().strftime("%d-%b-%Y %I:%M %p")
+    moved = 0
+    if new != old:
+        run("UPDATE ri_sections SET section_name=%s WHERE factory_name=%s AND section_name=%s", (new, fac, old))
+        run("INSERT INTO ri_sections (factory_name, section_name) VALUES (%s,%s) ON CONFLICT DO NOTHING", (fac, new))
+        run("DELETE FROM section_budget_limits WHERE factory_name=%s AND section_name=%s", (fac, old))
+        if move_history:
+            moved = len(run("UPDATE transactions SET section=%s WHERE factory_name=%s AND TRIM(COALESCE(section,''))=%s RETURNING 1",
+                            (new, fac, old)) or [])
+            run("UPDATE machines SET section=%s WHERE factory_name=%s AND TRIM(COALESCE(section,''))=%s", (new, fac, old))
+            if run("SELECT to_regclass('ri_pending_issues') IS NOT NULL")[0][0]:
+                run("UPDATE ri_pending_issues SET section=%s WHERE factory_name=%s AND TRIM(COALESCE(section,''))=%s", (new, fac, old))
+    run("""INSERT INTO section_budget_limits (factory_name, section_name, monthly_limit, updated_by, updated_at)
+           VALUES (%s,%s,%s,%s,%s) ON CONFLICT (factory_name, section_name)
+           DO UPDATE SET monthly_limit=EXCLUDED.monthly_limit, updated_by=EXCLUDED.updated_by, updated_at=EXCLUDED.updated_at""",
+        (fac, new, float(limit or 0), user, stamp))
+    audit("SECTION_EDIT", f"{fac}: '{old}' -> '{new}', monthly limit {float(limit or 0):g}"
+                          + (f", {moved} old issue record(s) renamed" if (new != old and move_history) else ""))
+    return True
+
+
 _SBP_CSS = """<style>
 .st-key-sb_root{--n:#0A1F4D;--g:#C9A24B}
 .sbp-hero{display:flex;align-items:center;gap:16px;padding:18px 22px;border-radius:18px;margin:2px 0 14px;border:1px solid #D9DEE8;
@@ -20301,7 +20468,7 @@ def _tab_section_budget_body():
             rows.append({"Unit": short_fac(u), "Section": "(Section দেওয়া নেই)", "মাসিক সীমা (৳)": 0.0, "ব্যবহার (৳)": round(nos, 0),
                          "বাকি (৳)": None, "ব্যবহার %": None, "অবস্থা": "⚪ সীমা সেট নেই", "_lv": "none"})
     if not rows:
-        st.info("কোনো Section নেই — Requisition Issue পেজে Store Manager আগে Section list সেভ করুন।")
+        st.info("কোনো Section নেই — Store Manager নিচের “➕ Section যোগ” থেকে (বা Requisition Issue পেজে) Section list সেভ করুন।")
     else:
         red = sum(1 for r in rows if r["_lv"] == "red")
         yel = sum(1 for r in rows if r["_lv"] == "yellow")
@@ -20325,6 +20492,46 @@ def _tab_section_budget_body():
                    "🟡 = সীমার ৮০% পার, 🔴 = ১০০% পার। Requisition Issue স্লিপে Section বাছলেই এই সতর্কতা দেখা যায় (সংরক্ষণ আটকায় না)।")
         export_buttons(out, f"section_budget_{mm}_{yy}", f"Section budget {mm} {yy}")
     if is_mgr and not is_cons_view:
+        with st.expander("➕ Section যোগ / ✏️ Section Edit (শুধু Store Manager)"):
+            _all_secs = sorted(set(_ri_section_names(FAC)) | {s_ for (f_, s_) in lim_map if f_ == FAC}, key=str.lower)
+            st.markdown("**➕ নতুন Section যোগ করুন**")
+            ac1, ac2 = st.columns([2, 1])
+            sb_new_nm = ac1.text_input("Section-এর নাম", key="sb_add_name", placeholder="যেমন: Cutting")
+            sb_new_lim = ac2.number_input("মাসিক সীমা (৳) — ০ = সীমা নেই", min_value=0.0, step=1000.0, format="%.0f", key="sb_add_lim")
+            sb_all_f = st.checkbox("সব Factory-তে এই Section যোগ করুন (সীমা শুধু এই Factory-র জন্য)", key="sb_add_all")
+            if st.button("💾 Section যোগ করুন", key="sb_add_btn") and guard():
+                _nm = _sb_clean_name(sb_new_nm)
+                if not _nm:
+                    st.error("Section-এর নাম লিখুন।")
+                elif _nm.lower() in {x.lower() for x in _all_secs}:
+                    st.error(f"‘{_nm}’ Section আগে থেকেই আছে — নিচের Edit থেকে বদলান।")
+                elif sb_add_section(list(FACTORIES) if sb_all_f else [FAC], _nm, FAC, sb_new_lim):
+                    for _k in ("sb_add_name", "sb_add_lim"):
+                        st.session_state.pop(_k, None)
+                    done(f"✅ Section যোগ হয়েছে: {_nm}")
+            st.markdown("---")
+            st.markdown("**✏️ Section Edit (নাম / মাসিক সীমা বদল)**")
+            if not _all_secs:
+                st.caption("আগে একটি Section যোগ করুন।")
+            else:
+                ed_pick = st.selectbox("কোন Section edit করবেন", _all_secs, key="sb_ed_pick")
+                ec1, ec2 = st.columns([2, 1])
+                ed_nm = ec1.text_input("Section-এর নাম", value=ed_pick, key=f"sb_ed_name_{ed_pick}")
+                ed_lim = ec2.number_input("মাসিক সীমা (৳)", min_value=0.0, step=1000.0, format="%.0f",
+                                          value=float(lim_map.get((FAC, ed_pick), 0.0)), key=f"sb_ed_lim_{ed_pick}")
+                ed_mv = st.checkbox("আগের Issue record-এও নতুন নাম বসান (Section-wise হিসাব এক লাইনে থাকবে)", value=True,
+                                    key=f"sb_ed_mv_{ed_pick}",
+                                    help="বন্ধ করলে আগের Issue-গুলো পুরনো নামেই থেকে যাবে এবং আলাদা লাইনে দেখাবে। শুধু Section-এর নাম বদলায়, Item / Qty / Stock কিছু বদলায় না।")
+                if st.button("✏️ Edit সেভ করুন", key="sb_ed_btn") and guard():
+                    _nn = _sb_clean_name(ed_nm)
+                    if not _nn:
+                        st.error("Section-এর নাম খালি রাখা যাবে না।")
+                    elif _nn != ed_pick and _nn.lower() in {x.lower() for x in _all_secs if x != ed_pick}:
+                        st.error(f"‘{_nn}’ নামে আরেকটি Section আগে থেকেই আছে।")
+                    elif _nn == ed_pick and abs(ed_lim - lim_map.get((FAC, ed_pick), 0.0)) < 1e-9:
+                        st.info("কিছু বদলায়নি।")
+                    elif sb_edit_section(FAC, ed_pick, _nn, ed_lim, ed_mv):
+                        done(f"✅ Section edit হয়েছে: {ed_pick}" + (f" → {_nn}" if _nn != ed_pick else ""))
         with st.expander("⚙️ সীমা সেট করুন (শুধু Store Manager)"):
             secs = sorted(set(_ri_section_names(FAC)) | {s for (f, s) in lim_map if f == FAC}, key=str.lower)
             if not secs:
@@ -22245,10 +22452,55 @@ def _mi_pack_builder(data, units, label, sections, y, m, who):
 
 
 # ---------------------------------------------------------------- PAGE 1: UNIT COMPARISON
+_UC_CSS = """<style>
+.uc-head{display:flex;align-items:center;gap:10px;margin:26px 0 4px 0;padding:2px 0 2px 12px;border-left:5px solid #0F766E}
+.uc-head .t{font-size:17px;font-weight:800;color:#0F172A;letter-spacing:.1px}
+.uc-sub{font-size:12.5px;color:#64748B;margin:0 0 10px 17px}
+table.uc{width:100%;border-collapse:separate;border-spacing:0;font-size:13.5px;background:#fff;border:1px solid #E2E8F0;border-radius:14px;overflow:hidden;box-shadow:0 2px 10px rgba(15,23,42,.05)}
+table.uc th{background:#0F172A;color:#fff;text-align:left;padding:11px 14px;font-size:12px;letter-spacing:.4px;font-weight:800}
+table.uc th.n,table.uc td.n{text-align:right;font-variant-numeric:tabular-nums}
+table.uc th.ua{background:#0F766E}table.uc th.ub{background:#C2410C}
+table.uc td{padding:10px 14px;border-top:1px solid #EEF2F6;color:#1E293B;vertical-align:middle}
+table.uc td.m{font-weight:650;width:44%}
+table.uc td.n{font-weight:800;color:#0F172A}
+table.uc td.n small{display:block;font-weight:600;font-size:11.5px;margin-top:2px}
+table.uc tr.g td{background:#F1F5F9;color:#334155;font-size:12px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;border-top:1px solid #E2E8F0;padding:8px 14px}
+table.uc tr:not(.g):hover td{background:#F8FAFC}
+.uc-bar{display:inline-block;vertical-align:middle;width:86px;height:8px;border-radius:99px;background:#E6EAF2;overflow:hidden;margin-right:8px}
+.uc-bar i{display:block;height:100%;border-radius:99px}
+.uc-pct{font-weight:800;font-size:12.5px;vertical-align:middle}
+.uc-unit{font-size:14.5px;font-weight:800;margin:0 0 8px 2px}
+.uc-unit.a{color:#0F766E}.uc-unit.b{color:#C2410C}
+</style>"""
+
+
+def _uc_head(title, sub=""):
+    return (f"<div class='uc-head'><div class='t'>{title}</div></div>"
+            + (f"<div class='uc-sub'>{sub}</div>" if sub else ""))
+
+
+def _uc_sec_html(df):
+    """Top sections of one unit as a small tidy table (Section | Issued | Limit | Used bar)."""
+    h = ["<table class='uc'><tr><th>Section</th><th class='n'>Issued</th><th class='n'>Limit</th><th>Used</th></tr>"]
+    for r in df.itertuples():
+        pct = r.pct
+        if pct is None or pd.isna(pct):
+            used = "<span class='mi-flat'>No limit set</span>"
+        else:
+            c = "#DC2626" if pct >= MI_RED_PCT else ("#D99A06" if pct >= MI_WARN_PCT else "#16A34A")
+            used = (f"<span class='uc-bar'><i style='width:{min(max(float(pct), 0), 100):.0f}%;background:{c}'></i></span>"
+                    f"<span class='uc-pct' style='color:{c}'>{float(pct):.0f}%</span>")
+        lim = _mi_tk(r.limit) if r.limit and float(r.limit) > 0 else "—"
+        h.append(f"<tr><td class='m'>{html_lib.escape(str(r.section))}</td><td class='n'>{_mi_tk(r.used)}</td>"
+                 f"<td class='n'>{lim}</td><td>{used}</td></tr>")
+    h.append("</table>")
+    return "".join(h)
+
+
 def tab_unit_compare():
-    st.markdown(_MI_CSS, unsafe_allow_html=True)
+    st.markdown(_MI_CSS + _UC_CSS, unsafe_allow_html=True)
     st.markdown("<div class='mi-hero'><div class='t'>🏭 Unit Comparison — KC vs Windy</div>"
-                "<div class='s'>দুই unit পাশাপাশি: খরচ, কেনা, stock, বাজেট, Section সীমা, সমস্যা — এক মাসের হিসাব, গত মাসের সাথে তুলনাসহ</div></div>",
+                "<div class='s'>দুই unit পাশাপাশি: খরচ, কেনা, stock, বাজেট, Section সীমা ও সমস্যা — এক মাসের হিসাব, গত মাসের সাথে তুলনাসহ</div></div>",
                 unsafe_allow_html=True)
     y, m = _mi_month_picker("uc")
     units = list(FACTORIES)
@@ -22257,40 +22509,52 @@ def tab_unit_compare():
     a, b = data[units[0]], data[units[1]]
     tot_issue = a["issue"] + b["issue"]
 
+    # ---- 1. headline cards
+    st.markdown(_uc_head("Overview", f"{label} — issue value at a glance"), unsafe_allow_html=True)
     cols = st.columns(4)
-    cols[0].markdown(_mi_card(f"{a['short']} — Issue", _mi_tk(a["issue"]), _mi_delta_html(a["issue"], a["issue_prev"])), unsafe_allow_html=True)
-    cols[1].markdown(_mi_card(f"{b['short']} — Issue", _mi_tk(b["issue"]), _mi_delta_html(b["issue"], b["issue_prev"])), unsafe_allow_html=True)
+    cols[0].markdown(_mi_card(f"{a['short']} — Issue value", _mi_tk(a["issue"]), _mi_delta_html(a["issue"], a["issue_prev"])), unsafe_allow_html=True)
+    cols[1].markdown(_mi_card(f"{b['short']} — Issue value", _mi_tk(b["issue"]), _mi_delta_html(b["issue"], b["issue_prev"])), unsafe_allow_html=True)
     hi = a if a["issue"] >= b["issue"] else b
     share = (hi["issue"] / tot_issue * 100) if tot_issue > 0 else 0
-    cols[2].markdown(_mi_card("বেশি খরচ করেছে", html_lib.escape(hi["short"]) if tot_issue > 0 else "-", f"মোট issue-র {share:.0f}%"), unsafe_allow_html=True)
-    cols[3].markdown(_mi_card("দুই unit মিলিয়ে", _mi_tk(tot_issue), _mi_delta_html(tot_issue, a["issue_prev"] + b["issue_prev"])), unsafe_allow_html=True)
+    cols[2].markdown(_mi_card("Higher spender", html_lib.escape(hi["short"]) if tot_issue > 0 else "-", f"মোট issue-র {share:.0f}%"), unsafe_allow_html=True)
+    cols[3].markdown(_mi_card("Both units combined", _mi_tk(tot_issue), _mi_delta_html(tot_issue, a["issue_prev"] + b["issue_prev"])), unsafe_allow_html=True)
 
+    # ---- 2. side-by-side table, grouped
     def cell(d, key, kind="tk", prev=None, bad_up=True):
         v = d[key]
         txt_ = _mi_tk(v) if kind == "tk" else (f"{v:.0f}%" if kind == "pct" and v is not None else ("-" if kind == "pct" else f"{int(v):,}"))
         if prev is not None:
-            txt_ += f"<br><small>{_mi_delta_html(v, d[prev], bad_up)}</small>"
+            txt_ += f"<small>{_mi_delta_html(v, d[prev], bad_up)}</small>"
         return txt_
 
-    spec = [("💸 Issue value (খরচ)", lambda d: cell(d, "issue", "tk", "issue_prev")),
-            ("🧾 Issue transaction সংখ্যা", lambda d: cell(d, "issue_n", "n")),
-            ("📥 Purchase receipt (কেনা মাল)", lambda d: cell(d, "rcv", "tk", "rcv_prev", False)),
-            ("📦 এখন stock-এর মূল্য", lambda d: cell(d, "stock_val")),
-            ("🔢 Item সংখ্যা / zero stock", lambda d: f"{d['items']:,} / {d['zero_n']:,}"),
-            ("💰 Budget allocated (মাসিক)", lambda d: cell(d, "bud_total")),
-            ("📊 Budget used %", lambda d: cell(d, "bud_pct", "pct")),
-            ("🔴 Budget পার করা Category", lambda d: str(len(d["over_cats"]))),
-            ("🚦 Section সীমা পার / ৮০%+", lambda d: f"{len(d['sec_over'])} / {len(d['sec_warn'])}"),
-            ("📈 হঠাৎ বাড়া Category", lambda d: str(len(d["spikes"]))),
-            ("⚠️ ERP-র সাথে না মেলা item", lambda d: str(d["var_n"])),
-            ("📑 বাকি Requisition line", lambda d: str(d["req_n"])),
-            ("🧷 খোলা Hold Bill (সংখ্যা / টাকা)", lambda d: f"{d['hold_n']} / {_mi_tk(d['hold_val'])}")]
-    rows_html = "".join(f"<tr><td><b>{n}</b></td><td class='n'>{f(a)}</td><td class='n'>{f(b)}</td></tr>" for n, f in spec)
-    st.markdown(f"<div class='section-title'>তুলনা — {label}</div>"
-                f"<table class='mi-tbl'><tr><th>বিষয়</th><th style='text-align:right'>{html_lib.escape(a['unit'])}</th>"
-                f"<th style='text-align:right'>{html_lib.escape(b['unit'])}</th></tr>{rows_html}</table>", unsafe_allow_html=True)
+    groups = [
+        ("💸 Spending & purchase", [
+            ("Issue value", lambda d: cell(d, "issue", "tk", "issue_prev")),
+            ("Issue transactions", lambda d: cell(d, "issue_n", "n")),
+            ("Purchase receipts", lambda d: cell(d, "rcv", "tk", "rcv_prev", False))]),
+        ("📦 Stock", [
+            ("Stock value now", lambda d: cell(d, "stock_val")),
+            ("Items / zero-stock items", lambda d: f"{d['items']:,} / {d['zero_n']:,}")]),
+        ("💰 Budget & section limits", [
+            ("Budget allocated (monthly)", lambda d: cell(d, "bud_total")),
+            ("Budget used", lambda d: cell(d, "bud_pct", "pct")),
+            ("Categories over budget", lambda d: str(len(d["over_cats"]))),
+            ("Sections over limit / above 80%", lambda d: f"{len(d['sec_over'])} / {len(d['sec_warn'])}")]),
+        ("⚠️ Needs attention", [
+            ("Categories with a sudden jump", lambda d: str(len(d["spikes"]))),
+            ("Items not matching ERP", lambda d: str(d["var_n"])),
+            ("Pending requisition lines", lambda d: str(d["req_n"])),
+            ("Open hold bills (count / value)", lambda d: f"{d['hold_n']} / {_mi_tk(d['hold_val'])}")]),
+    ]
+    rows_html = ""
+    for gname, items_ in groups:
+        rows_html += f"<tr class='g'><td colspan='3'>{gname}</td></tr>"
+        rows_html += "".join(f"<tr><td class='m'>{n}</td><td class='n'>{f(a)}</td><td class='n'>{f(b)}</td></tr>" for n, f in items_)
+    st.markdown(_uc_head("Side-by-side comparison", f"{label} — every figure for both units in one table, last-month change under the value"), unsafe_allow_html=True)
+    st.markdown(f"<table class='uc'><tr><th>Measure</th><th class='n ua'>{html_lib.escape(a['unit'])}</th>"
+                f"<th class='n ub'>{html_lib.escape(b['unit'])}</th></tr>{rows_html}</table>", unsafe_allow_html=True)
 
-    # category-wise bar chart, both units side by side
+    # ---- 3. category-wise chart
     ca = a["cats"].set_index("category")["used"] if not a["cats"].empty else pd.Series(dtype=float)
     cb = b["cats"].set_index("category")["used"] if not b["cats"].empty else pd.Series(dtype=float)
     cmp_df = pd.DataFrame({a["short"]: ca, b["short"]: cb}).fillna(0.0)
@@ -22298,35 +22562,35 @@ def tab_unit_compare():
         cmp_df["_t"] = cmp_df.sum(axis=1)
         cmp_df = cmp_df.sort_values("_t", ascending=False).drop(columns="_t")
         cmp_df.index = [str(i) if str(i).strip() else "(No category)" for i in cmp_df.index]
-        st.markdown("<div class='section-title'>Category অনুযায়ী খরচ — KC বনাম Windy (Tk)</div>", unsafe_allow_html=True)
+        st.markdown(_uc_head("Issue value by category", f"{a['short']} vs {b['short']} — top 10 categories (Tk)"), unsafe_allow_html=True)
         st.bar_chart(cmp_df.head(10), use_container_width=True)
         with st.expander("সব Category-র তুলনা (টেবিল / Excel / PDF)"):
             full = cmp_df.reset_index().rename(columns={"index": "Category"})
-            full["Difference (Windy - KC)"] = full[b["short"]] - full[a["short"]]
+            full[f"Difference ({b['short']} - {a['short']})"] = full[b["short"]] - full[a["short"]]
             export_buttons(full.round(0), f"unit_comparison_{label}", f"Category-wise issue value - KC vs Windy - {label}")
             st.dataframe(full.round(0), use_container_width=True, hide_index=True)
 
-    # 6 month total issue line, both units
+    # ---- 4. 6-month trend
     ty, tm = _mi_shift(y, m, -5)
     tdf = _mi_monthly(units, "unit", ty, tm, y, m)
     if not tdf.empty:
         months = [_mi_ym(*_mi_shift(y, m, k)) for k in range(-5, 1)]
         pv = tdf.pivot_table(index="ym", columns="factory_name", values="used", aggfunc="sum", fill_value=0).reindex(months, fill_value=0)
         pv.columns = [short_fac(c) for c in pv.columns]
-        st.markdown("<div class='section-title'>গত ৬ মাসের খরচের ধারা (Tk)</div>", unsafe_allow_html=True)
+        pv = pv[[c for c in (a["short"], b["short"]) if c in pv.columns]]
+        st.markdown(_uc_head("6-month issue trend", "Month by month, oldest to latest (Tk)"), unsafe_allow_html=True)
         st.line_chart(pv, use_container_width=True)
 
+    # ---- 5. top sections
+    st.markdown(_uc_head("Top 5 sections by issue value", f"{label} — against each section's monthly limit"), unsafe_allow_html=True)
     c1, c2 = st.columns(2)
-    for col, d in ((c1, a), (c2, b)):
+    for col, d, cls in ((c1, a, "a"), (c2, b, "b")):
         with col:
-            st.markdown(f"<div class='mi-unit'>{html_lib.escape(d['unit'])} — শীর্ষ ৫ Section</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='uc-unit {cls}'>{html_lib.escape(d['unit'])}</div>", unsafe_allow_html=True)
             if d["secs"].empty:
                 st.caption("Section-এর তথ্য নেই।")
             else:
-                t5 = d["secs"].head(5).copy()
-                t5["Used %"] = t5["pct"].map(lambda v: "—" if pd.isna(v) else f"{v:.0f}%")
-                st.dataframe(t5.rename(columns={"section": "Section", "used": "Issued (Tk)", "limit": "Limit (Tk)"})[["Section", "Issued (Tk)", "Limit (Tk)", "Used %"]].round(0),
-                             use_container_width=True, hide_index=True)
+                st.markdown(_uc_sec_html(d["secs"].head(5)), unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------- PAGE 2: EXECUTIVE SUMMARY
