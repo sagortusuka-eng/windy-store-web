@@ -6931,6 +6931,27 @@ def import_requisition(fac, rows, create_items):
     return new_items
 
 
+@tx
+def set_req_line_budget(fac, lines):
+    """lines = [(req_no, item, size, budget category)] -> sets the Budget category of ALREADY imported requisition lines.
+    The item itself only gets it when it has no real Budget line yet."""
+    n = 0
+    for req_no, item, size, cat in lines:
+        sql = "SELECT id, COALESCE(prod_id,'') AS prod_id FROM requisition_tracking WHERE factory_name=%s AND req_no=%s AND LOWER(item_name)=LOWER(%s)"
+        prm = [fac, req_no, item]
+        if (size or "").strip():
+            sql += " AND (COALESCE(size,'')='' OR LOWER(size)=LOWER(%s))"
+            prm.append(size.strip())
+        for r in q(sql, tuple(prm)):
+            run("UPDATE requisition_tracking SET budget_category=%s WHERE id=%s", (cat, r["id"]))
+            if not is_blank_code(r["prod_id"]):
+                run("""UPDATE inventory SET category=%s WHERE factory_name=%s AND prod_id=%s
+                       AND (COALESCE(category,'')='' OR category=%s)""", (cat, fac, r["prod_id"], _UNCAT))
+            n += 1
+    audit("SET_REQ_BUDGET_CAT", f"{fac}: Budget category set on {n} imported requisition line(s)")
+    return n or None
+
+
 def find_header_row(raw):
     allk = {k for ks in REQ_KEYS.values() for k in ks}
     best, bi = 0, 0
@@ -7219,6 +7240,35 @@ def req_import_view():
             g[0] += 1
             g[1] += p["qty"]
         st.caption("Budget-wise: " + " | ".join(f"{k}: {v[0]} line, qty {v[1]:g}" for k, v in summ.items()))
+    # ---- Lines that were imported earlier: their Budget category can still be set / changed here ----
+    dup_rows = [p for p in parsed if p["result"] == "Already imported"]
+    if dup_rows and bmap:
+        bcats = list(bmap)
+        st.info(f"ℹ️ {len(dup_rows)} ti line age-i import kora ache. Tader Budget Category ekhan theke bachai / thik korte parben.")
+        d_rows, d_lock = [], {}
+        for p in dup_rows:
+            ex = q("SELECT COALESCE(budget_category,'') AS b, COALESCE(prod_id,'') AS pid FROM requisition_tracking "
+                   "WHERE factory_name=%s AND req_no=%s AND LOWER(item_name)=LOWER(%s) ORDER BY id DESC LIMIT 1",
+                   (FAC, p["req_no"], p["item"]))
+            ic = inv_budget_category(FAC, code=ex[0]["pid"]) if ex else ""
+            lk = bool(ic) and ic != _UNCAT and ic in bmap
+            d_lock[p["line"]] = ic if lk else ""
+            cur = ic if lk else ((ex[0]["b"] if ex else "") or guess_budget_category(bcats, p.get("cat_hint", "")))
+            d_rows.append({"Line": p["line"], "Item": p["item"], "Size": p.get("size", ""), "Qty": p["qty"],
+                           "Item status": "Budget line fixed by item" if lk else "Choose", "Budget Category": cur})
+        d_in = pd.DataFrame(d_rows)
+        d_out = st.data_editor(d_in, hide_index=True, use_container_width=True, height=min(80 + 35 * len(d_in), 320),
+                               key=f"req_dup_{hi}_{FAC}_{dup_rows[0]['req_no']}_{len(dup_rows)}",
+                               disabled=["Line", "Item", "Size", "Qty", "Item status"],
+                               column_config={"Budget Category": st.column_config.SelectboxColumn("Budget Category", options=[""] + bcats)})
+        d_pick = {int(r["Line"]): _clean(r["Budget Category"]) for _, r in d_out.iterrows()}
+        if st.button("💾 Budget Category save (age import kora line)", key="req_dup_bc_btn"):
+            chg = [(p["req_no"], p["item"], p.get("size", ""), d_lock[p["line"]] or d_pick.get(p["line"], "")) for p in dup_rows]
+            chg = [c for c in chg if c[3]]
+            if not chg:
+                st.error("Kono Budget Category bachai kora hoyni.")
+            elif set_req_line_budget(FAC, chg):
+                done(f"Budget Category save hoyeche ({len(chg)} line).")
     st.caption(f"Lines to import: {len(ok_rows)} | Skipped/already: {len(parsed) - len(ok_rows)}")
     st.dataframe(pd.DataFrame(parsed).drop(columns=["cat_hint"], errors="ignore"), hide_index=True, use_container_width=True)
     if st.button("✅ Import requisition", type="primary", disabled=not (ok_rows and sim_ack and bc_ok), key="req_import_btn"):
