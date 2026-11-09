@@ -23585,6 +23585,284 @@ with st.sidebar:
 
 sidebar_clock()
 
+# =====================================================================================================================
+#  ITEM JOURNEY (A-Z) - one item: requisition -> audit approve -> sourcing -> receipt (challan) -> issue (SR / section), month-wise
+#  Read-only report. Uses existing tables only (requisition_tracking, transactions, req_receipt_links, audit_logs).
+# =====================================================================================================================
+NAV_ITEM_JOURNEY = "🧭 Item Journey (A–Z)"
+if NAV_ITEM_JOURNEY not in TAB_NAMES:
+    TAB_NAMES.append(NAV_ITEM_JOURNEY)
+
+_IJ_SQL = """SELECT id, req_no, COALESCE(department,'') AS department, req_date, item_name, COALESCE(size,'') AS size,
+             COALESCE(prod_id,'') AS prod_id, COALESCE(uom,'') AS uom, COALESCE(budget_category,'') AS budget_category,
+             req_qty, COALESCE(audit_approved_qty,0) AS aud_qty, COALESCE(actual_received_qty,0) AS rec_qty, po_date, received_date,
+             COALESCE(sourcing_manager,'') AS sourcing_manager, COALESCE(handover_date,'') AS handover_date,
+             COALESCE(supplier_name,'') AS supplier_name, COALESCE(order_date,'') AS order_date, COALESCE(order_note,'') AS order_note
+             FROM requisition_tracking
+             WHERE factory_name=%s AND (prod_id=%s OR (%s<>'' AND LOWER(REGEXP_REPLACE(COALESCE(item_name,''),'[^a-zA-Z0-9]','','g')) LIKE %s))
+             ORDER BY id"""
+
+
+def _ij_req_lines(fac, item):
+    key = norm_name(item["item_name"])[:5]
+    prm = (fac, item["prod_id"], key, key + "%")
+    try:
+        rows = q_c(_IJ_SQL, prm)
+    except psycopg2.errors.UndefinedColumn:      # new Tracker columns not created yet: create them (additive), retry
+        ensure_req_tracker_schema()
+        _bump_data_version()
+        rows = q_c(_IJ_SQL, prm)
+    inv = {"prod_id": item["prod_id"], "item_name": item["item_name"], "size": item["size"]}
+    return [req_calc(dict(r)) for r in rows if _req_line_matches(inv, dict(r))]
+
+
+def _ij_audit_approvals(lines):
+    """{(req_no, item_name lower): (timestamp text, user)} - the LAST time the Audit Approved Qty was saved for that line."""
+    out = {}
+    if not lines:
+        return out
+    pats = sorted({f"Req {l['req_no']} / %" for l in lines})
+    try:
+        rows = q("SELECT timestamp, username, details FROM audit_logs WHERE action_type='EDIT_AUDIT_APPROVED' "
+                 "AND details LIKE ANY(%s) ORDER BY id", (pats,))
+    except Exception:
+        return out
+    for r in rows:
+        m = re.match(r"^Req (.+?) / (.+?): approved ", str(r["details"] or ""))
+        if m:
+            out[(m.group(1), m.group(2).strip().lower())] = (str(r["timestamp"] or ""), str(r["username"] or ""))
+    return out
+
+
+def _ij_ts(s):
+    try:
+        return datetime.strptime(str(s)[:19], "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def _ij_fmt(dt):
+    return dt.strftime(DATE_FMT) if dt else ""
+
+
+def tab_item_journey():
+    st.markdown(_IA_CSS, unsafe_allow_html=True)
+    st.title("🧭 Item Journey (A–Z)")
+    st.caption("একটা item খুঁজুন — কোন মাসে কত Requisition, কত Audit Approved, কত Receive (Challan সহ), কত Issue (SR / Section সহ), "
+               "কত Pending আর কোন Sourcing Manager-কে দেওয়া হয়েছিল — সব এক জায়গায়। শুধু দেখার রিপোর্ট, কিছু বদলায় না।")
+    term = st.text_input("🔍 Item খুঁজুন (নাম / ERP code / serial / size / SL)", key="ij_search", placeholder="যেমন: Poly Bag").strip()
+    if not term:
+        st.info("ওপরের বক্সে item-এর নাম, ERP code বা SL লিখুন।")
+        return
+    fsql, fp = fw(FAC)
+    pat = f"%{term.lower()}%"
+    sl_clause, sl_par = ("", [])
+    if term.isdigit():
+        sl_clause, sl_par = " OR sl_no=%s", [int(term)]
+    items = q_c(f"""SELECT factory_name, sl_no, COALESCE(prod_id,'') AS prod_id, COALESCE(item_name,'') AS item_name,
+                    COALESCE(size,'') AS size, COALESCE(current_stock,0) AS stock, COALESCE(erp_stock,0) AS erp,
+                    COALESCE(NULLIF(unit_name,''),'Pcs') AS unit, COALESCE(category,'') AS category
+                    FROM inventory WHERE (LOWER(item_name) LIKE %s OR LOWER(COALESCE(prod_id,'')) LIKE %s
+                          OR LOWER(COALESCE(serial_no,'')) LIKE %s OR LOWER(COALESCE(size,'')) LIKE %s{sl_clause}){fsql}
+                    ORDER BY item_name, size LIMIT 80""", [pat, pat, pat, pat] + sl_par + fp)
+    if not items:
+        st.warning("এই নামে কোনো item পাওয়া যায়নি।")
+        return
+    labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id'] or '-'} · {short_fac(r['factory_name'])} · SL {r['sl_no']}": r for r in items}
+    item = labels[st.selectbox(f"{len(items)}টি item পাওয়া গেছে — একটি বাছুন", list(labels), key="ij_pick")]
+    fac, sl, unit = item["factory_name"], int(item["sl_no"]), item["unit"]
+    d1, d2, plabel = report_period("ij", label="📅 সময়কাল (মাস / তারিখ)")
+
+    def in_rng(dt):
+        return d1 is None or (dt is not None and d1 <= dt.date() <= d2)
+
+    # ---------------- load ----------------
+    lines = [l for l in _ij_req_lines(fac, item) if in_rng(parse_date(l["req_date"]))]
+    appr = _ij_audit_approvals(lines)
+    txd = qdf_c("""SELECT id, date, time, trans_type, qty, COALESCE(officer_name,'') AS officer, COALESCE(req_no,'') AS sr_no,
+                   COALESCE(section,'') AS section, COALESCE(notes,'') AS notes, COALESCE(supplier_name,'') AS supplier,
+                   COALESCE(challan_no,'') AS challan
+                   FROM transactions WHERE factory_name=%s AND sl_no=%s ORDER BY id""", (fac, sl))
+    txs = []
+    for r in txd.to_dict("records"):
+        dt = parse_date(r["date"])
+        if in_rng(dt) and r["trans_type"] != "Opening Balance":
+            txs.append({**r, "_dt": dt, "qty": float(r["qty"] or 0)})
+    rec_tx = [t for t in txs if t["trans_type"] in RECEIPT_TYPES]
+    iss_tx = [t for t in txs if t["trans_type"] in ISSUE_TYPES or t["trans_type"] == "Stock Adjustment (-)"]
+    # receipt <-> requisition links (written when a Supplier Receipt was auto-added to a requisition line)
+    by_tx, by_req = {}, {}
+    ids_r = [int(l["id"]) for l in lines]
+    ids_t = [int(t["id"]) for t in rec_tx if t["trans_type"] == "Supplier. Rec"]
+    if ids_r or ids_t:
+        try:
+            for k in q("""SELECT l.tx_id, l.req_id, l.qty, r.req_no FROM req_receipt_links l
+                          LEFT JOIN requisition_tracking r ON r.id=l.req_id WHERE l.req_id = ANY(%s) OR l.tx_id = ANY(%s)""", (ids_r, ids_t)):
+                by_tx.setdefault(int(k["tx_id"]), []).append((k["req_no"] or "?", float(k["qty"] or 0)))
+                by_req.setdefault(int(k["req_id"]), []).append(int(k["tx_id"]))
+        except Exception:
+            pass
+    tx_by_id = {int(t["id"]): t for t in txs}
+
+    # ---------------- totals / hero ----------------
+    req_t = sum(l["req_qty"] for l in lines)
+    aud_t = sum(l["aud_qty"] for l in lines)
+    rec_sup = sum(t["qty"] for t in rec_tx if t["trans_type"] == "Supplier. Rec")
+    iss_t = sum(t["qty"] for t in iss_tx if t["trans_type"] == "Issued")
+    pend_t = sum(l["pending"] for l in lines)
+    st.markdown(f'<div class="ia-hero"><div class="t">{_ia_e(item["item_name"])}</div><div class="s">{_ia_e(fac)} · SL {sl}</div>'
+                f'<span class="ia-chip">ERP {_ia_e(item["prod_id"] or "-")}</span><span class="ia-chip">Size {_ia_e(item["size"] or "-")}</span>'
+                f'<span class="ia-chip">Unit {_ia_e(unit)}</span><span class="ia-chip">Budget: {_ia_e(item["category"] or "-")}</span>'
+                f'<span class="ia-chip">📅 {_ia_e(plabel)}</span></div>', unsafe_allow_html=True)
+
+    def kpi(cls, label, val, sub=""):
+        return f'<div class="ia-k {cls}"><div class="l">{label}</div><div class="v">{_ia_g(val)}</div><div class="d">{sub}</div></div>'
+    st.markdown('<div class="ia-kpis">' + kpi("t", "এখনকার স্টক", item["stock"], f"ERP: {_ia_g(item['erp'])} {_ia_e(unit)}")
+                + kpi("b", "Requisition Qty", req_t, f"{len(lines)} line") + kpi("x", "Audit Approved", aud_t)
+                + kpi("g", "Received (Supplier)", rec_sup, f"{len([t for t in rec_tx if t['trans_type'] == 'Supplier. Rec'])} receipt")
+                + kpi("a", "Pending", pend_t, "Req-er hishabe") + kpi("r", "Issued", iss_t, f"{len([t for t in iss_tx if t['trans_type'] == 'Issued'])} issue")
+                + '</div>', unsafe_allow_html=True)
+    if not lines and not txs:
+        st.info("এই সময়ে এই item-এর কোনো Requisition বা Transaction নেই।")
+        return
+
+    sec = lazy_tab_select(["📅 Month-wise", "📑 Requisition status", "📥 Receipts & Challan", "📤 Issues (SR / Section)", "🧭 A–Z Timeline"], "lz_ij")
+    slabel = {k: v for k, v in TRANS_LABELS.items()}
+
+    # ---------------- 1. month-wise ----------------
+    if sec == 0:
+        mon = {}
+
+        def m(dt):
+            return mon.setdefault(dt.strftime("%Y-%m") if dt else "0000-00",
+                                  {"M": dt.strftime("%b-%Y") if dt else "(date nei)", "Req lines": 0, "Requisition Qty": 0.0, "Audit Approved": 0.0,
+                                   "Received": 0.0, "Other IN (Internal / Adj +)": 0.0, "Issued": 0.0, "Other OUT (Internal / Adj −)": 0.0})
+        for l in lines:
+            g = m(parse_date(l["req_date"]))
+            g["Req lines"] += 1
+            g["Requisition Qty"] += l["req_qty"]
+            g["Audit Approved"] += l["aud_qty"]
+        for t in txs:
+            g = m(t["_dt"])
+            ty = t["trans_type"]
+            if ty == "Supplier. Rec":
+                g["Received"] += t["qty"]
+            elif ty in RECEIPT_TYPES:
+                g["Other IN (Internal / Adj +)"] += t["qty"]
+            elif ty == "Issued":
+                g["Issued"] += t["qty"]
+            elif ty in ISSUE_TYPES or ty == "Stock Adjustment (-)":
+                g["Other OUT (Internal / Adj −)"] += t["qty"]
+        rows = [mon[k] for k in sorted(mon)]
+        df = pd.DataFrame(rows).rename(columns={"M": "Month"})
+        tot = {c: float(df[c].sum()) for c in df.columns if c != "Month"}
+        df = pd.concat([df, pd.DataFrame([{"Month": "TOTAL", **tot}])], ignore_index=True)
+        st.dataframe(df, hide_index=True, use_container_width=True, height=min(90 + 36 * len(df), 520))
+        if len(rows) > 1:
+            st.bar_chart(pd.DataFrame(rows).set_index("M")[["Received", "Issued"]])
+        st.caption("Requisition / Audit Approved → Req Date-er mash dhore. Received / Issued → transaction date-er mash dhore.")
+        export_buttons(df, f"item_journey_month_{sl}")
+
+    # ---------------- 2. requisition status ----------------
+    elif sec == 1:
+        if not lines:
+            st.info("এই সময়ে এই item-এর কোনো Requisition নেই।")
+            return
+        out = []
+        for l in sorted(lines, key=lambda x: (parse_date(x["req_date"]) or datetime.max, x["id"])):
+            ap = appr.get((l["req_no"], str(l["item_name"]).strip().lower()))
+            recs = []
+            for tid in by_req.get(int(l["id"]), []):
+                t = tx_by_id.get(tid)
+                if t:
+                    recs.append(f"{t['date']}: {t['qty']:g}" + (f" (Challan {t['challan']})" if t["challan"] else ""))
+            out.append({"Req No": l["req_no"], "Department": l["department"], "Budget Category": l["budget_category"],
+                        "Req Date (submitted)": l["req_date"], "Req Qty": l["req_qty"], "Audit Approved": l["aud_qty"],
+                        "Approved on": (_ij_fmt(_ij_ts(ap[0])) if ap else ""), "Approved by": (ap[1] if ap else ""),
+                        "Received": l["rec_qty"], "Pending": l["pending"], "Status": l["calc_status"],
+                        "Sourcing Manager": l["sourcing_manager"], "Handover Date": l["handover_date"],
+                        "Supplier": l["supplier_name"], "Order Date": l["order_date"], "PO Date": l["po_date"] or "",
+                        "Last Received Date": l["received_date"] or "", "Received details": " | ".join(recs),
+                        "Age (days)": l["age"]})
+        df = pd.DataFrame(out)
+        st.dataframe(df, hide_index=True, use_container_width=True, height=min(90 + 36 * len(df), 560))
+        st.caption("'Approved on / by' → Audit Approved Qty last save howar log theke. 'Received details' → Supplier Receipt ja ei line-e auto-jora hoyechilo.")
+        export_buttons(df, f"item_journey_requisitions_{sl}")
+
+    # ---------------- 3. receipts ----------------
+    elif sec == 2:
+        if not rec_tx:
+            st.info("এই সময়ে কোনো Receipt নেই।")
+            return
+        out = []
+        for t in sorted(rec_tx, key=lambda x: (x["_dt"] or datetime.max, x["id"])):
+            lk = by_tx.get(int(t["id"]), [])
+            out.append({"Date": t["date"], "Type": slabel.get(t["trans_type"], t["trans_type"]), "Qty": t["qty"],
+                        "Challan No": t["challan"], "Supplier": t["supplier"],
+                        "Against Requisition": ", ".join(f"{n} ({v:g})" for n, v in lk) if lk else ("(not linked)" if t["trans_type"] == "Supplier. Rec" else ""),
+                        "Officer": t["officer"], "Notes": t["notes"]})
+        df = pd.DataFrame(out)
+        st.dataframe(df, hide_index=True, use_container_width=True, height=min(90 + 36 * len(df), 520))
+        st.caption(f"মোট Receipt: {sum(t['qty'] for t in rec_tx):g} {unit} · Supplier Receipt: {rec_sup:g}")
+        export_buttons(df, f"item_journey_receipts_{sl}")
+
+    # ---------------- 4. issues ----------------
+    elif sec == 3:
+        if not iss_tx:
+            st.info("এই সময়ে কোনো Issue নেই।")
+            return
+        out = []
+        for t in sorted(iss_tx, key=lambda x: (x["_dt"] or datetime.max, x["id"])):
+            out.append({"Date": t["date"], "Type": slabel.get(t["trans_type"], t["trans_type"]), "Qty": t["qty"],
+                        "SR / Issue Slip No": t["sr_no"], "Section": t["section"], "Officer": t["officer"], "Notes": t["notes"]})
+        df = pd.DataFrame(out)
+        st.dataframe(df, hide_index=True, use_container_width=True, height=min(90 + 36 * len(df), 520))
+        export_buttons(df, f"item_journey_issues_{sl}")
+        sm = {}
+        for t in iss_tx:
+            k = t["section"] or "(Section nei)"
+            g = sm.setdefault(k, {"Section": k, "Issues": 0, "Qty": 0.0, "First": t["_dt"], "Last": t["_dt"]})
+            g["Issues"] += 1
+            g["Qty"] += t["qty"]
+            if t["_dt"] and (g["First"] is None or t["_dt"] < g["First"]):
+                g["First"] = t["_dt"]
+            if t["_dt"] and (g["Last"] is None or t["_dt"] > g["Last"]):
+                g["Last"] = t["_dt"]
+        sdf = pd.DataFrame([{**g, "First": _ij_fmt(g["First"]), "Last": _ij_fmt(g["Last"])} for g in sorted(sm.values(), key=lambda x: -x["Qty"])])
+        st.markdown("**🏭 Section-wise Issue**")
+        st.dataframe(sdf, hide_index=True, use_container_width=True, height=min(90 + 36 * len(sdf), 360))
+
+    # ---------------- 5. A-Z timeline ----------------
+    else:
+        ev = []
+        for l in lines:
+            ref = l["req_no"]
+            ev.append((parse_date(l["req_date"]), "📑 Requisition submitted", l["req_qty"], ref, l["department"], "", f"Budget: {l['budget_category'] or '-'}"))
+            ap = appr.get((l["req_no"], str(l["item_name"]).strip().lower()))
+            if ap:
+                ev.append((_ij_ts(ap[0]), "✔️ Audit approved", l["aud_qty"], ref, "", ap[1], "Last approved-qty save"))
+            if l["handover_date"]:
+                ev.append((parse_date(l["handover_date"]), "📨 Given to Sourcing", None, ref, l["sourcing_manager"], "", ""))
+            if l["order_date"]:
+                ev.append((parse_date(l["order_date"]), "🛒 Supplier ordered", None, ref, l["supplier_name"], "", l["order_note"]))
+            if l["po_date"]:
+                ev.append((parse_date(l["po_date"]), "🧾 PO issued", None, ref, l["supplier_name"], "", ""))
+        for t in txs:
+            if t["trans_type"] in RECEIPT_TYPES:
+                lk = by_tx.get(int(t["id"]), [])
+                ev.append((t["_dt"], "📥 " + slabel.get(t["trans_type"], t["trans_type"]).split(" ", 1)[-1], t["qty"],
+                           ("Challan " + t["challan"]) if t["challan"] else "", t["supplier"], t["officer"],
+                           ("Against " + ", ".join(n for n, _ in lk)) if lk else ""))
+            elif t["trans_type"] in ISSUE_TYPES or t["trans_type"] == "Stock Adjustment (-)":
+                ev.append((t["_dt"], "📤 " + slabel.get(t["trans_type"], t["trans_type"]).split(" ", 1)[-1], t["qty"],
+                           ("SR " + t["sr_no"]) if t["sr_no"] else "", t["section"], t["officer"], t["notes"]))
+        ev.sort(key=lambda e: e[0] or datetime.max)
+        df = pd.DataFrame([{"Date": _ij_fmt(e[0]), "Event": e[1], "Qty": (e[2] if e[2] is not None else None), "Reference": e[3],
+                            "Section / Supplier / Manager / Dept": e[4], "By": e[5], "Details": e[6]} for e in ev])
+        st.dataframe(df, hide_index=True, use_container_width=True, height=min(90 + 36 * len(df), 620))
+        export_buttons(df, f"item_journey_timeline_{sl}")
+
+
 # ---- Sidebar navigation: expandable grouped links (active group shows its pages). UI only: every choice writes the same NAV_KEY route
 #      value the old buttons wrote, so all route strings, shortcuts (e.g. ERP Audit card) and RENDERERS are unchanged.
 NAV_GROUPS = [
@@ -23616,6 +23894,7 @@ NAV_GROUPS = [
         ("Data Health", NAV_DATA_HEALTH),
         ("Monthly Stock Check", NAV_MSC),
         ("Item Audit", NAV_ITEM_AUDIT),
+        ("Item Journey (A–Z)", NAV_ITEM_JOURNEY),
     ]),
     ("Finance & Reports", [
         ("Reports", NAV_REPORTS),
@@ -23797,7 +24076,8 @@ RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, t
              tab_stock_cover, tab_data_health, tab_log_sheet, tab_high_value, tab_req_issue, tab_gate_pass, tab_hold_bills,
              tab_monthly_stock_check, tab_machine_cost, tab_shift_handover, tab_section_budget,
              tab_warranty, tab_scrap, tab_old_materials, tab_price_history, tab_item_audit,
-             tab_unit_compare, tab_exec_summary, tab_mgmt_pack, tab_consumption_trend, tab_issued_stock_check]
+             tab_unit_compare, tab_exec_summary, tab_mgmt_pack, tab_consumption_trend, tab_issued_stock_check,
+             tab_item_journey]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
 # --- tab switch: no stacked blank space at the top + always start at the top of the new page (CSS/JS only, no extra DB work) ---
 st.markdown("""<style>
