@@ -6656,14 +6656,50 @@ def req_auto_receive(fac, sl, pid, qty, date_s):
              (fac, sl))
     if not last:
         return []
-    return _req_alloc(fac, pid, float(qty), date_s, int(last[0]["id"]))
+    return _req_alloc(fac, pid, float(qty), date_s, int(last[0]["id"]), sl)
 
 
-def _req_alloc(fac, pid, qty, date_s, tx_id):
-    rows = q("""SELECT id, req_no, req_date, req_qty, COALESCE(audit_approved_qty,0) AS aud, COALESCE(actual_received_qty,0) AS rec
-                FROM requisition_tracking WHERE factory_name=%s AND prod_id=%s""", (fac, pid))
+def _req_size_key(sz):
+    """'B-120' and '120' are the same size: compare without a leading letter prefix."""
+    k = norm_size(sz)
+    return re.sub(r"^[a-z]+", "", k) or k
+
+
+def _req_line_matches(inv, r):
+    """Does this inventory item (dict: prod_id, item_name, size) belong to this requisition line (dict: prod_id, item_name, size)?
+    Sizes must agree when both are given; then the ERP code (also the code without a size suffix) or the item name decides.
+    A name that only STARTS with the other (e.g. 'V-Belt-B 106' vs 'V Belt-B') is accepted only when both sizes are present and equal."""
+    rs, isz = _req_size_key(r.get("size")), _req_size_key(inv.get("size"))
+    if rs and isz and rs != isz:
+        return False
+    rp_ = str(r.get("prod_id") or "").strip().lower()
+    ip_ = str(inv.get("prod_id") or "").strip().lower()
+    if rp_ and not is_blank_code(rp_) and (rp_ == ip_ or rp_ == code_base(inv.get("prod_id"), inv.get("size")).lower()):
+        return True
+    ni, nr = norm_name(inv.get("item_name")), norm_name(r.get("item_name"))
+    if not ni or not nr:
+        return False
+    if ni == nr:
+        return True
+    return bool(rs and isz and (ni.startswith(nr) or nr.startswith(ni)))
+
+
+def _req_alloc(fac, pid, qty, date_s, tx_id, sl=None):
+    if sl is not None:
+        x = q("SELECT prod_id, item_name, COALESCE(size,'') AS size FROM inventory WHERE factory_name=%s AND sl_no=%s", (fac, int(sl)))
+    else:
+        x = q("SELECT prod_id, item_name, COALESCE(size,'') AS size FROM inventory WHERE factory_name=%s AND prod_id=%s LIMIT 1", (fac, pid))
+    inv = dict(x[0]) if x else {"prod_id": pid, "item_name": "", "size": ""}
+    key = norm_name(inv.get("item_name"))[:5]
+    rows = q("""SELECT id, req_no, req_date, req_qty, COALESCE(audit_approved_qty,0) AS aud, COALESCE(actual_received_qty,0) AS rec,
+                       COALESCE(prod_id,'') AS prod_id, COALESCE(item_name,'') AS item_name, COALESCE(size,'') AS size
+                FROM requisition_tracking
+                WHERE factory_name=%s AND (prod_id=%s OR (%s<>'' AND LOWER(REGEXP_REPLACE(COALESCE(item_name,''),'[^a-zA-Z0-9]','','g')) LIKE %s))""",
+             (fac, pid, key, key + "%"))
     cand = []
     for r in rows:
+        if not _req_line_matches(inv, dict(r)):
+            continue
         aud, req, rec = float(r["aud"] or 0), float(r["req_qty"] or 0), float(r["rec"] or 0)
         pend = (aud if aud > 0 else req) - rec     # same rule as the Requisition tab's pending quantity
         if pend > 1e-9:
@@ -6682,6 +6718,57 @@ def _req_alloc(fac, pid, qty, date_s, tx_id):
     if out:
         audit("REQ_AUTO_RECEIVE", f"{fac}: receipt tx {tx_id} of {pid} qty {qty:g} -> " + ", ".join(f"{n} +{v:g}" for n, v in out))
     return out
+
+
+def req_rematch_plan(fac, req_no):
+    """Read-only: Supplier Receipts that were never linked to any requisition but belong to this requisition's open lines.
+    Returns a list of dicts (req_id, tx_id, take, date, item, size, tx_qty)."""
+    lines = q("""SELECT id, req_date, req_qty, COALESCE(audit_approved_qty,0) AS aud, COALESCE(actual_received_qty,0) AS rec,
+                        COALESCE(prod_id,'') AS prod_id, COALESCE(item_name,'') AS item_name, COALESCE(size,'') AS size
+                 FROM requisition_tracking WHERE factory_name=%s AND req_no=%s ORDER BY id""", (fac, req_no))
+    plan, used = [], {}
+    for ln in lines:
+        ln = dict(ln)
+        aud, req, rec = float(ln["aud"] or 0), float(ln["req_qty"] or 0), float(ln["rec"] or 0)
+        pend = (aud if aud > 0 else req) - rec
+        if pend <= 1e-9:
+            continue
+        key = norm_name(ln["item_name"])[:5]
+        d0 = parse_date(ln["req_date"])
+        cands = q("""SELECT t.id, t.date, COALESCE(t.qty,0) AS qty, i.prod_id, i.item_name, COALESCE(i.size,'') AS size
+                     FROM transactions t JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                     WHERE t.factory_name=%s AND t.trans_type='Supplier. Rec'
+                       AND NOT EXISTS (SELECT 1 FROM req_receipt_links l WHERE l.tx_id=t.id)
+                       AND (i.prod_id=%s OR (%s<>'' AND LOWER(REGEXP_REPLACE(COALESCE(i.item_name,''),'[^a-zA-Z0-9]','','g')) LIKE %s))
+                     ORDER BY t.id""", (fac, ln["prod_id"], key, key + "%"))
+        for c in cands:
+            if pend <= 1e-9:
+                break
+            c = dict(c)
+            td = parse_date(c["date"])
+            if d0 and td and td < d0:
+                continue
+            if not _req_line_matches(c, ln):
+                continue
+            avail = float(c["qty"]) - used.get(c["id"], 0.0)
+            if avail <= 1e-9:
+                continue
+            take = min(avail, pend)
+            used[c["id"]] = used.get(c["id"], 0.0) + take
+            pend -= take
+            plan.append({"req_id": int(ln["id"]), "tx_id": int(c["id"]), "take": take, "date": c["date"],
+                         "item": ln["item_name"], "size": ln["size"], "tx_item": c["item_name"], "tx_qty": float(c["qty"])})
+    return plan
+
+
+@tx
+def req_rematch_apply(fac, req_no, plan):
+    for p in plan:
+        run("UPDATE requisition_tracking SET actual_received_qty=COALESCE(actual_received_qty,0)+%s, received_date=%s WHERE id=%s",
+            (p["take"], p["date"], p["req_id"]))
+        run("INSERT INTO req_receipt_links (tx_id, req_id, qty) VALUES (%s,%s,%s)", (p["tx_id"], p["req_id"], p["take"]))
+    audit("REQ_RECEIPT_REMATCH", f"{fac}: Req {req_no} <- " + ", ".join(f"TX-{p['tx_id']} +{p['take']:g}" for p in plan))
+    return True
 
 
 def req_undo_receipt(tx_id, take_back=None):
@@ -7375,6 +7462,27 @@ def req_tracker_view():
                         st.info("Kono poriborton nei.")
                     elif set_req_sizes(ch, req_no):
                         done(f"Size updated ({len(ch)} line).")
+    if role not in READ_ONLY_ROLES and pend_t > 1e-9:
+        with st.expander("🔄 মাল Receive হয়েছে কিন্তু Received 0 দেখাচ্ছে? — Supplier Receipt থেকে মিলিয়ে নিন"):
+            st.caption("Item-এর নাম / Size / ERP Code মিলিয়ে এই Requisition-এর সাথে যুক্ত হয়নি এমন Supplier Receipt খোঁজা হবে। "
+                       "আগে দেখুন কোন Receipt কোন item-এ যাবে, ঠিক থাকলে তবেই যোগ হবে।")
+            _rm_key = f"rqt_rm_{kk}"
+            if st.button("🔍 Receipt খুঁজুন", key=f"rqt_rm_find_{kk}"):
+                st.session_state[_rm_key] = req_rematch_plan(fac_name, req_no)
+            _plan = st.session_state.get(_rm_key)
+            if _plan is not None:
+                if not _plan:
+                    st.info("মেলে এমন কোনো আলাদা Supplier Receipt পাওয়া যায়নি (হয় আগেই যুক্ত হয়েছে, নয়তো নাম / Size মেলেনি)।")
+                else:
+                    st.dataframe(pd.DataFrame([{"Requisition Item": p["item"], "Size": p["size"], "Receipt Item": p["tx_item"],
+                                                "Receipt TX": f"TX-{p['tx_id']}", "Receipt Date": p["date"],
+                                                "Receipt Qty": p["tx_qty"], "Received-এ যোগ হবে": p["take"]} for p in _plan]),
+                                 hide_index=True, use_container_width=True)
+                    if st.button("✅ Received qty-তে যোগ করুন", key=f"rqt_rm_apply_{kk}", type="primary") and guard():
+                        if req_rematch_apply(fac_name, req_no, _plan):
+                            st.session_state.pop(_rm_key, None)
+                            done(f"Received qty আপডেট হয়েছে ({len(_plan)} line).")
+
     st.markdown('<div class="rq-h2">✔️ Audit Approved Qty</div>', unsafe_allow_html=True)
     if not can_set_audit_qty():
         st.caption("এই role শুধু দেখতে পারে — Audit Approved Qty শুধু Store Officer / Store Manager / Executive দিতে পারবেন।")
@@ -18318,6 +18426,93 @@ def rp_section_budget(P):
     return _rp_blocks(P, build), notes
 
 
+def rp_dept_requisition(P):
+    sel = ("id, factory_name, req_no, department, req_date, item_name, req_qty, audit_approved_qty AS aud_qty, actual_received_qty AS rec_qty, "
+           "po_date, received_date, COALESCE(prod_id,'') AS prod_id, COALESCE(size,'') AS size, COALESCE(uom,'') AS uom, "
+           "COALESCE(sourcing_manager,'') AS sourcing_manager, COALESCE(handover_date,'') AS handover_date, "
+           "COALESCE(supplier_name,'') AS supplier_name, COALESCE(order_date,'') AS order_date, COALESCE(order_note,'') AS order_note")
+
+    def _load():
+        return q_c(f"SELECT {sel} FROM requisition_tracking WHERE factory_name = ANY(%s) ORDER BY id", (list(P["units"]),))
+    try:
+        raw = _load()
+    except psycopg2.errors.UndefinedColumn:
+        ensure_req_tracker_schema()
+        _bump_data_version()
+        raw = _load()
+    NODEP = "(Department not given)"
+    d1, d2, term, stf, dsel = P["d1"], P["d2"], (P.get("item") or "").lower(), P.get("status"), P.get("dept")
+    keep = []
+    for r in (req_calc(dict(x)) for x in raw):
+        r["_dep"] = (r["department"] or "").strip() or NODEP
+        if dsel and r["_dep"] != dsel:
+            continue
+        if d1 and d2:
+            d = parse_date(r["req_date"])
+            if not d or not (d1 <= d.date() <= d2):
+                continue
+        if term and term not in f"{r['item_name']} {r['req_no']} {r['prod_id']} {r['size']}".lower():
+            continue
+        if stf == "Pending (balance > 0)" and r["pending"] <= 1e-9:
+            continue
+        if stf == "Fully Received" and r["calc_status"] != "Fully Received":
+            continue
+        if stf == "Audit not approved" and not (r["aud_qty"] <= 0 and r["rec_qty"] <= 0):
+            continue
+        keep.append(r)
+    itemwise = bool(P.get("itemwise"))
+
+    def pc(rec, base):
+        return min(rec / base * 100.0, 100.0) if base > 0 else 0.0
+    c_sum = [("SL", "i"), ("Department", "t"), ("Requisitions", "i"), ("Item Lines", "i"), ("Requested", "q"), ("Audit Approved", "q"),
+             ("Received", "q"), ("Pending", "q"), ("Received %", "p")]
+    c_req = [("SL", "i"), ("Req No", "t"), ("Req Date", "d"), ("Item Lines", "i"), ("Requested", "q"), ("Audit Approved", "q"),
+             ("Received", "q"), ("Pending", "q"), ("Received %", "p"), ("Status", "t")]
+    c_itm = [("SL", "i"), ("Req No", "t"), ("Req Date", "d"), ("Item", "t"), ("Size", "t"), ("ERP Code", "t"), ("Requested", "q"),
+             ("Audit Approved", "q"), ("Received", "q"), ("Pending", "q"), ("Status", "t")]
+
+    def build(u):
+        rs = [r for r in keep if r["factory_name"] == u]
+        if not rs:
+            return []
+        deps = {}
+        for r in rs:
+            deps.setdefault(r["_dep"], []).append(r)
+        order = sorted(deps, key=lambda k: (-sum(x["pending"] for x in deps[k]), k.lower()))
+        srows = []
+        for n, dn in enumerate(order, 1):
+            ls = deps[dn]
+            srows.append([n, dn, len({str(x["req_no"]).strip() for x in ls}), len(ls), sum(x["req_qty"] for x in ls), sum(x["aud_qty"] for x in ls),
+                          sum(x["rec_qty"] for x in ls), sum(x["pending"] for x in ls), pc(sum(x["rec_qty"] for x in ls), sum(x["base"] for x in ls))])
+        stot = [f"TOTAL - {u}", None, len({(str(x["req_no"]).strip()) for x in rs}), len(rs), sum(x["req_qty"] for x in rs), sum(x["aud_qty"] for x in rs),
+                sum(x["rec_qty"] for x in rs), sum(x["pending"] for x in rs), pc(sum(x["rec_qty"] for x in rs), sum(x["base"] for x in rs))]
+        secs = [_rp_sec(c_sum, srows, stot, heading="DEPARTMENT-WISE SUMMARY")]
+        for dn in order:
+            ls = deps[dn]
+            if itemwise:
+                irows = [[n, x["req_no"], x["req_date"], x["item_name"], x["size"], x["prod_id"], x["req_qty"], x["aud_qty"], x["rec_qty"],
+                          x["pending"], x["calc_status"]] for n, x in enumerate(sorted(ls, key=lambda z: (str(z["req_no"]), z["id"])), 1)]
+                itot = [f"Total - {dn} ({len(ls)} item line(s))", None, None, None, None, None, sum(x["req_qty"] for x in ls),
+                        sum(x["aud_qty"] for x in ls), sum(x["rec_qty"] for x in ls), sum(x["pending"] for x in ls), None]
+                secs.append(_rp_sec(c_itm, irows, itot, heading=f"DEPARTMENT: {dn} - ITEM-WISE"))
+            else:
+                g = {}
+                for x in ls:
+                    g.setdefault(str(x["req_no"] or "").strip(), []).append(x)
+                rrows = []
+                for n, (rn, lg) in enumerate(sorted(g.items(), key=lambda kv: -max(z["id"] for z in kv[1])), 1):
+                    dts = [parse_date(z["req_date"]) for z in lg if parse_date(z["req_date"])]
+                    rec = sum(z["rec_qty"] for z in lg)
+                    rrows.append([n, rn, min(dts).strftime(DATE_FMT) if dts else lg[0]["req_date"], len(lg), sum(z["req_qty"] for z in lg),
+                                  sum(z["aud_qty"] for z in lg), rec, sum(z["pending"] for z in lg), pc(rec, sum(z["base"] for z in lg)), _rq_status_of(lg)])
+                rtot = [f"Total - {dn} ({len(g)} requisition(s))", None, None, len(ls), sum(x["req_qty"] for x in ls), sum(x["aud_qty"] for x in ls),
+                        sum(x["rec_qty"] for x in ls), sum(x["pending"] for x in ls), None, None]
+                secs.append(_rp_sec(c_req, rrows, rtot, heading=f"DEPARTMENT: {dn} - REQUISITION-WISE"))
+        return secs
+    return _rp_blocks(P, build), ["Pending = Audit Approved qty (Requested qty if not yet approved) minus Received qty. Quantities of different items / UOMs are added only to show the overall movement.",
+                                  "Dates filter the Requisition date." + ("" if itemwise else " Tick “Item-wise details” to list every item line of each department.")]
+
+
 def rp_requisition(P):
     psql, pp = period_sql("req_date", P["d1"], P["d2"])
     st_sql = " AND status=%s" if P.get("status") not in (None, "All") else ""
@@ -18602,6 +18797,9 @@ RP_REGISTRY = [
     dict(key="transfer", label="Transfer History Report", type="Transfer Report", dates=True, flt=("item", "status"), orient="L", fn=rp_transfer, status="transfer"),
     dict(key="gatepass", label="Gate Pass Report (Management)", title="GATE PASS REPORT - RECEIVED, CONSUMPTION & BALANCE", type="Gate Pass Management Report",
          dates=True, flt=("item", "pcat", "bcat", "status"), orient="L", fn=rp_gate_pass, status=["All", "Balance still in store", "Fully consumed"]),
+    dict(key="deptreq", label="Department-wise Requisition Report", title="DEPARTMENT-WISE REQUISITION REPORT", type="Requisition Report (Department wise)",
+         dates=True, flt=("dept", "item", "status", "itemwise"), orient="L", fn=rp_dept_requisition,
+         status=["All", "Pending (balance > 0)", "Fully Received", "Audit not approved"]),
     dict(key="secbudget", label="Section Budget Report", type="Section Budget Report", dates=True, flt=("section", "status", "itemwise"), orient="P", fn=rp_section_budget,
          status=["All", "OVER LIMIT", "WARNING", "SAFE", "NO LIMIT SET"]),
 ]
@@ -18712,7 +18910,7 @@ def _tab_reports_body():
         top[3].markdown(f"**{today:%d-%b-%Y}**")
     fl = list(R["flt"]) + (["alld"] if R["dates"] else [])
     cols = st.columns(len(fl))
-    P = {"units": units, "d1": d1, "d2": d2, "item": "", "sup_raw": None, "pcat": None, "bcat": None, "ttypes": None, "status": None, "section": None, "group": None, "itemwise": False}
+    P = {"units": units, "d1": d1, "d2": d2, "item": "", "sup_raw": None, "pcat": None, "bcat": None, "ttypes": None, "status": None, "section": None, "group": None, "itemwise": False, "dept": None}
     lines = []
     for c, f in zip(cols, fl):
         if f == "alld":
@@ -18749,6 +18947,17 @@ def _tab_reports_body():
             if sel != "All sections":
                 P["section"] = sel
                 lines.append(("Section", sel))
+        elif f == "dept":
+            try:
+                _dd = qdf_c("SELECT DISTINCT COALESCE(NULLIF(TRIM(department),''),'(Department not given)') AS d FROM requisition_tracking "
+                            "WHERE factory_name = ANY(%s) ORDER BY 1", (list(units),))
+                _dopts = _dd["d"].tolist() if not _dd.empty else []
+            except Exception:
+                _dopts = []
+            sel = c.selectbox("Department", ["All departments"] + _dopts, key="rp_dept")
+            if sel != "All departments":
+                P["dept"] = sel
+                lines.append(("Department", sel))
         elif f == "itemwise":
             P["itemwise"] = c.checkbox("Item-wise details", key="rp_itemwise",
                                        help="Tick করলে প্রতিটি Section-এর নিচে কোন item কত Issue হয়েছে তার তালিকা আসবে। না করলে শুধু Section-wise Budget / Issue আসবে।")
@@ -18768,7 +18977,7 @@ def _tab_reports_body():
             if P["status"] not in ("All", "All items"):
                 lines.append(("Status", P["status"]))
     period = (f"{d1:%d-%b-%Y} to {d2:%d-%b-%Y}" if d1 else "All dates") if R["dates"] else f"As on {today:%d-%b-%Y} (current balance)"
-    sig = repr((R["key"], units, d1, d2, P["item"], P["sup_raw"], P["pcat"], P["bcat"], P["ttypes"], P["status"], P["section"], P["group"], P["itemwise"]))
+    sig = repr((R["key"], units, d1, d2, P["item"], P["sup_raw"], P["pcat"], P["bcat"], P["ttypes"], P["status"], P["section"], P["group"], P["itemwise"], P["dept"]))
     if st.button("▶ Generate Report", type="primary", key="rp_gen"):
         with st.spinner("Preparing report..."):
             try:
