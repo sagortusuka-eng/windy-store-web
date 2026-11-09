@@ -20107,6 +20107,10 @@ def ensure_mc_schema():
                            active BOOLEAN DEFAULT TRUE, created_by TEXT, created_at TEXT)""")
             cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS ux_machines_fac_mc
                            ON machines(factory_name, lower(mc_no), lower(COALESCE(machine_no,'')))""")
+            for _col, _typ in (("brand", "TEXT DEFAULT ''"), ("model", "TEXT DEFAULT ''"),
+                               ("mfg_id", "TEXT DEFAULT ''"), ("install_date", "DATE"), ("mfg_year", "INTEGER"),
+                               ("origin", "TEXT DEFAULT ''")):
+                cur.execute(f"ALTER TABLE machines ADD COLUMN IF NOT EXISTS {_col} {_typ}")      # machine master details (additive)
             cur.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS machine_id INTEGER")
             cur.execute("CREATE INDEX IF NOT EXISTS ix_tx_machine ON transactions(machine_id) WHERE machine_id IS NOT NULL")
             cur.execute("""CREATE TABLE IF NOT EXISTS section_budget_limits (id SERIAL PRIMARY KEY, factory_name TEXT,
@@ -20123,14 +20127,16 @@ def ensure_mc_schema():
 
 
 def mc_schema():
-    if not st.session_state.get("_mc_schema_ready"):
-        run_once_per_process("mc_schema_v1", ensure_mc_schema)
-        st.session_state["_mc_schema_ready"] = True
+    if not st.session_state.get("_mc_schema_ready_v2"):
+        run_once_per_process("mc_schema_v2", ensure_mc_schema)
+        st.session_state["_mc_schema_ready_v2"] = True
 
 
 def mc_list(fac, active_only=True):
     mc_schema()
-    return q_c("SELECT id, mc_no, machine_no, machine_name, section, active FROM machines WHERE factory_name=%s"
+    return q_c("SELECT id, mc_no, machine_no, machine_name, section, active, "
+               "COALESCE(brand,'') AS brand, COALESCE(model,'') AS model, COALESCE(mfg_id,'') AS mfg_id, install_date, mfg_year, "
+               "COALESCE(origin,'') AS origin FROM machines WHERE factory_name=%s"
                + (" AND active" if active_only else "") + " ORDER BY lower(mc_no), lower(COALESCE(machine_no,''))", (fac,))
 
 
@@ -20334,25 +20340,108 @@ def _sb_issue_warn(fac, section, tx_date, slip_value, ttype):
 # ============================================================
 #  PAGE 1: ⚙️ MACHINE COST
 # ============================================================
+def _mc_parse_date(s):
+    """text (DD-MM-YYYY, DD/MM/YYYY, 2021-05-30 ...) -> date or None"""
+    s = str(s or "").strip()
+    if not s:
+        return None
+    try:
+        t = pd.to_datetime(s, dayfirst=True, errors="coerce")
+        return None if pd.isna(t) else t.date()
+    except Exception:
+        return None
+
+
+def _mc_to_year(v):
+    try:
+        y = int(float(str(v).strip()))
+        return y if 1900 <= y <= 2100 else None
+    except Exception:
+        return None
+
+
+def _mc_age_months(d):
+    """whole months from the installation date to today (None when no date)."""
+    try:
+        if d is None or pd.isna(d):
+            return None
+        d = pd.Timestamp(d).date()
+    except Exception:
+        return None
+    t = local_now().date()
+    m = (t.year - d.year) * 12 + (t.month - d.month) - (1 if t.day < d.day else 0)
+    return max(int(m), 0)
+
+
+def _mc_age_txt(d):
+    m = _mc_age_months(d)
+    return "" if m is None else f"{m} months ({m // 12}y {m % 12}m)"
+
+
+def _mc_fmt_date(d):
+    try:
+        return "" if d is None or pd.isna(d) else pd.Timestamp(d).strftime(DATE_FMT)
+    except Exception:
+        return ""
+
+
+def _mc_fmt_year(v):
+    y = _mc_to_year(v) if v is not None and not (isinstance(v, float) and pd.isna(v)) else None
+    return "" if y is None else str(y)
+
+
+def _mc_info(r):
+    """display dict of one machines row (extra master details)."""
+    return {"Brand": r.get("brand") or "", "Model": r.get("model") or "",
+            "MFG ID": r.get("mfg_id") or "", "Installation Date": _mc_fmt_date(r.get("install_date")),
+            "MFG Year": _mc_fmt_year(r.get("mfg_year")), "Origin": r.get("origin") or "",
+            "Machine Age": _mc_age_txt(r.get("install_date"))}
+
+
 @tx
 def mc_add(fac, rows):
+    """rows: (mc_no, machine_no, name, section) or (..., extra_dict) with brand/model/mfg_id/install_date/mfg_year/origin."""
     n = 0
     user = st.session_state.get("user", "")
-    for mc_no, m_no, name, sec in rows:
-        got = run("""INSERT INTO machines (factory_name, mc_no, machine_no, machine_name, section, active, created_by, created_at)
-                     VALUES (%s,%s,%s,%s,%s,TRUE,%s,%s) ON CONFLICT DO NOTHING RETURNING id""",
-                  (fac, mc_no, m_no, name, sec, user, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    for row in rows:
+        mc_no, m_no, name, sec = row[:4]
+        ex = row[4] if len(row) > 4 and isinstance(row[4], dict) else {}
+        got = run("""INSERT INTO machines (factory_name, mc_no, machine_no, machine_name, section, active, created_by, created_at,
+                                           brand, model, mfg_id, install_date, mfg_year, origin)
+                     VALUES (%s,%s,%s,%s,%s,TRUE,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING id""",
+                  (fac, mc_no, m_no, name, sec, user, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                   ex.get("brand", ""), ex.get("model", ""), ex.get("mfg_id", ""),
+                   ex.get("install_date"), ex.get("mfg_year"), ex.get("origin", "")))
         n += len(got or [])
     audit("MACHINE_ADD", f"{fac}: {n} machine(s) added: " + ", ".join(f"{r[0]}/{r[1]}" for r in rows[:20]))
     return {"n": n}
 
 
 @tx
-def mc_update(mid, fac, mc_no, m_no, name, sec, active):
+def mc_update(mid, fac, mc_no, m_no, name, sec, active, extra=None):
     run("UPDATE machines SET mc_no=%s, machine_no=%s, machine_name=%s, section=%s, active=%s WHERE id=%s",
         (mc_no, m_no, name, sec, bool(active), mid))
+    if extra is not None:
+        run("""UPDATE machines SET brand=%s, model=%s, mfg_id=%s, install_date=%s, mfg_year=%s, origin=%s
+               WHERE id=%s""", (extra.get("brand", ""), extra.get("model", ""),
+                                extra.get("mfg_id", ""), extra.get("install_date"), extra.get("mfg_year"),
+                                extra.get("origin", ""), mid))
     audit("MACHINE_EDIT", f"{fac}: machine {mid} -> M/C {mc_no} / {m_no} / {name} / {sec} / {'active' if active else 'inactive'}")
     return True
+
+
+@tx
+def mc_update_details(fac, rows):
+    """rows: (mc_no, machine_no, extra_dict). Fills the master details of machines that already exist."""
+    n = 0
+    for mc_no, m_no, ex in rows:
+        got = run("""UPDATE machines SET brand=%s, model=%s, mfg_id=%s, install_date=%s, mfg_year=%s, origin=%s
+                     WHERE factory_name=%s AND lower(mc_no)=lower(%s) AND lower(COALESCE(machine_no,''))=lower(%s) RETURNING id""",
+                  (ex.get("brand", ""), ex.get("model", ""), ex.get("mfg_id", ""),
+                   ex.get("install_date"), ex.get("mfg_year"), ex.get("origin", ""), fac, mc_no, m_no))
+        n += len(got or [])
+    audit("MACHINE_DETAILS", f"{fac}: details updated for {n} machine(s)")
+    return {"n": n}
 
 
 @tx
@@ -20379,7 +20468,9 @@ def _mc_tx_df(units, d1, d2):
                           COALESCE(i.size,'') AS size, COALESCE(NULLIF(i.unit_name,''),'Pcs') AS uom,
                           COALESCE(NULLIF(t.unit_price_at_tx,0), i.unit_price, 0) AS rate, COALESCE(t.req_no,'') AS req_no,
                           COALESCE(t.officer_name,'') AS officer, m.mc_no, COALESCE(m.machine_no,'') AS machine_no,
-                          COALESCE(m.machine_name,'') AS machine_name, COALESCE(m.section,'') AS msection
+                          COALESCE(m.machine_name,'') AS machine_name, COALESCE(m.section,'') AS msection,
+                          COALESCE(m.brand,'') AS brand, COALESCE(m.model,'') AS model,
+                          COALESCE(m.mfg_id,'') AS mfg_id, m.install_date, m.mfg_year, COALESCE(m.origin,'') AS origin
                    FROM transactions t JOIN machines m ON m.id=t.machine_id
                    LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
                    WHERE t.factory_name = ANY(%s) AND t.trans_type = ANY(%s){psql}""",
@@ -20416,6 +20507,16 @@ def _mc_view_cost(units, all_machines):
     out = pd.DataFrame({"Machine": g["machine"], "ইস্যু লাইন": g["Lines"], "ভিন্ন আইটেম": g["Items"],
                         "মোট খরচ (৳)": g["Cost"].round(0), "মোট খরচের %": (g["Cost"] / total * 100).round(1) if total else 0.0,
                         "শেষ মাল নিয়েছে": g["Last"].dt.strftime(DATE_FMT), "সবচেয়ে বেশি খরচের আইটেম": g["Top item (খরচ বেশি)"]})
+    _inf = df.drop_duplicates("machine_id").set_index("machine_id")
+    _pos = 1
+    for _lab in ("Internal ID", "Brand", "Model", "MFG ID"):
+        _src = {"Internal ID": "machine_no", "Brand": "brand", "Model": "model", "MFG ID": "mfg_id"}[_lab]      # Internal ID = Machine No
+        out.insert(_pos, _lab, g["machine_id"].map(_inf[_src]).fillna(""))
+        _pos += 1
+    out.insert(_pos, "Installation Date", g["machine_id"].map(_inf["install_date"]).map(_mc_fmt_date)); _pos += 1
+    out.insert(_pos, "MFG Year", g["machine_id"].map(_inf["mfg_year"]).map(_mc_fmt_year)); _pos += 1
+    out.insert(_pos, "Origin", g["machine_id"].map(_inf["origin"]).fillna("")); _pos += 1
+    out.insert(_pos, "Machine Age (months)", g["machine_id"].map(_inf["install_date"]).map(_mc_age_months))
     st.dataframe(out, hide_index=True, use_container_width=True, height=min(90 + 35 * len(out), 520),
                  column_config={"মোট খরচ (৳)": st.column_config.NumberColumn(format="%.0f"),
                                 "মোট খরচের %": st.column_config.NumberColumn(format="%.1f")})
@@ -20442,6 +20543,9 @@ def _mc_view_detail(units):
         st.info("কোনো মেশিন নেই।")
         return
     pick = st.selectbox("মেশিন বাছুন", list(opts), key="mc_det_pick")
+    _mi = next((r for u in units for r in mc_list(u, active_only=False) if int(r["id"]) == opts[pick]), None)
+    if _mi:
+        st.dataframe(pd.DataFrame([{"Internal ID": _mi.get("machine_no") or "", **_mc_info(_mi)}]), hide_index=True, use_container_width=True)
     d1, d2, plabel = report_period("mc_det", default="সব সময়")
     df = _mc_tx_df(units, d1, d2)
     df = df[df["machine_id"] == opts[pick]] if not df.empty else df
@@ -20507,7 +20611,7 @@ def _mc_view_life(units):
 def _mc_manage(fac, is_mgr):
     rows = mc_list(fac, active_only=False)
     if rows:
-        st.dataframe(pd.DataFrame([{"M/C No": r["mc_no"], "Machine No": r["machine_no"] or "", "নাম / ধরন": r["machine_name"] or "",
+        st.dataframe(pd.DataFrame([{"M/C No": r["mc_no"], "Machine No": r["machine_no"] or "", **_mc_info(r), "নাম / ধরন": r["machine_name"] or "",
                                     "Section": r["section"] or "", "অবস্থা": "চালু" if r["active"] else "বন্ধ"} for r in rows]),
                      hide_index=True, use_container_width=True, height=min(90 + 35 * len(rows), 360))
     else:
@@ -20520,26 +20624,43 @@ def _mc_manage(fac, is_mgr):
         with st.form("mc_add_form", clear_on_submit=True):
             a, b, c, d = st.columns([1, 1, 1.4, 1.2])
             f_mc = a.text_input("M/C No *")
-            f_mn = b.text_input("Machine No")
+            f_mn = b.text_input("Machine No (Internal ID)")
             f_nm = c.text_input("নাম / ধরন (ঐচ্ছিক)")
             f_sec = d.selectbox("Section (ঐচ্ছিক)", secs)
+            e2, e3, e4 = st.columns(3)
+            f_brand = e2.text_input("Brand")
+            f_model = e3.text_input("Model")
+            f_mfgid = e4.text_input("MFG ID")
+            g1, g2, g3 = st.columns(3)
+            f_inst = g1.date_input("Installation Date", value=None, format="DD/MM/YYYY", key="mc_f_inst")
+            f_year = g2.number_input("MFG Year", min_value=1950, max_value=2100, value=None, step=1, format="%d", key="mc_f_year")
+            f_orig = g3.text_input("Origin")
             if st.form_submit_button("💾 যোগ করুন") and guard():
                 if not f_mc.strip():
                     st.error("M/C No লিখুন।")
                 else:
-                    res = mc_add(fac, [(f_mc.strip(), f_mn.strip(), f_nm.strip(), "" if f_sec == "—" else f_sec)])
+                    res = mc_add(fac, [(f_mc.strip(), f_mn.strip(), f_nm.strip(), "" if f_sec == "—" else f_sec,
+                                       {"brand": f_brand.strip(), "model": f_model.strip(),
+                                        "mfg_id": f_mfgid.strip(), "install_date": f_inst,
+                                        "mfg_year": int(f_year) if f_year else None, "origin": f_orig.strip()})])
                     if res and res.get("n"):
                         done(f"✅ মেশিন যোগ হয়েছে: M/C {f_mc.strip()}")
                     elif res:
                         st.warning("এই M/C No + Machine No আগেই আছে।")
         st.caption("একসাথে অনেক মেশিন: প্রতি লাইনে  `M/C No | Machine No | নাম | Section`  (শেষের দুটো ঐচ্ছিক)")
+        st.caption("Optional extra columns after Section:  `... | Brand | Model | MFG ID | Installation Date (DD-MM-YYYY) | MFG Year | Origin`")
         bulk = st.text_area("Bulk মেশিন", height=120, key="mc_bulk", placeholder="M-01 | 1234 | Washing Machine 1 | Washing\nM-02 | 1235 | Hydro Extractor | Washing")
         if st.button("💾 Bulk যোগ করুন", key="mc_bulk_btn") and guard():
             parsed = []
             for ln in bulk.splitlines():
                 p = [x.strip() for x in ln.split("|")]
                 if p and p[0]:
-                    parsed.append((p[0], p[1] if len(p) > 1 else "", p[2] if len(p) > 2 else "", p[3] if len(p) > 3 else ""))
+                    parsed.append((p[0], p[1] if len(p) > 1 else "", p[2] if len(p) > 2 else "", p[3] if len(p) > 3 else "",
+                                   {"brand": p[4] if len(p) > 4 else "",
+                                    "model": p[5] if len(p) > 5 else "", "mfg_id": p[6] if len(p) > 6 else "",
+                                    "install_date": _mc_parse_date(p[7]) if len(p) > 7 else None,
+                                    "mfg_year": _mc_to_year(p[8]) if len(p) > 8 else None,
+                                    "origin": p[9] if len(p) > 9 else ""}))
             if not parsed:
                 st.error("অন্তত একটি লাইন লিখুন।")
             else:
@@ -20555,16 +20676,28 @@ def _mc_manage(fac, is_mgr):
             k = f"mce_{r['id']}"
             a, b, c, d = st.columns([1, 1, 1.4, 1.2])
             e_mc = a.text_input("M/C No", value=r["mc_no"] or "", key=k + "a")
-            e_mn = b.text_input("Machine No", value=r["machine_no"] or "", key=k + "b")
+            e_mn = b.text_input("Machine No (Internal ID)", value=r["machine_no"] or "", key=k + "b")
             e_nm = c.text_input("নাম / ধরন", value=r["machine_name"] or "", key=k + "c")
             cur_sec = r["section"] if r["section"] in secs else "—"
             e_sec = d.selectbox("Section", secs, index=secs.index(cur_sec), key=k + "d")
+            x_b, x_c, x_d = st.columns(3)
+            e_brand = x_b.text_input("Brand", value=r.get("brand") or "", key=k + "h")
+            e_model = x_c.text_input("Model", value=r.get("model") or "", key=k + "i")
+            e_mfgid = x_d.text_input("MFG ID", value=r.get("mfg_id") or "", key=k + "j")
+            y_a, y_b, y_c = st.columns(3)
+            e_inst = y_a.date_input("Installation Date", value=r.get("install_date"), format="DD/MM/YYYY", key=k + "k")
+            e_year = y_b.number_input("MFG Year", min_value=1950, max_value=2100,
+                                      value=(int(r["mfg_year"]) if r.get("mfg_year") else None), step=1, format="%d", key=k + "l")
+            e_orig = y_c.text_input("Origin", value=r.get("origin") or "", key=k + "m")
             e_act = st.checkbox("চালু (Issue-র dropdown-এ দেখাবে)", value=bool(r["active"]), key=k + "e")
             x1, x2 = st.columns(2)
             if x1.button("💾 সেভ", key=k + "s") and guard():
                 if not e_mc.strip():
                     st.error("M/C No খালি রাখা যাবে না।")
-                elif mc_update(int(r["id"]), fac, e_mc.strip(), e_mn.strip(), e_nm.strip(), "" if e_sec == "—" else e_sec, e_act):
+                elif mc_update(int(r["id"]), fac, e_mc.strip(), e_mn.strip(), e_nm.strip(), "" if e_sec == "—" else e_sec, e_act,
+                           extra={"brand": e_brand.strip(), "model": e_model.strip(),
+                                  "mfg_id": e_mfgid.strip(), "install_date": e_inst,
+                                  "mfg_year": int(e_year) if e_year else None, "origin": e_orig.strip()}):
                     done("✅ মেশিন আপডেট হয়েছে।")
             used = q("SELECT COUNT(*) AS n FROM transactions WHERE machine_id=%s", (int(r["id"]),))[0]["n"]
             if used:
@@ -20572,6 +20705,27 @@ def _mc_manage(fac, is_mgr):
             elif x2.button("🗑 মুছুন", key=k + "d_btn") and guard():
                 if mc_delete(int(r["id"]), fac, mc_label(r)):
                     done("✅ মেশিন মোছা হয়েছে।")
+
+    with st.expander("Bulk update machine details (existing machines)"):
+        st.caption("One machine per line:  `M/C No | Machine No (Internal ID) | Brand | Model | MFG ID | Installation Date (DD-MM-YYYY) | MFG Year | Origin`  "
+                   "(M/C No + Machine No must match an existing machine; leave Machine No empty if it has none)")
+        bupd = st.text_area("Details", height=120, key="mc_bupd")
+        if st.button("Update details", key="mc_bupd_btn") and guard():
+            parsed = []
+            for ln in bupd.splitlines():
+                p = [x.strip() for x in ln.split("|")]
+                if p and p[0]:
+                    g_ = lambda i: p[i] if len(p) > i else ""
+                    parsed.append((p[0], g_(1), {"brand": g_(2), "model": g_(3), "mfg_id": g_(4),
+                                                 "install_date": _mc_parse_date(g_(5)), "mfg_year": _mc_to_year(g_(6)),
+                                                 "origin": g_(7)}))
+            if not parsed:
+                st.error("No valid line found")
+            else:
+                res = mc_update_details(fac, parsed)
+                if res:
+                    st.session_state.pop("mc_bupd", None)
+                    done(f"Details updated for {res['n']} machine(s) ({len(parsed) - res['n']} line(s) did not match a machine)")
 
 
 def _mc_fix_slip(fac, is_mgr):
