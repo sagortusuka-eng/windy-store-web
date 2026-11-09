@@ -23571,6 +23571,9 @@ except Exception:
 if _pg in ("count", "physical", "physical-count") and not st.session_state.get("_deeplink_done"):
     st.session_state[NAV_KEY] = NAV_PHYSICAL
     st.session_state["_deeplink_done"] = True
+NAV_ITEM_JOURNEY = "🧭 Item Journey (A–Z)"
+if NAV_ITEM_JOURNEY not in TAB_NAMES:   # must be registered BEFORE the guard below, else a click on it is reset to Dashboard
+    TAB_NAMES.append(NAV_ITEM_JOURNEY)
 if st.session_state.get(NAV_KEY) not in TAB_NAMES:
     st.session_state[NAV_KEY] = TAB_NAMES[0]  # Dashboard is the first page for new sessions.
 
@@ -23589,9 +23592,7 @@ sidebar_clock()
 #  ITEM JOURNEY (A-Z) - one item: requisition -> audit approve -> sourcing -> receipt (challan) -> issue (SR / section), month-wise
 #  Read-only report. Uses existing tables only (requisition_tracking, transactions, req_receipt_links, audit_logs).
 # =====================================================================================================================
-NAV_ITEM_JOURNEY = "🧭 Item Journey (A–Z)"
-if NAV_ITEM_JOURNEY not in TAB_NAMES:
-    TAB_NAMES.append(NAV_ITEM_JOURNEY)
+# (NAV_ITEM_JOURNEY is registered above, before the main_nav guard.)
 
 _IJ_SQL = """SELECT id, req_no, COALESCE(department,'') AS department, req_date, item_name, COALESCE(size,'') AS size,
              COALESCE(prod_id,'') AS prod_id, COALESCE(uom,'') AS uom, COALESCE(budget_category,'') AS budget_category,
