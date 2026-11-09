@@ -7014,6 +7014,11 @@ def sourcing_email(rows, fac_label, sender, role):
 
 
 @tx
+def can_set_audit_qty():
+    """Any working officer / manager / executive may enter the Audit Approved Qty; the view-only roles may not."""
+    return st.session_state.get("role") not in NEW_RO_ROLES
+
+
 def set_audit_qty(rid, new_q, old_q, name, req_no):
     run("UPDATE requisition_tracking SET audit_approved_qty=%s WHERE id=%s", (new_q, rid))
     audit("EDIT_AUDIT_APPROVED", f"Req {req_no} / {name}: approved {old_q:g} -> {new_q:g}")
@@ -7371,8 +7376,8 @@ def req_tracker_view():
                     elif set_req_sizes(ch, req_no):
                         done(f"Size updated ({len(ch)} line).")
     st.markdown('<div class="rq-h2">✔️ Audit Approved Qty</div>', unsafe_allow_html=True)
-    if role not in ("Executive", "Store Manager"):
-        st.caption("Audit Approved Qty shudhu Executive ba Store Manager change korte parben.")
+    if not can_set_audit_qty():
+        st.caption("এই role শুধু দেখতে পারে — Audit Approved Qty শুধু Store Officer / Store Manager / Executive দিতে পারবেন।")
     elif guard():
         with st.form(f"rqt_aud_{kk}"):
             new_q = {}
@@ -7638,18 +7643,38 @@ def tab_requisition():
     st.dataframe(df.style.apply(hl, axis=1), hide_index=True, use_container_width=True, height=380)
     export_buttons(df, "requisition_tracking")
 
-    labels = {f"ID {r['id']} | {r['req_no']} | {r['item_name']}": r for r in rows}
+    labels = {f"ID {r['id']} | {r['req_no']} | {r['item_name']}" + (f" | Size {str(r.get('size')).strip()}" if str(r.get("size") or "").strip() else ""): r for r in rows}
     r = labels[st.selectbox("Select requisition", list(labels), key="req_sel")]
     k = str(r["id"])
-    _tab = lazy_tab_select(["✔️ Audit Approved Qty (Executive)", "🚚 PO / Receiving", "✏️ Edit", "📧 Sourcing Email", "🧾 Audit Reconciliation"], "lz_req")
+    _tab = lazy_tab_select(["✔️ Audit Approved Qty", "🚚 PO / Receiving", "✏️ Edit", "📧 Sourcing Email", "🧾 Audit Reconciliation"], "lz_req")
     if _tab == 0:
-        if st.session_state.get("role") not in ("Executive", "Store Manager"):
-            st.caption("Audit Approved Qty shudhu Executive (Mr. Sattar) ba Store Manager change korte parben.")
+        if not can_set_audit_qty():
+            st.caption("এই role শুধু দেখতে পারে — Audit Approved Qty শুধু Store Officer / Store Manager / Executive দিতে পারবেন।")
         elif guard():
-            nq = st.number_input("Audit approved qty", 0.0, float(r["req_qty"]), float(r["aud_qty"]), key=f"aud_{k}")
-            if st.button("Save approved qty", key=f"aud_btn_{k}") and guard():
-                if set_audit_qty(r["id"], nq, r["aud_qty"], r["item_name"], r["req_no"]):
-                    done("Audit approved qty updated.")
+            # every item line of this requisition, each with its own Item name + Size, so same-name / different-size items are never mixed up
+            _aud_lines = [x for x in rows if x["req_no"] == r["req_no"] and x["factory_name"] == r["factory_name"]] or [r]
+            st.caption(f"Requisition **{r['req_no']}** — প্রতিটি item-এর নাম ও Size দেখে Audit Approved Qty দিন।")
+            with st.form(f"aud_form_{k}"):
+                _newq = {}
+                for x in _aud_lines:
+                    _sz = str(x.get("size") or "").strip()
+                    a_, b_ = st.columns([3, 1.2])
+                    a_.markdown(f"**{x['item_name']}**  \n<span style='color:#64748b;font-size:12.5px'>"
+                                f"Size: <b>{_sz or 'নেই'}</b> · Code: {x.get('prod_id') or '-'} · Requested {x['req_qty']:g} · Received {x['rec_qty']:g}</span>",
+                                unsafe_allow_html=True)
+                    _newq[x["id"]] = b_.number_input("Approved", 0.0, float(x["req_qty"]), float(x["aud_qty"]),
+                                                     key=f"aud_{x['id']}", label_visibility="collapsed")
+                if st.form_submit_button("💾 Save approved qty", type="primary"):
+                    _chg = [x for x in _aud_lines if abs(_newq[x["id"]] - x["aud_qty"]) > 1e-9]
+                    if not _chg:
+                        st.info("কিছু বদলায়নি।")
+                    else:
+                        _ok = True
+                        for x in _chg:
+                            if not set_audit_qty(x["id"], _newq[x["id"]], x["aud_qty"], x["item_name"], x["req_no"]):
+                                _ok = False
+                        if _ok:
+                            done(f"Audit approved qty updated ({len(_chg)} item).")
     if _tab == 1:
         if guard():
             has_po = st.checkbox("HO PO issued", value=r["has_po"], key=f"hp_{k}")
