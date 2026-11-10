@@ -5016,6 +5016,66 @@ def set_erp_uom_rate_bulk(fac, changes):
     return n or None
 
 
+def sr_period_statement(fac, d1, d2):
+    """Opening | Received | Issued | Closing for the chosen period. Built from the same movement engine as the Monthly Stock Check,
+    so an item that was issued down to NIL still appears (Closing 0, Issued > 0). Runs only when the button is pressed (no slowdown)."""
+    if "CONSOLIDATED" in str(fac):
+        st.info("Ekta Factory select korun (Consolidated view-te Opening / Closing statement hoy na).")
+        return
+    today = local_now().date()
+    f = d1 or date(2000, 1, 1)
+    t = min(d2 or today, today)
+    key = f"{fac}|{f}|{t}"
+    st.caption(f"Period: **{f:%d-%b-%Y} -> {t:%d-%b-%Y}**  |  Opening = {(f - timedelta(days=1)):%d-%b-%Y}-er closing  |  "
+               "Closing = Opening + Received - Issued. Received-e supplier receipt, return, adjustment(+), transfer-in; "
+               "Issued-e issue, adjustment(-), transfer-out dhora hoy.")
+    if st.button("Statement toiri korun", key="sr_ps_run", type="primary"):
+        with st.spinner("Opening, received, issued, closing hisab hocche..."):
+            rows, flags = msc_compute(fac, f - timedelta(days=1), t)
+        st.session_state["sr_ps"] = {"key": key, "rows": rows, "flags": flags}
+    ss = st.session_state.get("sr_ps")
+    if not ss or ss["key"] != key:
+        st.info("Upore period thik kore 'Statement toiri korun' chapun.")
+        return
+    for fl in ss["flags"][:5]:
+        st.warning(fl)
+    df = pd.DataFrame(ss["rows"])
+    if df.empty:
+        st.info("No items.")
+        return
+    df["Opening"] = df["closing"].round(4)
+    df["Received"] = df["received"].round(4)
+    df["Issued"] = df["issued"].round(4)
+    df["Closing"] = (df["Opening"] + df["Received"] - df["Issued"]).round(4)
+    act = (df[["Opening", "Received", "Issued", "Closing"]].abs() > 1e-6).any(axis=1)
+    df["Remark"] = ""
+    df.loc[(df["Closing"].abs() <= 1e-6) & (df["Issued"] > 1e-6), "Remark"] = "ISSUED TO NIL"
+    df.loc[df["Closing"] < -1e-6, "Remark"] = "NEGATIVE - check"
+    c1, c2, c3 = st.columns([1, 1, 1.4])
+    hide = c1.checkbox("Balance / movement nai emon item lukao", value=True, key="sr_ps_hide")
+    only_nil = c2.checkbox("Shudhu 'Issued to NIL' item", value=False, key="sr_ps_nil")
+    cats = ["All"] + sorted(df["cat"].astype(str).unique())
+    cat = c3.selectbox("Category", cats, key="sr_ps_cat")
+    v = df[act] if hide else df
+    if cat != "All":
+        v = v[v["cat"].astype(str) == cat]
+    if only_nil:
+        v = v[v["Remark"] == "ISSUED TO NIL"]
+    m = st.columns(5)
+    m[0].metric("Items", f"{len(v):,}")
+    m[1].metric("Opening value", f"{(v['Opening'] * v['price']).sum():,.0f}")
+    m[2].metric("Received value", f"{(v['Received'] * v['price']).sum():,.0f}")
+    m[3].metric("Issued value", f"{(v['Issued'] * v['price']).sum():,.0f}")
+    m[4].metric("Closing value", f"{(v['Closing'] * v['price']).sum():,.0f}")
+    out = pd.DataFrame({"Category": v["cat"], "SL": v["sl_no"], "ERP Code": v["prod_id"], "Item": v["item_name"], "Size": v["size"],
+                        "UOM": v["unit"], "Opening": v["Opening"], "Received": v["Received"], "Issued": v["Issued"],
+                        "Closing": v["Closing"], "Software now": v["stock"], "Unit Price": v["price"],
+                        "Closing Value": (v["Closing"] * v["price"]).round(2), "Issued Value": (v["Issued"] * v["price"]).round(2),
+                        "Remark": v["Remark"]}).sort_values(["Category", "Item", "Size"]).reset_index(drop=True)
+    st.dataframe(out, hide_index=True, use_container_width=True, height=440)
+    export_buttons(out, "period_stock_statement", f"Stock statement {f:%d-%b-%Y} to {t:%d-%b-%Y} - {fac}")
+
+
 def tab_stock_report():
     st.title("Stock Report & ERP Reconciliation")
     st.caption("ERP Stock QTY, Physical Stock QTY, Stock Balance and values for the selected factory.")
@@ -5123,6 +5183,9 @@ def tab_stock_report():
         html_report += "</tbody></table></body></html>"
         st.download_button("🖨️ Download Printable Stock Report (HTML)", html_report,
                            "Stock_Report_Printable.html", "text/html")
+
+        with st.expander("Period Stock Statement - Opening | Received | Issued | Closing (issue hoye nil hoa item-o ashbe)", expanded=False):
+            sr_period_statement(fac, _d1, _d2)
 
         st.markdown("---")
         if st.checkbox("✏️ Quick Edit — table-এ সরাসরি ERP Stock / UOM / Rate বসান", key="sr_qe_on"):
@@ -15369,6 +15432,38 @@ def _ri_box(h):
         return st.container()
 
 
+def _tx_date_pick(col, wkey, gen, state_key, what="Issue"):
+    """Forces a DELIBERATE date choice for every slip (no silent default of 'today'), so a 09th slip is never saved on the
+    10th by mistake. Returns (date, ok). ok=False until the officer picks Aaj / Gotokal / Onno tarikh. Resets after each save (gen)."""
+    today = local_now().date()
+    yest = today - timedelta(days=1)
+    ph = "-- Tarikh bachai korun --"
+    o_today, o_yest, o_other = f"Aaj - {today:%d-%b-%Y}", f"Gotokal - {yest:%d-%b-%Y}", "Onno tarikh (backdate)"
+    pick = col.selectbox(f"{what}-er tarikh *", [ph, o_today, o_yest, o_other], key=f"{wkey}_mode_{gen}",
+                         help="Slip-e ja tarikh lekha ache sheta bachai korun. Raat-er (gotokal-er) slip hole 'Gotokal' din.")
+    if pick == o_today:
+        d = today
+    elif pick == o_yest:
+        d = yest
+    elif pick == o_other:
+        d = col.date_input("Tarikh", value=yest, max_value=today, key=f"{wkey}_other_{gen}")
+    else:
+        d = None
+    st.session_state[state_key] = d or today     # other code of this page reads this key
+    return (d or today), d is not None
+
+
+def _tx_date_banner(d, ok, what="Issue"):
+    """Big, clear line showing exactly which date the slip will be saved on."""
+    today = local_now().date()
+    if not ok:
+        st.warning(f"\u26a0\ufe0f {what}-er TARIKH bachai korun - tarikh na bachai korle Save hobe na.")
+    elif d == today:
+        st.info(f"\U0001F4C5 Ei slip **AAJKER ({d:%d-%b-%Y})** tarikhe save hobe. Slip-e jodi gotokal-er tarikh thake, upore 'Gotokal' bachai korun.")
+    else:
+        st.warning(f"\U0001F4C5 **BACKDATE:** Ei slip **{d:%d-%b-%Y}** tarikhe save hobe ({(today - d).days} din age-r). Tarikh thik ache to?")
+
+
 @_frag   # typing / adding rows re-runs ONLY this block - the rest of the app is not touched
 def _ri_form():
     fac = FAC
@@ -15380,10 +15475,11 @@ def _ri_form():
         _ri_step(1, "Slip details", "Requisition no., date, type and section")
         c1, c2, c3, c4 = st.columns([1, 1, 1.1, 1.3])
         sr_no = c1.text_input("Requisition No. (SR No.) *", key=f"ri_sr_{gen}", placeholder="e.g. 1745").strip()
-        tx_date = c2.date_input("তারিখ", value=date.today(), max_value=date.today(), key="ri_date")
+        tx_date, date_ok = _tx_date_pick(c2, "ri_dt", gen, "ri_date", "Issue")
         ttype = c3.selectbox("ধরন", list(ISSUE_TYPES), format_func=lambda c: TRANS_LABELS.get(c, c), key="ri_type")
         with c4:
             section = _ri_section_pick(f"ri_sec_{gen}", fac)
+        _tx_date_banner(tx_date, date_ok, "Issue")
         notes = ""
         confirm_existing = True
         if sr_no:
@@ -15610,7 +15706,9 @@ def _ri_form():
     po_pending = f2.checkbox("ERP PO pending", key=f"ri_po_{gen}",
                              help="এই স্লিপের সব লাইন ERP Audit → ERP PO Pending-এ ট্র্যাক হবে।")
     if f3.button("💾 সব সংরক্ষণ করুন", type="primary", key=f"ri_save_{gen}", use_container_width=True, disabled=not can_write):
-        if not sr_no:
+        if not date_ok:
+            st.error("Issue-er TARIKH bachai korun (Aaj / Gotokal / Onno tarikh) - tarpor Save korun.")
+        elif not sr_no:
             st.error("Requisition No. (SR No.) লিখুন — এটা বাধ্যতামূলক।")
         elif (count_gate_status(fac) or {}).get("blocked"):
             st.error("এই সপ্তাহের compulsory Physical Count শেষ হয়নি — আগে 📱 Physical Count → 🎯 তালিকার আইটেম গুনুন, তারপর Issue save হবে।")
@@ -15720,7 +15818,8 @@ def _rr_form():
         pick_sup = c1.selectbox("Supplier *", [NEW_SUP] + [r["s"] for r in recent], key=f"rr_sup_pick_{gen}")
         supplier = c1.text_input("Supplier-er nam", key=f"rr_sup_new_{gen}").strip() if pick_sup == NEW_SUP else pick_sup
         challan = c2.text_input("Challan No. *", key=f"rr_challan_{gen}", placeholder="Supplier challan number").strip()
-        tx_date = c3.date_input("তারিখ", value=date.today(), max_value=date.today(), key="rr_date")
+        tx_date, date_ok = _tx_date_pick(c3, "rr_dt", gen, "rr_date", "Receive")
+        _tx_date_banner(tx_date, date_ok, "Receive")
         notes = st.text_input("Remarks (ঐচ্ছিক — যেমন PO No., গাড়ির নম্বর)", key=f"rr_notes_{gen}")
 
         done_sl, confirm_existing = set(), True
@@ -15853,7 +15952,9 @@ def _rr_form():
     if not can_write:
         st.caption("সংরক্ষণ করতে login লাগবে (Auditor role শুধু দেখতে পারে)।")
     if st.button("💾 Challan-er shob item receive korun", type="primary", key=f"rr_save_{gen}", use_container_width=True, disabled=not can_write):
-        if not supplier:
+        if not date_ok:
+            st.error("Receive-er TARIKH bachai korun (Aaj / Gotokal / Onno tarikh) - tarpor Save korun.")
+        elif not supplier:
             st.error("Supplier-er nam din.")
         elif not challan:
             st.error("Challan No. likhun - eta bad-dhomulok.")
@@ -20026,10 +20127,17 @@ def msc_load(sid):
         df[c] = df[c].fillna("").astype(str)
     df["diff"] = df["physical_qty"] - df["expected_qty"]
     df["diff_value"] = df["diff"] * df["unit_price"].fillna(0)
-    df["status"] = np.select([df["physical_qty"].isna() & (df["expected_qty"].abs() < MSC_EPS), df["physical_qty"].isna(),
+    df["status"] = np.select([df["physical_qty"].isna() & ~_msc_active_mask(df), df["physical_qty"].isna(),
                               df["diff"].abs() < MSC_EPS, df["diff"] < 0],
                              ["⚪ No stock", "⏳ Not counted", "✅ Match", "🔻 Short"], default="🔺 Excess")
     return df
+
+
+def _msc_active_mask(d):
+    """True for every item that had a balance OR any movement this month. An item issued down to NIL stays in the list
+    (closing > 0 / issued > 0) so the officer cannot hide a wrongly issued item by emptying its stock."""
+    return ((d["expected_qty"].abs() > MSC_EPS) | (d["closing_qty"].abs() > MSC_EPS)
+            | (d["received_qty"].abs() > MSC_EPS) | (d["issued_qty"].abs() > MSC_EPS))
 
 
 def _g(v):
@@ -20253,10 +20361,10 @@ def msc_print_view(sid, sess, df, fac):
     msc_recalc_panel(sid, sess, fac)
     st.markdown("##### 🖨 Print sheets")
     o1, o2 = st.columns(2)
-    skip0 = o1.checkbox("Skip items with zero balance (no stock)", value=True, key=f"msc_skip0_{sid}")
+    skip0 = o1.checkbox("Skip items with NO stock and NO movement this month (items issued to nil are still printed)", value=True, key=f"msc_skip0_{sid}")
     blanks = int(o2.number_input("Blank rows at the end of each category (for items not in the list)", min_value=0, max_value=30,
                                  value=5, step=1, key=f"msc_blank_{sid}"))
-    pool = df[df["expected_qty"].abs() > MSC_EPS] if skip0 else df
+    pool = df[_msc_active_mask(df)] if skip0 else df
     hidden = len(df) - len(pool)
     cats = list(dict.fromkeys(pool["category"]))
     counters = sorted({c for c in pool["counter"] if c})
@@ -20302,10 +20410,10 @@ def msc_entry_editor(sid, df, locked, fac):
     prog = {c: (int(sub_all[sub_all["category"] == c]["physical_qty"].notna().sum()), int((sub_all["category"] == c).sum())) for c in cats}
     pick = st.selectbox("Category", cats, format_func=lambda c: f"{c}  ({prog[c][0]}/{prog[c][1]} counted)", key=f"msc_ecat_{sid}")
     show_exp = st.checkbox("Show expected qty (manager - not blind)", key=f"msc_showexp_{sid}")
-    hide0 = st.checkbox("Hide zero-balance items (untick to enter an item that was not on the sheet)", value=True, key=f"msc_hide0_{sid}")
+    hide0 = st.checkbox("Hide items with no stock and no movement (items issued to nil stay visible; untick to enter an item not on the sheet)", value=True, key=f"msc_hide0_{sid}")
     sub = df[df["category"] == pick].copy()
     if hide0:
-        sub = sub[(sub["expected_qty"].abs() > MSC_EPS) | sub["physical_qty"].notna()
+        sub = sub[_msc_active_mask(sub) | sub["physical_qty"].notna()
                   | (sub["extra_issued"] != 0) | (sub["extra_received"] != 0)]
     cols = ["id", "sl_no", "prod_id", "item_name", "size", "unit"] + (["expected_qty"] if show_exp else []) + \
            ["extra_issued", "extra_received", "physical_qty", "remarks"]
