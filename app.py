@@ -18066,6 +18066,39 @@ table.sig{{width:100%;border-collapse:collapse;margin-top:18px;break-inside:avoi
 
 
 # ---------------------------------------------------------------- PDF (real, selectable text, A4)
+_RP_PDF_FONTS = {}
+
+
+def _rp_pdf_fonts():
+    """(regular, bold, size factor) of a font that is EMBEDDED in the PDF. The built-in Helvetica is not embedded, so some PDF readers
+    replace it with another font and the letters get wrong gaps. Liberation Sans (same widths as Arial) -> DejaVu Sans -> Vera (ships with reportlab)."""
+    if "v" in _RP_PDF_FONTS:
+        return _RP_PDF_FONTS["v"]
+    res = ("Helvetica", "Helvetica-Bold", 1.0)
+    try:
+        import os
+        import reportlab
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        vd = os.path.join(os.path.dirname(reportlab.__file__), "fonts")
+        for name, reg, bd, sc in (("RPLiberation", "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", 1.0),
+                                  ("RPDejaVu", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 0.92),
+                                  ("RPVera", os.path.join(vd, "Vera.ttf"), os.path.join(vd, "VeraBd.ttf"), 0.93)):
+            try:
+                if os.path.exists(reg) and os.path.exists(bd):
+                    pdfmetrics.registerFont(TTFont(name, reg))
+                    pdfmetrics.registerFont(TTFont(name + "-B", bd))
+                    pdfmetrics.registerFontFamily(name, normal=name, bold=name + "-B", italic=name, boldItalic=name + "-B")
+                    res = (name, name + "-B", sc)
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    _RP_PDF_FONTS["v"] = res
+    return res
+
+
 def _rp_pdf(doc):
     try:
         from reportlab.lib import colors
@@ -18076,20 +18109,21 @@ def _rp_pdf(doc):
         from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
     except ImportError:
         return None
+    FN, FB, FSC = _rp_pdf_fonts()
     land = doc["orient"] == "L"
     ps = landscape(A4) if land else A4
     lm = rm = 26
     avail = ps[0] - lm - rm
-    fs = 8.2 if "REPAIR & RETURNS" in str(doc.get("title", "")).upper() else (7.3 if land else 7.8)
-    base = ParagraphStyle("b", fontName="Helvetica", fontSize=fs, leading=fs + 2.4)
-    bold = ParagraphStyle("bb", parent=base, fontName="Helvetica-Bold")
+    fs = (8.2 if "REPAIR & RETURNS" in str(doc.get("title", "")).upper() else (7.3 if land else 7.8)) * FSC
+    base = ParagraphStyle("b", fontName=FN, fontSize=fs, leading=fs + 2.4)
+    bold = ParagraphStyle("bb", parent=base, fontName=FB)
     hdr = ParagraphStyle("h", parent=bold, textColor=colors.white)
     rgt, ctr = ParagraphStyle("r", parent=base, alignment=TA_RIGHT), ParagraphStyle("c", parent=base, alignment=TA_CENTER)
-    rgtb = ParagraphStyle("rb", parent=rgt, fontName="Helvetica-Bold")
+    rgtb = ParagraphStyle("rb", parent=rgt, fontName=FB)
     P = lambda t, s=base: Paragraph(_rp_pdftxt(t), s)
     units = " | ".join(doc["units"])
     story = [Paragraph(_rp_pdftxt(doc["company"]), ParagraphStyle("co", parent=bold, fontSize=11, alignment=TA_CENTER, spaceAfter=2)),
-             Paragraph(_rp_pdftxt(doc["title"].upper()), ParagraphStyle("t", fontName="Helvetica-Bold", fontSize=15, leading=18, alignment=TA_CENTER, spaceAfter=6))]
+             Paragraph(_rp_pdftxt(doc["title"].upper()), ParagraphStyle("t", fontName=FB, fontSize=15, leading=18, alignment=TA_CENTER, spaceAfter=6))]
     meta = [("Company", doc["company"]), ("Unit / Factory", units), ("Report Title", doc["title"]), ("Report Type", doc["type"]),
             ("Reporting Period", doc["period"]), ("Generated On", doc["generated"])]
     kw = avail * 0.14
@@ -18209,7 +18243,7 @@ def _rp_pdf(doc):
             n = len(self._pages)
             for pg in self._pages:
                 self.__dict__.update(pg)
-                self.setFont("Helvetica", 7)
+                self.setFont(FN, 7)
                 self.setFillGray(0.3)
                 self.drawString(lm, ps[1] - 16, head_line[:200])
                 self.setLineWidth(0.4)
