@@ -8388,7 +8388,7 @@ def _rpx_table(rp, show_unit):
     if show_unit:
         h.append("<th>Unit</th>")
     h.append("<th>Gate Pass</th><th>Item</th><th class='n'>Qty</th><th>Type</th><th>Return Type</th><th>Supplier</th>"
-             "<th>Sent</th><th>Returned</th><th>Status</th><th class='n'>Aging</th><th>অনুমতি দিয়েছেন</th><th>Gate Pass এনেছেন</th></tr>")
+             "<th>Sent</th><th>Returned</th><th>Status</th><th class='n'>Aging</th><th>অনুমতি দিয়েছেন</th><th>Gate Pass এনেছেন</th><th>Store Officer (Approval)</th></tr>")
     for r in rp.to_dict("records"):
         bg, fg = _RPX_PILL.get(str(r.get("status") or ""), ("#EEF2F7", "#475569"))
         ag = r.get("aging_days")
@@ -8404,7 +8404,8 @@ def _rpx_table(rp, show_unit):
                  f"<td>{e(str(r.get('return_type') or ''))}</td><td>{e(str(r.get('supplier_name') or ''))}</td>"
                  f"<td>{e(str(r.get('sent_date') or ''))}</td><td>{e(str(r.get('return_date') or ''))}</td>"
                  f"<td><span class='rpx-pill' style='background:{bg};color:{fg}'>{e(str(r.get('status') or ''))}</span></td>"
-                 f"<td class='n'>{ag_html}</td><td>{e(str(r.get('approved_by') or ''))}</td><td>{e(str(r.get('gatepass_carrier') or ''))}</td></tr>")
+                 f"<td class='n'>{ag_html}</td><td>{e(str(r.get('approved_by') or ''))}</td><td>{e(str(r.get('gatepass_carrier') or ''))}</td>"
+                 f"<td>{e(str(r.get('officer_name') or ''))}</td></tr>")
     h.append("</table></div></div>")
     return "".join(h)
 
@@ -19368,7 +19369,7 @@ def _rp_rr_load(P):
                        COALESCE(qty,0) AS qty, COALESCE(NULLIF(TRIM(source_type),''),'Other') AS stype,
                        COALESCE(NULLIF(TRIM(return_type),''),'-') AS rtype, COALESCE(NULLIF(TRIM(supplier_name),''),'(Supplier not given)') AS supplier,
                        sent_date, return_date, COALESCE(status,'') AS status, COALESCE(approved_by,'') AS approved,
-                       COALESCE(gatepass_carrier,'') AS carrier
+                       COALESCE(gatepass_carrier,'') AS carrier, COALESCE(officer_name,'') AS officer
                 FROM repair_returns WHERE factory_name = ANY(%s) ORDER BY factory_name, id""", (list(P["units"]),))
     if df.empty:
         return df
@@ -19447,14 +19448,15 @@ def rp_repair_returns(P):
             # 2. items still outside
             if len(pend):
                 c2 = [("SL", "i"), ("Ref / Gate Pass", "t"), ("Item", "t"), ("Purpose", "t"), ("Sent To", "t"), ("Qty", "q"),
-                      ("Sent Date", "d"), ("Days Out", "i"), ("Permission Given By", "t"), ("Store Approval By", "t"), ("Status", "t")]
+                      ("Sent Date", "d"), ("Days Out", "i"), ("Permission Given By", "t"), ("Gate Pass Brought To Store By", "t"),
+                      ("Approved By (Store Officer)", "t"), ("Status", "t")]
                 r2 = []
                 for n, r in enumerate(pend.itertuples(), 1):
                     ref = r.track + (f" / GP {r.gate}" if r.gate else "")
                     r2.append([n, ref, r.item, r.stype, r.supplier, r.qty, r.sent_date, None if pd.isna(r.days) else float(r.days),
-                               r.approved or NR, r.carrier or NR, _alert(r.days)])
+                               r.approved or NR, r.carrier or NR, r.officer or NR, _alert(r.days)])
                 secs.append(_rp_sec(c2, r2, [f"TOTAL STILL OUTSIDE - {u} ({len(pend)} item)", None, None, None, None, float(pend["qty"].sum()),
-                                             None, None, None, None, f"{int(d['overdue'].sum())} overdue"],
+                                             None, None, None, None, None, f"{int(d['overdue'].sum())} overdue"],
                                     heading="2. ITEMS STILL OUTSIDE - FOLLOW UP (oldest first)",
                                     note=f"Status: On time = up to 14 days outside; Follow up = 15 to {_RPX_OVERDUE_DAYS} days; OVERDUE = more than {_RPX_OVERDUE_DAYS} days."))
                 # 3. party wise
@@ -19471,11 +19473,11 @@ def rp_repair_returns(P):
                                     heading="3. WHO HOLDS OUR ITEMS (party-wise)"))
             # 4. already settled
             c4 = [("SL", "i"), ("Ref / Gate Pass", "t"), ("Item", "t"), ("Purpose", "t"), ("Supplier / Party", "t"), ("Qty", "q"),
-                  ("Sent Date", "d"), ("Returned Date", "d"), ("Days Taken", "i"), ("Result", "t"), ("Permission Given By", "t"), ("Store Approval By", "t")]
+                  ("Sent Date", "d"), ("Returned Date", "d"), ("Days Taken", "i"), ("Result", "t"), ("Permission Given By", "t"), ("Gate Pass Brought To Store By", "t"), ("Approved By (Store Officer)", "t")]
             r4 = [[n, r.track + (f" / GP {r.gate}" if r.gate else ""), r.item, r.stype, r.supplier, r.qty, r.sent_date, r.return_date or None,
-                   None if pd.isna(r.days) else float(r.days), "Returned" if r.status == "Returned" else r.status, r.approved or NR, r.carrier or NR]
+                   None if pd.isna(r.days) else float(r.days), "Returned" if r.status == "Returned" else r.status, r.approved or NR, r.carrier or NR, r.officer or NR]
                   for n, r in enumerate(settled.itertuples(), 1)]
-            secs.append(_rp_sec(c4, r4, [f"TOTAL - {u} ({len(settled)} item)", None, None, None, None, float(settled["qty"].sum()), None, None, None, None, None, None] if len(settled) else None,
+            secs.append(_rp_sec(c4, r4, [f"TOTAL - {u} ({len(settled)} item)", None, None, None, None, float(settled["qty"].sum()), None, None, None, None, None, None, None] if len(settled) else None,
                                 heading="4. ALREADY RETURNED / CLOSED", empty="No item has come back or been closed in this period."))
         if show_ir and not ir.empty:
             x = ir[ir["factory_name"] == u]
@@ -19499,7 +19501,8 @@ def rp_repair_returns(P):
             ("↩️", "Returned to Store", f"{ir_n:,}", "Issued material taken back", "teal")]
     notes = ["This report lists every item that left the factory on a Gate Pass for repair, warranty or rejected return. 'Still Outside' = not yet returned.",
              "Days Outside = Sent Date to today for pending items; Days Taken = Sent Date to Returned Date for settled items.",
-             "Permission Given By = who allowed the item to go out. Store Approval By = who obtained the store's approval / brought the Gate Pass.",
+             "Permission Given By = who allowed the item to go out. Gate Pass Brought To Store By = the person (e.g. from the Maintenance department) who brought the Gate Pass to the store to request approval. "
+             "Approved By (Store Officer) = the store officer who recorded and approved the Gate Pass entry.",
              "Quantities are shown as entered; items with different units are not converted. The period filters on Sent Date - tick 'All dates' to see every pending item."]
     return blocks, notes, kpis
 
