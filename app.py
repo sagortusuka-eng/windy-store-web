@@ -7276,7 +7276,6 @@ def req_item_check_ui():
 
 
 def req_import_view():
-    req_item_check_ui()
     f = st.file_uploader("ERP Requisition file (Excel / CSV / PDF)", type=["xlsx", "xls", "csv", "pdf"], key="req_file")
     if not f:
         return
@@ -8168,6 +8167,8 @@ def tab_requisition():
         except Exception as e:
             st.error(f"Req Tracker load kora jayni: {e}")
         return
+    if st.session_state.get("role") not in READ_ONLY_ROLES:
+        req_item_check_ui()      # items of imported requisitions that are missing in Inventory - shown right here, not hidden in the import box
     with st.expander("📥 Import requisition (Excel / CSV)"):
         if guard():
             req_import_view()
