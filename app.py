@@ -3443,6 +3443,129 @@ def update_tx_meta(tid, date_s, notes):
     return True
 
 
+def _tx_fields_core(t, date_s, notes, challan=None, supplier=None, sr_no=None, section=None):
+    """One locked transaction row: date / remarks / challan / supplier / SR no / section. NO stock effect (qty and item have their own functions)."""
+    tid, ttype = int(t["id"]), t["trans_type"]
+    d = parse_date(date_s)
+    if not d:
+        raise ValueError("Date thik nei.")
+    old_d = parse_date(t["date"])
+    if ttype != OPENING_TYPE and (old_d is None or d.date() != old_d.date()):
+        pm = pre_opening_msg(t["factory_name"], [t["sl_no"]], d, {int(t["sl_no"]): t["item_name"]})
+        if pm:
+            raise ValueError(pm)
+    elif ttype == OPENING_TYPE and old_d and d.date() > old_d.date():
+        firsts = [parse_date(r_["date"]) for r_ in q("SELECT date FROM transactions WHERE factory_name=%s AND sl_no=%s AND trans_type<>%s AND id<>%s",
+                                                     (t["factory_name"], t["sl_no"], OPENING_TYPE, tid))]
+        firsts = [x for x in firsts if x]
+        if firsts and d > min(firsts):
+            raise ValueError("Opening Balance-er tarikh age-r transaction-er por-e niye jaoa jabe na.")
+    sets, vals, diff = ["date=%s", "day=%s", "notes=%s"], [date_s, d.day, notes], []
+    if (t["date"] or "") != date_s:
+        diff.append(f"date '{t['date']}'->'{date_s}'")
+    if (t["notes"] or "") != (notes or ""):
+        diff.append("notes")
+    if challan is not None and ttype == "Supplier. Rec":
+        sets.append("challan_no=%s"); vals.append(challan)
+        if (t.get("challan_no") or "") != challan:
+            diff.append(f"challan '{t.get('challan_no') or ''}'->'{challan}'")
+    if supplier is not None and ttype == "Supplier. Rec":
+        sets.append("supplier_name=%s"); vals.append(supplier)
+        if (t.get("supplier_name") or "") != supplier:
+            diff.append(f"supplier '{t.get('supplier_name') or ''}'->'{supplier}'")
+    if sr_no is not None and ttype in ISSUE_TYPES:
+        sets.append("req_no=%s"); vals.append(sr_no)
+        if (t.get("req_no") or "") != sr_no:
+            diff.append(f"SR '{t.get('req_no') or ''}'->'{sr_no}'")
+    if section is not None and ttype in ISSUE_TYPES:
+        sets.append("section=%s"); vals.append(section)
+        if (t.get("section") or "") != section:
+            diff.append(f"section '{t.get('section') or ''}'->'{section}'")
+    run(f"UPDATE transactions SET {', '.join(sets)} WHERE id=%s", tuple(vals + [tid]))
+    if ttype == "Supplier. Rec":
+        if (t["date"] or "") != date_s and run("SELECT to_regclass('public.req_receipt_links')")[0][0]:
+            run("""UPDATE requisition_tracking SET received_date=%s WHERE received_date=%s
+                   AND id IN (SELECT req_id FROM req_receipt_links WHERE tx_id=%s)""", (date_s, t["date"], tid))
+        if (challan is not None or supplier is not None) and run("SELECT to_regclass('public.warranty_records')")[0][0]:
+            if challan is not None:
+                run("UPDATE warranty_records SET challan=%s WHERE tx_id=%s", (challan, tid))
+            if supplier is not None:
+                run("UPDATE warranty_records SET supplier=%s WHERE tx_id=%s", (supplier, tid))
+    return diff
+
+
+@tx
+def update_tx_fields(tid, date_s, notes, challan=None, supplier=None, sr_no=None, section=None):
+    rows = q("SELECT * FROM transactions WHERE id=%s FOR UPDATE", (tid,))
+    if not rows:
+        raise ValueError("Transaction paoa jay nai.")
+    t = rows[0]
+    diff = _tx_fields_core(t, date_s, t["notes"] if notes is None else notes, challan, supplier, sr_no, section)
+    audit("EDIT_TRANS", f"Transaction {tid}: {t['factory_name']} {t['trans_type']} {float(t['qty'] or 0):g} of {t['prod_id']} ({t['item_name']}) "
+                        f"SL {t['sl_no']}: " + (", ".join(diff) or "no change"))
+    return True
+
+
+@tx
+def update_tx_group(ids, date_s, challan=None, supplier=None, sr_no=None):
+    """Same Challan No / Supplier / SR No / Date on every line of one saved challan or SR slip (no stock effect)."""
+    n, first = 0, None
+    for tid in ids:
+        rows = q("SELECT * FROM transactions WHERE id=%s FOR UPDATE", (int(tid),))
+        if not rows:
+            continue
+        t = rows[0]
+        diff = _tx_fields_core(t, date_s, t["notes"], challan, supplier, sr_no)
+        first = first or (t, diff)
+        n += 1
+    if first:
+        t, diff = first
+        audit("EDIT_TX_GROUP", f"{t['factory_name']}: {n} line(s) of {t['trans_type']} edited together: " + (", ".join(diff) or "no change"))
+    return n or None
+
+
+@tx
+def change_tx_item(tid, new_sl):
+    """The wrong item was picked: move a Supplier Receipt / Issue to the right item. Both items' stock are corrected;
+    a receipt's requisition Received qty is undone and re-allocated for the new item."""
+    rows = q("SELECT * FROM transactions WHERE id=%s FOR UPDATE", (tid,))
+    if not rows:
+        raise ValueError("Transaction paoa jay nai.")
+    t = rows[0]
+    ttype, fac, qty = t["trans_type"], t["factory_name"], float(t["qty"] or 0)
+    if ttype not in ("Supplier. Rec", "Issued"):
+        raise ValueError("Shudhu Supplier Receipt ar Issue-er item bodlano jay.")
+    if "Auto-transferred" in (t["notes"] or ""):
+        raise ValueError("Ei Issue-te auto-transfer jukto - item bodlale transfer mile na. Delete kore notun kore din.")
+    if int(new_sl) == int(t["sl_no"]):
+        raise ValueError("Ekoi item - bodlanor dorkar nei.")
+    inv = {r_["sl_no"]: r_ for r_ in q("""SELECT sl_no, prod_id, item_name, COALESCE(current_stock,0) AS s FROM inventory
+                                          WHERE factory_name=%s AND sl_no = ANY(%s) FOR UPDATE""", (fac, [int(t["sl_no"]), int(new_sl)]))}
+    old, new = inv.get(int(t["sl_no"])), inv.get(int(new_sl))
+    if not old or not new:
+        raise ValueError("Item inventory-te paoa jay nai.")
+    d = parse_date(t["date"])
+    pm = pre_opening_msg(fac, [new["sl_no"]], d, {int(new["sl_no"]): new["item_name"]}) if d else ""
+    if pm:
+        raise ValueError(pm)
+    if ttype == "Supplier. Rec":
+        if float(old["s"]) - qty < -1e-9:
+            raise ValueError(f"{old['item_name']}-er stock {float(old['s']):g} — {qty:g} komale negative hobe (mal ager-i issue hoyeche).")
+        req_undo_receipt(tid)
+        run("UPDATE inventory SET current_stock=current_stock-%s WHERE sl_no=%s AND factory_name=%s", (qty, old["sl_no"], fac))
+        run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (qty, new["sl_no"], fac))
+        run("UPDATE transactions SET sl_no=%s, prod_id=%s, item_name=%s WHERE id=%s", (new["sl_no"], new["prod_id"], new["item_name"], tid))
+        _req_alloc(fac, new["prod_id"], qty, t["date"], tid, int(new["sl_no"]))
+    else:
+        if float(new["s"]) - qty < -1e-9:
+            raise ValueError(f"{new['item_name']}-er stock {float(new['s']):g} — {qty:g} issue korle negative hobe.")
+        run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (qty, old["sl_no"], fac))
+        run("UPDATE inventory SET current_stock=current_stock-%s WHERE sl_no=%s AND factory_name=%s", (qty, new["sl_no"], fac))
+        run("UPDATE transactions SET sl_no=%s, prod_id=%s, item_name=%s WHERE id=%s", (new["sl_no"], new["prod_id"], new["item_name"], tid))
+    audit("CHANGE_TX_ITEM", f"Transaction {tid} ({fac} {ttype} {qty:g}): item '{old['item_name']}' (SL {old['sl_no']}) -> '{new['item_name']}' (SL {new['sl_no']}), stock of both items corrected")
+    return True
+
+
 def zebra_styles(row):
     # row stripes + alternating column bands (st.dataframe cannot draw cell borders, so columns are separated by tint)
     shades = (("#FFFFFF", "#F1F7FF"), ("#EAF3FF", "#DCEBFF"))[row.name % 2]
@@ -3459,7 +3582,9 @@ def tx_manager_panel(df, kp, title="🔐 Manager: Delete / Edit a transaction"):
         rows = {int(r["id"]): r for r in df.head(500).to_dict("records")}
         tid = int(st.selectbox("Transaction ID", list(rows), key=f"{kp}_mgr_id",
                                format_func=lambda i: f"ID {i} | {rows[i].get('item_name', '')} | qty {rows[i].get('qty', '')} | {rows[i].get('date', '')}"))
-        cur = q_c("SELECT date, notes FROM transactions WHERE id=%s", (tid,))
+        cur = q_c("""SELECT date, notes, trans_type, factory_name, sl_no, qty, COALESCE(challan_no,'') AS challan_no,
+                     COALESCE(supplier_name,'') AS supplier_name, COALESCE(req_no,'') AS req_no, COALESCE(section,'') AS section
+                     FROM transactions WHERE id=%s""", (tid,))
         if not cur:
             st.warning("Transaction paoa jay nai (ager-i delete hoye thakte pare).")
             return
@@ -3472,14 +3597,43 @@ def tx_manager_panel(df, kp, title="🔐 Manager: Delete / Edit a transaction"):
                 st.error("Delete confirm tick korun.")
             elif delete_transaction(tid):
                 done("Transaction deleted, stock reverted.")
-        cur_d = parse_date(cur[0]["date"])
-        ed = st.date_input("New date", value=cur_d.date() if cur_d else date.today(), key=f"{kp}_ed_date_{tid}")
-        en = st.text_input("Remarks", value=cur[0]["notes"] or "", key=f"{kp}_ed_notes_{tid}")
+        c0 = cur[0]
+        ttype_ = c0["trans_type"]
+        cur_d = parse_date(c0["date"])
+        e1, e2 = st.columns(2)
+        ed = e1.date_input("New date", value=cur_d.date() if cur_d else date.today(), key=f"{kp}_ed_date_{tid}")
+        en = e2.text_input("Remarks", value=c0["notes"] or "", key=f"{kp}_ed_notes_{tid}")
+        ech = esup = esr = esec = None
+        if ttype_ == "Supplier. Rec":
+            ech = e1.text_input("Challan No", value=c0["challan_no"], key=f"{kp}_ed_ch_{tid}")
+            esup = e2.text_input("Supplier", value=c0["supplier_name"], key=f"{kp}_ed_sup_{tid}")
+        elif ttype_ in ISSUE_TYPES:
+            esr = e1.text_input("SR / Issue slip No", value=c0["req_no"], key=f"{kp}_ed_sr_{tid}")
+            esec = e2.text_input("Section", value=c0["section"], key=f"{kp}_ed_sec_{tid}")
         if st.button("💾 Save edit", key=f"{kp}_ed_btn"):
             if not pw_ok:
                 st.error("Manager password thik nei.")
-            elif update_tx_meta(tid, ed.strftime(DATE_FMT), en.strip()):
+            elif update_tx_fields(tid, ed.strftime(DATE_FMT), en.strip(),
+                                  challan=None if ech is None else ech.strip(), supplier=None if esup is None else esup.strip(),
+                                  sr_no=None if esr is None else esr.strip(), section=None if esec is None else esec.strip()):
                 done("Transaction updated.")
+        if ttype_ in ("Supplier. Rec", "Issued"):
+            st.markdown("**🔁 Vul item select hoyechilo? Item bodlan** (duto item-er stock auto thik hobe)")
+            ft = st.text_input("Notun item khujun (nam / ERP code / size)", key=f"{kp}_it_q_{tid}").strip()
+            cands = search_items(c0["factory_name"], ft)[:30] if len(ft) >= 2 else []
+            lab = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · stock {float(r['stock']):g}": r
+                   for r in cands if int(r["sl_no"]) != int(c0["sl_no"])}
+            pk = st.selectbox("Notun (shothik) item", list(lab) if lab else ["— age item khujun —"], key=f"{kp}_it_pk_{tid}")
+            ic = confirm_box(f"{kp}_it_conf_{tid}", "⚠️ Ami confirm korchi - ei transaction onno item-e jabe, duto item-er stock thik hobe.")
+            if st.button("🔁 Item bodlan", key=f"{kp}_it_btn"):
+                if not pw_ok:
+                    st.error("Manager password thik nei.")
+                elif pk not in lab:
+                    st.error("Age notun item khuje select korun.")
+                elif not ic:
+                    st.error("Confirm tick din.")
+                elif change_tx_item(tid, int(lab[pk]["sl_no"])):
+                    done("Item bodlano hoyeche - duto item-er stock thik kora hoyeche.")
 
 
 def tab_transactions():
@@ -15689,6 +15843,46 @@ def rr_move_challan(src, ch, sup, dt, dest, reason):
     return len(plan)
 
 
+def _tx_header_edit(kind, fac, ids, old_no, old_sup, old_date, key):
+    """Change Challan No / Supplier / Date (kind 'rec') or SR No / Date (kind 'sr') of ALL lines of one saved challan / slip.
+    No stock effect. Store Manager password + confirmation, same rule as every other fix."""
+    with st.container(border=True):
+        what = "challan" if kind == "rec" else "slip"
+        st.markdown(f"**📝 {'Challan No / Supplier / Date' if kind == 'rec' else 'SR No / Date'} bodlan** (ei {what}-er sob line-e ekshathe)")
+        c = st.columns(3)
+        od = parse_date(old_date)
+        n_no = c[0].text_input("Challan No" if kind == "rec" else "SR No", value=old_no, key=f"{key}_no").strip()
+        n_sup = c[1].text_input("Supplier", value=old_sup, key=f"{key}_sup").strip() if kind == "rec" else None
+        n_dt = c[2].date_input("Date", value=od.date() if od else local_now().date(), key=f"{key}_dt")
+        pw_ok = mgr_check(f"{key}_pw")
+        conf = confirm_box(f"{key}_conf", "⚠️ Ami confirm korchi - ei header bodlabe (stock bodlabe na).")
+        if st.button("💾 Header save korun", type="primary", key=f"{key}_btn", disabled=not can_write_ri()):
+            date_s = n_dt.strftime(DATE_FMT)
+            if kind == "sr" and not n_no:
+                st.error("SR No khali rakha jabe na.")
+            elif n_no == old_no and (n_sup is None or n_sup == old_sup) and date_s == (old_date or ""):
+                st.info("Kono poriborton nei.")
+            elif not pw_ok:
+                st.error("Store Manager password din.")
+            elif not conf:
+                st.error("Confirm tick din.")
+            elif kind == "sr" and n_no != old_no and q("SELECT 1 FROM transactions WHERE factory_name=%s AND req_no=%s AND NOT (id = ANY(%s)) LIMIT 1",
+                                                      (fac, n_no, [int(i) for i in ids])):
+                st.error(f"SR {n_no} ei unit-e ager-i onno slip-e use hoyeche - onno number din.")
+            elif guard():
+                res = update_tx_group([int(i) for i in ids], date_s, challan=n_no if kind == "rec" else None,
+                                      supplier=n_sup if kind == "rec" else None, sr_no=n_no if kind == "sr" else None)
+                if res:
+                    who = st.session_state.get("user", "")
+                    st.session_state["ri_saved"] = {"user": who, "sr": n_no or old_no, "kind": "fix", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
+                                                    "detail": f"{res} line-er header bodlano hoyeche"}
+                    if kind == "sr":
+                        st.session_state["last_req_no"] = n_no
+                    for k_ in (f"{key}_pw", f"{key}_conf"):
+                        st.session_state.pop(k_, None)
+                    done(f"✅ {who}, {res} ti line-er header save hoyeche ({n_no or '-'} · {date_s}).")
+
+
 @_frag
 def _rr_fix_panel():
     """Edit / delete a challan that was already received: change a quantity or remove a wrong line. Stock follows; the
@@ -15735,6 +15929,7 @@ def _rr_fix_panel():
         if n_pend:
             st.caption(f"⏳ Ei challan-er jonno {n_pend} ti correction request ager-i pending ache (upore '📥 Correction request' e dekhun).")
         # ---- ভুল unit-এ receive হলে: পুরো challan অন্য unit-এ সরিয়ে দিন ----
+        _tx_header_edit("rec", fac, [ln["id"] for ln in lines], ch, sup, dt, "rrh_" + re.sub(r"\W+", "_", f"{ch}|{sup}|{dt}"))
         _dest = other_factory(fac)
         with st.container(border=True):
             st.caption(f"🔀 Ei challan vul unit-e receive hoyechilo? Pura challan **{fac}** theke **{_dest}**-e soriye din.")
@@ -15938,6 +16133,7 @@ def _ri_fix_panel():
                     st.session_state["ri_saved"] = {"user": who, "sr": sr, "kind": "fix", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
                                                     "detail": f"Section: {_new_sec}"}
                     done(f"✅ {who}, SR {sr}-er Section save hoyeche: {_new_sec}")
+        _tx_header_edit("sr", fac, [ln["id"] for ln in lines], sr, "", str(lines[0]["date"] or ""), "rih_" + re.sub(r"\W+", "_", str(sr)))
         h = st.columns([3.2, 1.3, 1.1, 1.4, 1.1])
         for col, t in zip(h, ["Item", "ERP Code", "Ager qty", "Notun qty", "Bad den"]):
             col.caption(t)
@@ -19011,6 +19207,127 @@ def rp_gate_pass(P):
 
 
 
+RP_REPAIR_STATUS = ["All", "Pending Return", "Overdue (over 30 days)", "Returned", "Closed"]
+
+
+def _rp_rr_load(P):
+    df = qdf("""SELECT id, factory_name, COALESCE(tracking_code,'') AS track, COALESCE(gate_pass_no,'') AS gate, COALESCE(item_name,'') AS item,
+                       COALESCE(qty,0) AS qty, COALESCE(NULLIF(TRIM(source_type),''),'Other') AS stype,
+                       COALESCE(NULLIF(TRIM(return_type),''),'-') AS rtype, COALESCE(NULLIF(TRIM(supplier_name),''),'(Supplier not given)') AS supplier,
+                       sent_date, return_date, COALESCE(status,'') AS status, COALESCE(approved_by,'') AS approved,
+                       COALESCE(gatepass_carrier,'') AS carrier
+                FROM repair_returns WHERE factory_name = ANY(%s) ORDER BY factory_name, id""", (list(P["units"]),))
+    if df.empty:
+        return df
+    df = period_filter_df(df, "sent_date", P["d1"], P["d2"])
+    if P.get("item") and not df.empty:
+        df = df[df["item"].str.contains(P["item"], case=False, regex=False)]
+    if df.empty:
+        return df
+    df = df.copy()
+    df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0.0)
+
+    def _days(r):
+        if r["status"] == "Pending Return":
+            return age_days(r["sent_date"])
+        return age_days(r["sent_date"], r["return_date"]) if parse_date(r["return_date"]) else None
+    df["days"] = df.apply(_days, axis=1)
+    df["overdue"] = (df["status"] == "Pending Return") & (pd.to_numeric(df["days"], errors="coerce").fillna(0) > _RPX_OVERDUE_DAYS)
+    st_ = P.get("status")
+    if st_ == "Pending Return":
+        df = df[df["status"] == "Pending Return"]
+    elif st_ == "Overdue (over 30 days)":
+        df = df[df["overdue"]]
+    elif st_ in ("Returned", "Closed"):
+        df = df[df["status"] == st_]
+    df["_sd"] = _parse_dates(df["sent_date"])
+    return df.sort_values(["factory_name", "_sd", "id"], na_position="last")
+
+
+def rp_repair_returns(P):
+    df = _rp_rr_load(P)
+    try:
+        ir = qdf("""SELECT factory_name, item_name, COALESCE(qty,0) AS qty, COALESCE(original_qty,0) AS oq, return_date,
+                           COALESCE(reason,'') AS reason, COALESCE(returned_by,'') AS who
+                    FROM issue_returns WHERE factory_name = ANY(%s) ORDER BY id""", (list(P["units"]),))
+        if not ir.empty:
+            ir = period_filter_df(ir, "return_date", P["d1"], P["d2"])
+            if P.get("item") and not ir.empty:
+                ir = ir[ir["item_name"].astype(str).str.contains(P["item"], case=False, regex=False)]
+    except Exception:
+        ir = pd.DataFrame()
+    show_ir = P.get("status") in (None, "All")
+
+    def build(u):
+        d = df[df["factory_name"] == u] if not df.empty else df
+        secs = []
+        if not d.empty:
+            pend = d[d["status"] == "Pending Return"]
+            c1 = [("Type", "t"), ("Records", "i"), ("Qty (as entered)", "q"), ("Pending", "i"), ("Pending Qty", "q"),
+                  ("Overdue", "i"), ("Returned", "i"), ("Closed", "i")]
+            r1 = []
+            for k, g in d.groupby("stype", sort=True):
+                p_ = g[g["status"] == "Pending Return"]
+                r1.append([k, len(g), float(g["qty"].sum()), len(p_), float(p_["qty"].sum()), int(g["overdue"].sum()),
+                           int((g["status"] == "Returned").sum()), int((g["status"] == "Closed").sum())])
+            t1 = [f"TOTAL - {u}", len(d), float(d["qty"].sum()), len(pend), float(pend["qty"].sum()), int(d["overdue"].sum()),
+                  int((d["status"] == "Returned").sum()), int((d["status"] == "Closed").sum())]
+            secs.append(_rp_sec(c1, r1, t1, heading="1. SUMMARY BY TYPE (Repair / Warranty / Rejected Return / Other)"))
+            c2 = [("Supplier / Party", "t"), ("Records", "i"), ("Qty (as entered)", "q"), ("Pending", "i"), ("Pending Qty", "q"),
+                  ("Overdue", "i"), ("Oldest Pending (days)", "i")]
+            r2 = []
+            for k, g in d.groupby("supplier", sort=False):
+                p_ = g[g["status"] == "Pending Return"]
+                old = pd.to_numeric(p_["days"], errors="coerce").max() if len(p_) else None
+                r2.append([k, len(g), float(g["qty"].sum()), len(p_), float(p_["qty"].sum()), int(g["overdue"].sum()),
+                           None if old is None or pd.isna(old) else float(old)])
+            r2.sort(key=lambda x: (-x[4], -x[3], x[0]))
+            secs.append(_rp_sec(c2, r2, [f"TOTAL - {u}", len(d), float(d["qty"].sum()), len(pend), float(pend["qty"].sum()),
+                                         int(d["overdue"].sum()), None], heading="2. SUPPLIER / PARTY-WISE POSITION"))
+            if len(pend):
+                c3 = [("Tracking", "t"), ("Gate Pass", "t"), ("Item", "t"), ("Type", "t"), ("Return Type", "t"), ("Supplier / Party", "t"),
+                      ("Qty", "q"), ("Sent Date", "d"), ("Days Out", "i"), ("Permission By", "t"), ("Gate Pass Brought By", "t"), ("Alert", "t")]
+                r3 = []
+                for r in pend.assign(_dd=pd.to_numeric(pend["days"], errors="coerce").fillna(-1)).sort_values("_dd", ascending=False).itertuples():
+                    r3.append([r.track, r.gate, r.item, r.stype, r.rtype, r.supplier, r.qty, r.sent_date,
+                               None if pd.isna(r.days) else float(r.days), r.approved, r.carrier,
+                               f"OVERDUE (>{_RPX_OVERDUE_DAYS} days)" if r.overdue else "Pending"])
+                secs.append(_rp_sec(c3, r3, [f"TOTAL PENDING - {u} ({len(pend)} record)", None, None, None, None, None, float(pend["qty"].sum()),
+                                             None, None, None, None, f"{int(d['overdue'].sum())} overdue"],
+                                    heading="3. PENDING RETURN - OLDEST FIRST (follow up these items)"))
+            c4 = [("Tracking", "t"), ("Gate Pass", "t"), ("Item", "t"), ("Type", "t"), ("Supplier / Party", "t"), ("Qty", "q"),
+                  ("Sent Date", "d"), ("Returned Date", "d"), ("Days", "i"), ("Status", "t"), ("Permission By", "t"), ("Brought By", "t")]
+            r4 = [[r.track, r.gate, r.item, r.stype, r.supplier, r.qty, r.sent_date, r.return_date,
+                   None if pd.isna(r.days) else float(r.days), r.status, r.approved, r.carrier] for r in d.itertuples()]
+            secs.append(_rp_sec(c4, r4, [f"TOTAL - {u} ({len(d)} record)", None, None, None, None, float(d["qty"].sum()), None, None, None, None, None, None],
+                                heading="4. COMPLETE REGISTER (Gate Pass / Repair / Warranty / Return)",
+                                note="Days = Sent Date to Returned Date; for items still pending, Sent Date to today."))
+        if show_ir and not ir.empty:
+            x = ir[ir["factory_name"] == u]
+            if not x.empty:
+                c5 = [("Return Date", "d"), ("Item", "t"), ("Returned Qty", "q"), ("Original Issue Qty", "q"), ("Reason", "t"), ("Returned By", "t")]
+                r5 = [[r.return_date, r.item_name, float(r.qty), float(r.oq), r.reason, r.who] for r in x.itertuples()]
+                secs.append(_rp_sec(c5, r5, [f"TOTAL - {u} ({len(x)} return)", None, float(pd.to_numeric(x["qty"], errors="coerce").sum()), None, None, None],
+                                    heading="5. RETURN TO STORE (issued material that came back into stock)"))
+        return secs
+
+    blocks = _rp_blocks(P, build)
+    n = len(df) if not df.empty else 0
+    pend = df[df["status"] == "Pending Return"] if n else df
+    ir_n = int(len(ir)) if show_ir and not ir.empty else 0
+    kpis = [("🛠", "Total Records", f"{n:,}", f"Qty {float(df['qty'].sum()) if n else 0:,.0f} (as entered)", "blue"),
+            ("⏳", "Pending Return", f"{len(pend):,}", f"Qty {float(pend['qty'].sum()) if n else 0:,.0f}", "amber"),
+            ("🚨", f"Overdue > {_RPX_OVERDUE_DAYS} days", f"{int(df['overdue'].sum()) if n else 0:,}", "Still outside the unit", "red"),
+            ("✅", "Returned", f"{int((df['status'] == 'Returned').sum()) if n else 0:,}", "Came back to the unit", "green"),
+            ("📁", "Closed", f"{int((df['status'] == 'Closed').sum()) if n else 0:,}", "Settled / non-returnable", "slate"),
+            ("↩️", "Returned to Store", f"{ir_n:,}", "Issued material taken back into stock", "teal")]
+    notes = ["Records are those in Repair & Returns (Gate Pass out for repair / warranty / rejected return). The period filters on Sent Date - "
+             "tick 'All dates' to see every item still pending.",
+             f"Overdue = status Pending Return for more than {_RPX_OVERDUE_DAYS} days.",
+             "Quantities are shown as entered; items with different units (Pcs, Kg ...) are not converted, so read totals with care."]
+    return blocks, notes, kpis
+
+
 RP_REGISTRY = [
     dict(key="stock", label="Current Stock Report", type="Stock Report", dates=False, flt=("pcat", "bcat", "item", "status"), orient="P", fn=rp_current_stock, status=RP_STOCK_STATUS),
     dict(key="stockqv", label="Stock Quantity and Stock Value Report", type="Stock Report (ERP vs Physical)", dates=False, flt=("pcat", "bcat", "item", "status"), orient="L", fn=rp_stock_qty_value, status=RP_STOCK_STATUS),
@@ -19041,6 +19358,8 @@ RP_REGISTRY = [
          status=["All", "Pending (balance > 0)", "Fully Received", "Audit not approved"]),
     dict(key="secbudget", label="Section Budget Report", type="Section Budget Report", dates=True, flt=("section", "status", "itemwise"), orient="P", fn=rp_section_budget,
          status=["All", "OVER LIMIT", "WARNING", "SAFE", "NO LIMIT SET"]),
+    dict(key="repairret", label="Repair & Returns Report (Management)", title="REPAIR & RETURNS REPORT - GATE PASS, REPAIR, WARRANTY & RETURN",
+         type="Repair & Returns Management Report", dates=True, flt=("item", "status"), orient="L", fn=rp_repair_returns, status=RP_REPAIR_STATUS),
 ]
 
 
