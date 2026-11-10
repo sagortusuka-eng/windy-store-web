@@ -7217,7 +7217,66 @@ def pdf_to_raw(upload):
     return raw, meta, ""
 
 
+def req_missing_items(fac):
+    """Requisition lines whose item is NOT in Inventory (no inventory row with the line's ERP code). Read-only.
+    Each row gets 'inv' = an existing inventory item found by name / size / alias (then it only needs linking) or None (then it needs creating)."""
+    rows = q("""SELECT r.id, r.req_no, COALESCE(r.department,'') AS dept, r.item_name, COALESCE(r.size,'') AS size, COALESCE(r.uom,'') AS uom,
+                       COALESCE(r.prod_id,'') AS prod_id, COALESCE(r.budget_category,'') AS bcat
+                FROM requisition_tracking r
+                WHERE r.factory_name=%s AND NOT EXISTS (SELECT 1 FROM inventory i WHERE i.factory_name=r.factory_name
+                                                        AND COALESCE(r.prod_id,'')<>'' AND i.prod_id=r.prod_id)
+                ORDER BY r.id DESC LIMIT 200""", (fac,))
+    out = []
+    for r in rows:
+        r = dict(r)
+        r["inv"] = find_inv_for_req(fac, "", r["item_name"], r["size"])
+        out.append(r)
+    return out
+
+
+@tx
+def req_sync_missing_items(fac, rows):
+    """Creates the missing inventory items (ERP Pending, stock 0) for the requisition lines, or links the line to the existing item it matches."""
+    bmap = budget_line_map(fac)
+    made, linked, seen = 0, 0, {}
+    for r in rows:
+        k = (norm_name(r["item_name"]), norm_size(r["size"]))
+        code = seen.get(k)
+        if code is None:
+            inv = find_inv_for_req(fac, "", r["item_name"], r["size"])
+            if inv:
+                code = inv["prod_id"]
+                linked += 1
+            else:
+                bcat = _clean(r.get("bcat"))
+                code = create_req_item(fac, "", r["item_name"], r["dept"], r["size"], r["uom"], cat=bcat, inv_dept=bmap.get(bcat, ""))
+                made += 1
+            seen[k] = code
+        run("UPDATE requisition_tracking SET prod_id=%s WHERE id=%s", (code, r["id"]))
+    audit("REQ_SYNC_ITEMS", f"{fac}: {made} new inventory item(s) created, {linked} requisition item(s) linked to existing items")
+    return made, linked
+
+
+def req_item_check_ui():
+    if "CONSOLIDATED" in str(FAC):
+        return
+    miss = req_missing_items(FAC)
+    if not miss:
+        return
+    with st.expander(f"🔎 Requisition-er {len({(norm_name(m['item_name']), norm_size(m['size'])) for m in miss})}ti item Inventory-te nei — check / add korun", expanded=True):
+        st.caption("Ei item-gulo requisition-e ache kintu Inventory-te ERP code diye khuje paoa jayni, tai Stock / Stock Movement report-e ashche na. "
+                   "Button chaple notun item (ERP Pending, stock 0) toiri hobe, ba ager moto nam-er item thakle seitar sathe link hobe.")
+        st.dataframe(pd.DataFrame([{"Req No": m["req_no"], "Item": m["item_name"], "Size": m["size"], "Qty/UOM": m["uom"],
+                                    "Inventory-te": (f"Ache: {m['inv']['item_name']} ({m['inv']['prod_id']}) - link hobe" if m["inv"] else "Nei - notun toiri hobe")}
+                                   for m in miss]), hide_index=True, use_container_width=True, height=min(80 + 35 * len(miss), 300))
+        if st.button("➕ Inventory-te add / link korun", type="primary", key="req_sync_btn") and guard():
+            res = req_sync_missing_items(FAC, miss)
+            if res is not None:
+                done(f"Inventory update hoyeche: notun item {res[0]}, ager item-er sathe link {res[1]}.")
+
+
 def req_import_view():
+    req_item_check_ui()
     f = st.file_uploader("ERP Requisition file (Excel / CSV / PDF)", type=["xlsx", "xls", "csv", "pdf"], key="req_file")
     if not f:
         return
@@ -7423,13 +7482,33 @@ def req_import_view():
                 st.error("Kono Budget Category bachai kora hoyni.")
             elif set_req_line_budget(FAC, chg):
                 done(f"Budget Category save hoyeche ({len(chg)} line).")
-    st.caption(f"Lines to import: {len(ok_rows)} | Skipped/already: {len(parsed) - len(ok_rows)}")
+    _new_names = []
+    if "CONSOLIDATED" not in str(FAC):
+        for p in parsed:
+            if not p["ok"]:
+                continue
+            try:
+                inv_ = find_inv_for_req(FAC, p["code"], p["item"], p.get("size", ""))
+            except Exception:
+                inv_ = None
+            if p.get("use_sl"):
+                p["inventory"] = "Existing item chosen"
+            elif inv_:
+                p["inventory"] = f"In inventory: {inv_['prod_id']}"
+            elif create:
+                p["inventory"] = "NEW - will be added to inventory (ERP Pending)"
+                _new_names.append(p["item"] + (f" [{p['size']}]" if p.get("size") else ""))
+            else:
+                p["inventory"] = "NOT in inventory - NOT created (tick the box above)"
+    st.caption(f"Lines to import: {len(ok_rows)} | Skipped/already: {len(parsed) - len(ok_rows)}"
+               + (f" | New inventory items: {len(_new_names)}" if _new_names else ""))
     st.dataframe(pd.DataFrame(parsed).drop(columns=["cat_hint"], errors="ignore"), hide_index=True, use_container_width=True)
     if st.button("✅ Import requisition", type="primary", disabled=not (ok_rows and sim_ack and bc_ok), key="req_import_btn"):
         n = import_requisition(FAC, ok_rows, create)
         if n is not None:
-            done(f"Requisition import done: {len(ok_rows)} line(s), new inventory items {n}. "
-                 "Audit approved qty 0 - Executive approve korbe.")
+            done(f"Requisition import done: {len(ok_rows)} line(s), new inventory items {n}"
+                 + (f" ({', '.join(_new_names[:6])}{'...' if len(_new_names) > 6 else ''})" if _new_names else "")
+                 + ". Audit approved qty 0 - Officer / Manager approve korbe.")
 
 
 def sourcing_email(rows, fac_label, sender, role):
@@ -18020,6 +18099,20 @@ def _rp_pdf(doc):
     mt.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.4, colors.grey), ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#EEF2F7")),
                             ("BACKGROUND", (2, 0), (2, -2), colors.HexColor("#EEF2F7")), ("SPAN", (1, -1), (3, -1)), ("VALIGN", (0, 0), (-1, -1), "TOP")]))
     story += [mt, Spacer(1, 6)]
+    if doc.get("kpis"):
+        _tone = {"blue": "#1D4ED8", "amber": "#F59E0B", "red": "#DC2626", "green": "#16A34A", "slate": "#64748B", "teal": "#0F766E"}
+        kn = len(doc["kpis"])
+        kc = [[Paragraph(f"<font size='6.6' color='#475569'><b>{_rp_pdftxt(k[1]).upper()}</b></font><br/>"
+                         f"<font size='15' color='#0B1F3A'><b>{_rp_pdftxt(k[2])}</b></font><br/>"
+                         f"<font size='6.6' color='#555555'>{_rp_pdftxt(k[3])}</font>", ParagraphStyle("kp", parent=base, leading=15)) for k in doc["kpis"]]]
+        kt = Table(kc, colWidths=[avail / kn] * kn)
+        kst = [("BOX", (0, 0), (-1, -1), 0.4, colors.grey), ("INNERGRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D5DFEC")),
+               ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7F9FC")), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+               ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4)]
+        for j, k in enumerate(doc["kpis"]):
+            kst.append(("LINEBEFORE", (j, 0), (j, 0), 3, colors.HexColor(_tone.get(k[4], "#1D4ED8"))))
+        kt.setStyle(TableStyle(kst))
+        story += [kt, Spacer(1, 6)]
     ub = ParagraphStyle("ub", parent=bold, textColor=colors.white, backColor=colors.HexColor("#0B1F3A"), borderPadding=(3, 4, 3, 4), spaceBefore=6, spaceAfter=6, fontSize=fs + 2)
     sh = ParagraphStyle("sh", parent=bold, fontSize=fs + 2.2, spaceBefore=7, spaceAfter=1, keepWithNext=1)
     ss = ParagraphStyle("ss", parent=base, spaceAfter=3, keepWithNext=1)
@@ -18074,6 +18167,11 @@ def _rp_pdf(doc):
                            for j in range(len(cols))]
                     if ri % 2 == 0:
                         style.append(("BACKGROUND", (0, ri), (-1, ri), colors.HexColor("#F7F9FC")))
+                    _txts = [str(c) for c in cells if isinstance(c, str)]
+                    if any(t.startswith("OVERDUE") for t in _txts):
+                        style.append(("BACKGROUND", (0, ri), (-1, ri), colors.HexColor("#FDE8E8")))
+                    elif any(t.startswith("Follow up") for t in _txts):
+                        style.append(("BACKGROUND", (0, ri), (-1, ri), colors.HexColor("#FFF6DD")))
                 data.append(row)
             t = Table(data, colWidths=widths, repeatRows=1)
             t.setStyle(TableStyle(style))
@@ -18583,36 +18681,51 @@ def rp_ledger(P):
 
 
 def rp_movement(P):
-    psql, pp = period_sql("t.date", P["d1"], P["d2"])
+    """Opening Qty + Received + Adjustment(+) - Issued - Adjustment(-) = Closing Qty, for the chosen period.
+    Closing = today's stock minus every stock-moving entry dated AFTER the period; Opening = Closing minus the period's movement."""
+    d1, d2 = P["d1"], P["d2"]
     isql, ip = _rp_inv_where(P, "i.")
-    df = qdf(f"""SELECT t.factory_name, t.sl_no, MAX(COALESCE(NULLIF(i.prod_id,''), t.prod_id, '')) AS code,
-                        MAX(COALESCE(NULLIF(t.item_name,''), i.item_name, '')) AS item, MAX(COALESCE(i.size,'')) AS size,
-                        MAX(COALESCE(NULLIF(i.unit_name,''),'Pcs')) AS uom, MAX(COALESCE(i.current_stock,0)) AS stock,
-                        SUM(CASE WHEN t.trans_type IN ('Supplier. Rec','Internal Rec') THEN t.qty ELSE 0 END) AS recv,
-                        SUM(CASE WHEN t.trans_type='Stock Adjustment (+)' THEN t.qty ELSE 0 END) AS adj_p,
-                        SUM(CASE WHEN t.trans_type IN ('Issued','Internal Issue') THEN t.qty ELSE 0 END) AS iss,
-                        SUM(CASE WHEN t.trans_type='Stock Adjustment (-)' THEN t.qty ELSE 0 END) AS adj_m
-                 FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
-                 WHERE t.factory_name = ANY(%s) AND t.trans_type IN ('Supplier. Rec','Internal Rec','Stock Adjustment (+)','Issued','Internal Issue','Stock Adjustment (-)'){psql}{isql}
-                 GROUP BY t.factory_name, t.sl_no ORDER BY t.factory_name, 4""", tuple([P["units"]] + pp + ip))
-    _rpn(df, "stock", "recv", "adj_p", "iss", "adj_m")
-    cols = [("SL", "i"), ("Item Code", "t"), ("Item Name", "t"), ("Size", "t"), ("UOM", "t"), ("Received", "q"), ("Adjustment (+)", "q"),
-            ("Issued", "q"), ("Adjustment (-)", "q"), ("Net Movement", "q"), ("Current Stock", "q")]
+    dt = _sql_date("t.date")
+    per = f"{dt} BETWEEN %s AND %s" if d1 else "TRUE"
+    aft = f"{dt} > %s" if d1 else "FALSE"
+    pp = [d1, d2] if d1 else []
+    ap = [d2] if d1 else []
+    IN_, OUT_ = "('Supplier. Rec','Internal Rec','Stock Adjustment (+)')", "('Issued','Internal Issue','Stock Adjustment (-)')"
+    sql = f"""SELECT i.factory_name, i.sl_no, COALESCE(i.prod_id,'') AS code, COALESCE(i.item_name,'') AS item, COALESCE(i.size,'') AS size,
+                     COALESCE(NULLIF(i.unit_name,''),'Pcs') AS uom, COALESCE(i.current_stock,0) AS stock,
+                     COALESCE(SUM(CASE WHEN t.trans_type IN ('Supplier. Rec','Internal Rec') AND {per} THEN t.qty ELSE 0 END),0) AS recv,
+                     COALESCE(SUM(CASE WHEN t.trans_type='Stock Adjustment (+)' AND {per} THEN t.qty ELSE 0 END),0) AS adj_p,
+                     COALESCE(SUM(CASE WHEN t.trans_type IN ('Issued','Internal Issue') AND {per} THEN t.qty ELSE 0 END),0) AS iss,
+                     COALESCE(SUM(CASE WHEN t.trans_type='Stock Adjustment (-)' AND {per} THEN t.qty ELSE 0 END),0) AS adj_m,
+                     COALESCE(SUM(CASE WHEN t.trans_type IN {IN_} AND {aft} THEN t.qty
+                                       WHEN t.trans_type IN {OUT_} AND {aft} THEN -t.qty ELSE 0 END),0) AS after_net
+              FROM inventory i
+              LEFT JOIN transactions t ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name AND t.trans_type IN ('Supplier. Rec','Internal Rec','Stock Adjustment (+)','Issued','Internal Issue','Stock Adjustment (-)')
+              WHERE i.factory_name = ANY(%s){isql}
+              GROUP BY i.factory_name, i.sl_no, i.prod_id, i.item_name, i.size, i.unit_name, i.current_stock
+              ORDER BY i.factory_name, LOWER(i.item_name), i.size"""
+    params = tuple(pp * 4 + ap * 2 + [P["units"]] + ip)
+    df = qdf(sql, params)
+    _rpn(df, "stock", "recv", "adj_p", "iss", "adj_m", "after_net")
+    if not df.empty:
+        df["closing"] = df["stock"] - df["after_net"]
+        df["opening"] = df["closing"] - (df["recv"] + df["adj_p"] - df["iss"] - df["adj_m"])
+        df = df[(df["recv"] != 0) | (df["adj_p"] != 0) | (df["iss"] != 0) | (df["adj_m"] != 0) | (df["opening"].abs() > 1e-9) | (df["closing"].abs() > 1e-9)]
+    cols = [("SL", "i"), ("Item Code", "t"), ("Item Name", "t"), ("Size", "t"), ("UOM", "t"), ("Opening Qty", "q"), ("Received", "q"),
+            ("Adjustment (+)", "q"), ("Issued", "q"), ("Adjustment (-)", "q"), ("Closing Qty", "q")]
 
     def build(u):
-        d = df[df["factory_name"] == u]
+        d = df[df["factory_name"] == u] if not df.empty else df
         if d.empty:
             return []
-        rows = []
-        for n, r in enumerate(d.itertuples(), 1):
-            rows.append([n, r.code, r.item, r.size, r.uom, r.recv, r.adj_p, r.iss, r.adj_m, r.recv + r.adj_p - r.iss - r.adj_m, r.stock])
+        rows = [[n, r.code, r.item, r.size, r.uom, r.opening, r.recv, r.adj_p, r.iss, r.adj_m, r.closing] for n, r in enumerate(d.itertuples(), 1)]
         one = d["uom"].nunique() <= 1
-        s = lambda c: float(d[c].sum()) if one else None
-        tot = [f"TOTAL - {u} ({len(d)} items)", None, None, None, None, s("recv"), s("adj_p"), s("iss"), s("adj_m"),
-               float((d["recv"] + d["adj_p"] - d["iss"] - d["adj_m"]).sum()) if one else None, s("stock")]
+        sm = lambda c: float(d[c].sum()) if one else None
+        tot = [f"TOTAL - {u} ({len(d)} items)", None, None, None, None, sm("opening"), sm("recv"), sm("adj_p"), sm("iss"), sm("adj_m"), sm("closing")]
         return [_rp_sec(cols, rows, tot, note=("Items with different UOMs are not added together, so column totals are left blank for this unit." if not one else None))]
-    return _rp_blocks(P, build), ["Net Movement = Received + Adjustment (+) - Issued - Adjustment (-) within the period. Current Stock is today's balance. "
-                                  "Opening Balance / stock-set entries are not part of the movement."]
+    return _rp_blocks(P, build), ["Opening Qty + Received + Adjustment (+) - Issued - Adjustment (-) = Closing Qty. Closing Qty is the stock at the end of the period's last day; "
+                                  "Opening Qty is the stock at the start of its first day.",
+                                  "Items with no stock and no movement in the period are not listed. Stock-set / opening-balance entries that were made without a transaction are included in Opening Qty."]
 
 
 # ---------------------------------------------------------------- hold bills (also used by the existing Hold Bill print / PDF)
@@ -19257,74 +19370,97 @@ def rp_repair_returns(P):
     except Exception:
         ir = pd.DataFrame()
     show_ir = P.get("status") in (None, "All")
+    NR = "Not recorded"
+
+    def _alert(d):
+        if d is None or pd.isna(d):
+            return "-"
+        d = float(d)
+        return f"OVERDUE ({d:.0f} days)" if d > _RPX_OVERDUE_DAYS else (f"Follow up ({d:.0f} days)" if d >= 15 else "On time")
 
     def build(u):
         d = df[df["factory_name"] == u] if not df.empty else df
         secs = []
         if not d.empty:
-            pend = d[d["status"] == "Pending Return"]
-            c1 = [("Type", "t"), ("Records", "i"), ("Qty (as entered)", "q"), ("Pending", "i"), ("Pending Qty", "q"),
-                  ("Overdue", "i"), ("Returned", "i"), ("Closed", "i")]
+            pend = d[d["status"] == "Pending Return"].copy()
+            pend["_dd"] = pd.to_numeric(pend["days"], errors="coerce").fillna(-1)
+            pend = pend.sort_values("_dd", ascending=False)
+            settled = d[d["status"] != "Pending Return"]
+            # 1. at a glance
+            c1 = [("Purpose", "t"), ("Items Sent Out", "i"), ("Returned / Closed", "i"), ("Still Outside", "i"), ("Qty Still Outside", "q"), ("Longest Outside (days)", "i")]
             r1 = []
             for k, g in d.groupby("stype", sort=True):
                 p_ = g[g["status"] == "Pending Return"]
-                r1.append([k, len(g), float(g["qty"].sum()), len(p_), float(p_["qty"].sum()), int(g["overdue"].sum()),
-                           int((g["status"] == "Returned").sum()), int((g["status"] == "Closed").sum())])
-            t1 = [f"TOTAL - {u}", len(d), float(d["qty"].sum()), len(pend), float(pend["qty"].sum()), int(d["overdue"].sum()),
-                  int((d["status"] == "Returned").sum()), int((d["status"] == "Closed").sum())]
-            secs.append(_rp_sec(c1, r1, t1, heading="1. SUMMARY BY TYPE (Repair / Warranty / Rejected Return / Other)"))
-            c2 = [("Supplier / Party", "t"), ("Records", "i"), ("Qty (as entered)", "q"), ("Pending", "i"), ("Pending Qty", "q"),
-                  ("Overdue", "i"), ("Oldest Pending (days)", "i")]
-            r2 = []
-            for k, g in d.groupby("supplier", sort=False):
-                p_ = g[g["status"] == "Pending Return"]
                 old = pd.to_numeric(p_["days"], errors="coerce").max() if len(p_) else None
-                r2.append([k, len(g), float(g["qty"].sum()), len(p_), float(p_["qty"].sum()), int(g["overdue"].sum()),
+                r1.append([k, len(g), int((g["status"] != "Pending Return").sum()), len(p_), float(p_["qty"].sum()),
                            None if old is None or pd.isna(old) else float(old)])
-            r2.sort(key=lambda x: (-x[4], -x[3], x[0]))
-            secs.append(_rp_sec(c2, r2, [f"TOTAL - {u}", len(d), float(d["qty"].sum()), len(pend), float(pend["qty"].sum()),
-                                         int(d["overdue"].sum()), None], heading="2. SUPPLIER / PARTY-WISE POSITION"))
+            oldest = pend["_dd"].max() if len(pend) else None
+            t1 = [f"TOTAL - {u}", len(d), len(settled), len(pend), float(pend["qty"].sum()), None if oldest is None or oldest < 0 else float(oldest)]
             if len(pend):
-                c3 = [("Tracking", "t"), ("Gate Pass", "t"), ("Item", "t"), ("Type", "t"), ("Return Type", "t"), ("Supplier / Party", "t"),
-                      ("Qty", "q"), ("Sent Date", "d"), ("Days Out", "i"), ("Permission By", "t"), ("Gate Pass Brought By", "t"), ("Alert", "t")]
-                r3 = []
-                for r in pend.assign(_dd=pd.to_numeric(pend["days"], errors="coerce").fillna(-1)).sort_values("_dd", ascending=False).itertuples():
-                    r3.append([r.track, r.gate, r.item, r.stype, r.rtype, r.supplier, r.qty, r.sent_date,
-                               None if pd.isna(r.days) else float(r.days), r.approved, r.carrier,
-                               f"OVERDUE (>{_RPX_OVERDUE_DAYS} days)" if r.overdue else "Pending"])
-                secs.append(_rp_sec(c3, r3, [f"TOTAL PENDING - {u} ({len(pend)} record)", None, None, None, None, None, float(pend["qty"].sum()),
+                top = pend.iloc[0]
+                sub1 = (f"{len(pend)} item(s) (qty {float(pend['qty'].sum()):g}) are still outside the factory. The longest is {top['item']} "
+                        f"with {top['supplier']} - {int(top['_dd'])} day(s) since {top['sent_date']}." if top["_dd"] >= 0 else
+                        f"{len(pend)} item(s) (qty {float(pend['qty'].sum()):g}) are still outside the factory.")
+            else:
+                sub1 = "No item is outside the factory - everything sent out has come back or is closed."
+            secs.append(_rp_sec(c1, r1, t1, heading="1. AT A GLANCE", sub=sub1))
+            # 2. items still outside
+            if len(pend):
+                c2 = [("SL", "i"), ("Ref (Tracking / Gate Pass)", "t"), ("Item", "t"), ("Purpose", "t"), ("Sent To (Supplier / Party)", "t"), ("Qty", "q"),
+                      ("Sent Date", "d"), ("Days Outside", "i"), ("Permission Given By", "t"), ("Store Approval Taken By", "t"), ("Status", "t")]
+                r2 = []
+                for n, r in enumerate(pend.itertuples(), 1):
+                    ref = r.track + (f" / GP {r.gate}" if r.gate else "")
+                    r2.append([n, ref, r.item, r.stype, r.supplier, r.qty, r.sent_date, None if pd.isna(r.days) else float(r.days),
+                               r.approved or NR, r.carrier or NR, _alert(r.days)])
+                secs.append(_rp_sec(c2, r2, [f"TOTAL STILL OUTSIDE - {u} ({len(pend)} item)", None, None, None, None, float(pend["qty"].sum()),
                                              None, None, None, None, f"{int(d['overdue'].sum())} overdue"],
-                                    heading="3. PENDING RETURN - OLDEST FIRST (follow up these items)"))
-            c4 = [("Tracking", "t"), ("Gate Pass", "t"), ("Item", "t"), ("Type", "t"), ("Supplier / Party", "t"), ("Qty", "q"),
-                  ("Sent Date", "d"), ("Returned Date", "d"), ("Days", "i"), ("Status", "t"), ("Permission By", "t"), ("Brought By", "t")]
-            r4 = [[r.track, r.gate, r.item, r.stype, r.supplier, r.qty, r.sent_date, r.return_date,
-                   None if pd.isna(r.days) else float(r.days), r.status, r.approved, r.carrier] for r in d.itertuples()]
-            secs.append(_rp_sec(c4, r4, [f"TOTAL - {u} ({len(d)} record)", None, None, None, None, float(d["qty"].sum()), None, None, None, None, None, None],
-                                heading="4. COMPLETE REGISTER (Gate Pass / Repair / Warranty / Return)",
-                                note="Days = Sent Date to Returned Date; for items still pending, Sent Date to today."))
+                                    heading="2. ITEMS STILL OUTSIDE - FOLLOW UP (oldest first)",
+                                    note=f"Status: On time = up to 14 days outside; Follow up = 15 to {_RPX_OVERDUE_DAYS} days; OVERDUE = more than {_RPX_OVERDUE_DAYS} days."))
+                # 3. party wise
+                r3 = []
+                for k, g in pend.groupby("supplier", sort=False):
+                    od = g["sent_date"].map(parse_date).dropna()
+                    mx = g["_dd"].max()
+                    r3.append([k, len(g), float(g["qty"].sum()), od.min().strftime(DATE_FMT) if len(od) else None,
+                               None if mx < 0 else float(mx), int(g["overdue"].sum())])
+                r3.sort(key=lambda x: (-(x[4] or 0), x[0]))
+                secs.append(_rp_sec([("Supplier / Party", "t"), ("Items With Them", "i"), ("Qty", "q"), ("Oldest Sent Date", "d"), ("Longest Outside (days)", "i"),
+                                     ("Overdue Items", "i")], r3,
+                                    [f"TOTAL - {u}", len(pend), float(pend["qty"].sum()), None, None, int(d["overdue"].sum())],
+                                    heading="3. WHO HOLDS OUR ITEMS (party-wise)"))
+            # 4. already settled
+            c4 = [("SL", "i"), ("Ref (Tracking / Gate Pass)", "t"), ("Item", "t"), ("Purpose", "t"), ("Supplier / Party", "t"), ("Qty", "q"),
+                  ("Sent Date", "d"), ("Returned Date", "d"), ("Days Taken", "i"), ("Result", "t"), ("Permission Given By", "t"), ("Store Approval Taken By", "t")]
+            r4 = [[n, r.track + (f" / GP {r.gate}" if r.gate else ""), r.item, r.stype, r.supplier, r.qty, r.sent_date, r.return_date or None,
+                   None if pd.isna(r.days) else float(r.days), "Returned" if r.status == "Returned" else r.status, r.approved or NR, r.carrier or NR]
+                  for n, r in enumerate(settled.itertuples(), 1)]
+            secs.append(_rp_sec(c4, r4, [f"TOTAL - {u} ({len(settled)} item)", None, None, None, None, float(settled["qty"].sum()), None, None, None, None, None, None] if len(settled) else None,
+                                heading="4. ALREADY RETURNED / CLOSED", empty="No item has come back or been closed in this period."))
         if show_ir and not ir.empty:
             x = ir[ir["factory_name"] == u]
             if not x.empty:
                 c5 = [("Return Date", "d"), ("Item", "t"), ("Returned Qty", "q"), ("Original Issue Qty", "q"), ("Reason", "t"), ("Returned By", "t")]
                 r5 = [[r.return_date, r.item_name, float(r.qty), float(r.oq), r.reason, r.who] for r in x.itertuples()]
                 secs.append(_rp_sec(c5, r5, [f"TOTAL - {u} ({len(x)} return)", None, float(pd.to_numeric(x["qty"], errors="coerce").sum()), None, None, None],
-                                    heading="5. RETURN TO STORE (issued material that came back into stock)"))
+                                    heading="5. ISSUED MATERIAL RETURNED TO STORE (came back into stock)"))
         return secs
 
     blocks = _rp_blocks(P, build)
     n = len(df) if not df.empty else 0
     pend = df[df["status"] == "Pending Return"] if n else df
     ir_n = int(len(ir)) if show_ir and not ir.empty else 0
-    kpis = [("🛠", "Total Records", f"{n:,}", f"Qty {float(df['qty'].sum()) if n else 0:,.0f} (as entered)", "blue"),
-            ("⏳", "Pending Return", f"{len(pend):,}", f"Qty {float(pend['qty'].sum()) if n else 0:,.0f}", "amber"),
-            ("🚨", f"Overdue > {_RPX_OVERDUE_DAYS} days", f"{int(df['overdue'].sum()) if n else 0:,}", "Still outside the unit", "red"),
-            ("✅", "Returned", f"{int((df['status'] == 'Returned').sum()) if n else 0:,}", "Came back to the unit", "green"),
-            ("📁", "Closed", f"{int((df['status'] == 'Closed').sum()) if n else 0:,}", "Settled / non-returnable", "slate"),
-            ("↩️", "Returned to Store", f"{ir_n:,}", "Issued material taken back into stock", "teal")]
-    notes = ["Records are those in Repair & Returns (Gate Pass out for repair / warranty / rejected return). The period filters on Sent Date - "
-             "tick 'All dates' to see every item still pending.",
-             f"Overdue = status Pending Return for more than {_RPX_OVERDUE_DAYS} days.",
-             "Quantities are shown as entered; items with different units (Pcs, Kg ...) are not converted, so read totals with care."]
+    pdays = pd.to_numeric(pend["days"], errors="coerce").max() if n and len(pend) else None
+    kpis = [("🛠", "Items Sent Out", f"{n:,}", f"Qty {float(df['qty'].sum()) if n else 0:,.0f}", "blue"),
+            ("⏳", "Still Outside", f"{len(pend):,}", f"Qty {float(pend['qty'].sum()) if n else 0:,.0f}", "amber"),
+            ("📅", "Longest Outside", "-" if pdays is None or pd.isna(pdays) else f"{int(pdays)} days", "Oldest pending item", "slate"),
+            ("🚨", f"Overdue > {_RPX_OVERDUE_DAYS} days", f"{int(df['overdue'].sum()) if n else 0:,}", "Need urgent follow up", "red"),
+            ("✅", "Returned / Closed", f"{int((df['status'] != 'Pending Return').sum()) if n else 0:,}", "Already settled", "green"),
+            ("↩️", "Returned to Store", f"{ir_n:,}", "Issued material taken back", "teal")]
+    notes = ["This report lists every item that left the factory on a Gate Pass for repair, warranty or rejected return. 'Still Outside' = not yet returned.",
+             "Days Outside = Sent Date to today for pending items; Days Taken = Sent Date to Returned Date for settled items.",
+             "Permission Given By = who allowed the item to go out. Store Approval Taken By = who obtained the store's approval / brought the Gate Pass.",
+             "Quantities are shown as entered; items with different units are not converted. The period filters on Sent Date - tick 'All dates' to see every pending item."]
     return blocks, notes, kpis
 
 
