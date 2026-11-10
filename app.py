@@ -18080,8 +18080,8 @@ def _rp_pdf(doc):
     ps = landscape(A4) if land else A4
     lm = rm = 26
     avail = ps[0] - lm - rm
-    fs = 7.3 if land else 7.8
-    base = ParagraphStyle("b", fontName="Helvetica", fontSize=fs, leading=fs + 1.8)
+    fs = 8.2 if "REPAIR & RETURNS" in str(doc.get("title", "")).upper() else (7.3 if land else 7.8)
+    base = ParagraphStyle("b", fontName="Helvetica", fontSize=fs, leading=fs + 2.4)
     bold = ParagraphStyle("bb", parent=base, fontName="Helvetica-Bold")
     hdr = ParagraphStyle("h", parent=bold, textColor=colors.white)
     rgt, ctr = ParagraphStyle("r", parent=base, alignment=TA_RIGHT), ParagraphStyle("c", parent=base, alignment=TA_CENTER)
@@ -18115,8 +18115,8 @@ def _rp_pdf(doc):
         kt.setStyle(TableStyle(kst))
         story += [kt, Spacer(1, 6)]
     ub = ParagraphStyle("ub", parent=bold, textColor=colors.white, backColor=colors.HexColor("#0B1F3A"), borderPadding=(3, 4, 3, 4), spaceBefore=6, spaceAfter=6, fontSize=fs + 2)
-    sh = ParagraphStyle("sh", parent=bold, fontSize=fs + 2.2, spaceBefore=7, spaceAfter=1, keepWithNext=1)
-    ss = ParagraphStyle("ss", parent=base, spaceAfter=3, keepWithNext=1)
+    sh = ParagraphStyle("sh", parent=bold, fontSize=fs + 2.6, spaceBefore=14, spaceAfter=3, keepWithNext=1, textColor=colors.HexColor("#0B1F3A"))
+    ss = ParagraphStyle("ss", parent=base, spaceAfter=5, keepWithNext=1, textColor=colors.HexColor("#334155"))
     for bi, b in enumerate(doc["blocks"]):
         if bi:
             story.append(PageBreak())
@@ -18142,15 +18142,18 @@ def _rp_pdf(doc):
                     if isinstance(r, (tuple, _RpSub)) and j < _rp_span(cells):
                         continue
                     mx = max(mx, len(_rp_fmt(cells[j], k)))
-                hw = max((len(w) for w in n.split()), default=3) + 1
-                w = max(mx, hw, 4)
+                hw = max((len(w) for w in n.split()), default=3) * 1.2 + 2
+                w = max(mx + 2, hw, 5)
+                if k == "d":
+                    w = max(w, 12.5)
                 wts.append(min(w, 34) if k == "t" else min(w, 16))
             tot = sum(wts)
             widths = [avail * w / tot for w in wts]
             data = [[Paragraph(_rp_pdftxt(n), hdr) for n, _ in cols]]
-            style = [("GRID", (0, 0), (-1, -1), 0.3, colors.grey), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F3A5F")),
-                     ("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 2.5), ("RIGHTPADDING", (0, 0), (-1, -1), 2.5),
-                     ("TOPPADDING", (0, 0), (-1, -1), 1.6), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.6)]
+            style = [("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CBD5E1")), ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor("#1F3A5F")),
+                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F3A5F")),
+                     ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                     ("TOPPADDING", (0, 0), (-1, -1), 3.2), ("BOTTOMPADDING", (0, 0), (-1, -1), 3.2)]
             for ri, r in enumerate(body, start=1):
                 special = isinstance(r, (tuple, _RpSub))
                 cells = r[1] if isinstance(r, tuple) else r
@@ -18168,18 +18171,20 @@ def _rp_pdf(doc):
                            for j in range(len(cols))]
                     if ri % 2 == 0:
                         style.append(("BACKGROUND", (0, ri), (-1, ri), colors.HexColor("#F7F9FC")))
-                    _txts = [str(c) for c in cells if isinstance(c, str)]
-                    if any(t.startswith("OVERDUE") for t in _txts):
-                        style.append(("BACKGROUND", (0, ri), (-1, ri), colors.HexColor("#FDE8E8")))
-                    elif any(t.startswith("Follow up") for t in _txts):
-                        style.append(("BACKGROUND", (0, ri), (-1, ri), colors.HexColor("#FFF6DD")))
+                    for j_, c_ in enumerate(cells):
+                        if isinstance(c_, str) and c_.startswith("OVERDUE"):
+                            row[j_] = Paragraph(_rp_pdftxt(c_), ParagraphStyle("od", parent=bold, textColor=colors.HexColor("#991B1B")))
+                            style.append(("BACKGROUND", (j_, ri), (j_, ri), colors.HexColor("#FBD5D5")))
+                        elif isinstance(c_, str) and c_.startswith("Follow up"):
+                            row[j_] = Paragraph(_rp_pdftxt(c_), ParagraphStyle("fu", parent=bold, textColor=colors.HexColor("#92400E")))
+                            style.append(("BACKGROUND", (j_, ri), (j_, ri), colors.HexColor("#FDECC0")))
                 data.append(row)
             t = Table(data, colWidths=widths, repeatRows=1)
             t.setStyle(TableStyle(style))
             story += [t]
             if s.get("note"):
-                story.append(Paragraph(_rp_pdftxt(s["note"]), ParagraphStyle("nt", parent=base, fontSize=fs - 0.6, textColor=colors.HexColor("#444444"), spaceBefore=2)))
-            story.append(Spacer(1, 4))
+                story.append(Paragraph(_rp_pdftxt(s["note"]), ParagraphStyle("nt", parent=base, fontSize=fs - 0.8, textColor=colors.HexColor("#444444"), spaceBefore=3)))
+            story.append(Spacer(1, 8))
     for n in doc["notes"]:
         story.append(Paragraph(_rp_pdftxt(n), ParagraphStyle("nt2", parent=base, fontSize=fs - 0.6, textColor=colors.HexColor("#444444"), spaceBefore=2)))
     sw = avail / 3
@@ -19407,8 +19412,8 @@ def rp_repair_returns(P):
             secs.append(_rp_sec(c1, r1, t1, heading="1. AT A GLANCE", sub=sub1))
             # 2. items still outside
             if len(pend):
-                c2 = [("SL", "i"), ("Ref (Tracking / Gate Pass)", "t"), ("Item", "t"), ("Purpose", "t"), ("Sent To (Supplier / Party)", "t"), ("Qty", "q"),
-                      ("Sent Date", "d"), ("Days Outside", "i"), ("Permission Given By", "t"), ("Store Approval Taken By", "t"), ("Status", "t")]
+                c2 = [("SL", "i"), ("Ref / Gate Pass", "t"), ("Item", "t"), ("Purpose", "t"), ("Sent To", "t"), ("Qty", "q"),
+                      ("Sent Date", "d"), ("Days Out", "i"), ("Permission Given By", "t"), ("Store Approval By", "t"), ("Status", "t")]
                 r2 = []
                 for n, r in enumerate(pend.itertuples(), 1):
                     ref = r.track + (f" / GP {r.gate}" if r.gate else "")
@@ -19431,8 +19436,8 @@ def rp_repair_returns(P):
                                     [f"TOTAL - {u}", len(pend), float(pend["qty"].sum()), None, None, int(d["overdue"].sum())],
                                     heading="3. WHO HOLDS OUR ITEMS (party-wise)"))
             # 4. already settled
-            c4 = [("SL", "i"), ("Ref (Tracking / Gate Pass)", "t"), ("Item", "t"), ("Purpose", "t"), ("Supplier / Party", "t"), ("Qty", "q"),
-                  ("Sent Date", "d"), ("Returned Date", "d"), ("Days Taken", "i"), ("Result", "t"), ("Permission Given By", "t"), ("Store Approval Taken By", "t")]
+            c4 = [("SL", "i"), ("Ref / Gate Pass", "t"), ("Item", "t"), ("Purpose", "t"), ("Supplier / Party", "t"), ("Qty", "q"),
+                  ("Sent Date", "d"), ("Returned Date", "d"), ("Days Taken", "i"), ("Result", "t"), ("Permission Given By", "t"), ("Store Approval By", "t")]
             r4 = [[n, r.track + (f" / GP {r.gate}" if r.gate else ""), r.item, r.stype, r.supplier, r.qty, r.sent_date, r.return_date or None,
                    None if pd.isna(r.days) else float(r.days), "Returned" if r.status == "Returned" else r.status, r.approved or NR, r.carrier or NR]
                   for n, r in enumerate(settled.itertuples(), 1)]
@@ -19460,7 +19465,7 @@ def rp_repair_returns(P):
             ("↩️", "Returned to Store", f"{ir_n:,}", "Issued material taken back", "teal")]
     notes = ["This report lists every item that left the factory on a Gate Pass for repair, warranty or rejected return. 'Still Outside' = not yet returned.",
              "Days Outside = Sent Date to today for pending items; Days Taken = Sent Date to Returned Date for settled items.",
-             "Permission Given By = who allowed the item to go out. Store Approval Taken By = who obtained the store's approval / brought the Gate Pass.",
+             "Permission Given By = who allowed the item to go out. Store Approval By = who obtained the store's approval / brought the Gate Pass.",
              "Quantities are shown as entered; items with different units are not converted. The period filters on Sent Date - tick 'All dates' to see every pending item."]
     return blocks, notes, kpis
 
