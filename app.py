@@ -18107,7 +18107,7 @@ def _rp_pdf(doc):
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.lib.styles import ParagraphStyle
         from reportlab.pdfgen import canvas as _cv
-        from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+        from reportlab.platypus import CondPageBreak, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
     except ImportError:
         return None
     FN, FB, FSC = _rp_pdf_fonts()
@@ -18150,8 +18150,8 @@ def _rp_pdf(doc):
         kt.setStyle(TableStyle(kst))
         story += [kt, Spacer(1, 6)]
     ub = ParagraphStyle("ub", parent=bold, textColor=colors.white, backColor=colors.HexColor("#0B1F3A"), borderPadding=(3, 4, 3, 4), spaceBefore=6, spaceAfter=6, fontSize=fs + 2)
-    sh = ParagraphStyle("sh", parent=bold, fontSize=fs + 2.6, spaceBefore=14, spaceAfter=3, keepWithNext=1, textColor=colors.HexColor("#0B1F3A"))
-    ss = ParagraphStyle("ss", parent=base, spaceAfter=5, keepWithNext=1, textColor=colors.HexColor("#334155"))
+    sh = ParagraphStyle("sh", parent=bold, fontSize=fs + 2.6, spaceBefore=14, spaceAfter=3, keepWithNext=0, textColor=colors.HexColor("#0B1F3A"))
+    ss = ParagraphStyle("ss", parent=base, spaceAfter=5, keepWithNext=0, textColor=colors.HexColor("#334155"))
     for bi, b in enumerate(doc["blocks"]):
         if bi:
             story.append(PageBreak())
@@ -18161,6 +18161,7 @@ def _rp_pdf(doc):
             continue
         for s in b["sections"]:
             if s.get("heading"):
+                story.append(CondPageBreak(110))
                 story.append(Paragraph(_rp_pdftxt(s["heading"]), sh))
             if s.get("sub"):
                 story.append(Paragraph(_rp_pdftxt(s["sub"]), ss))
