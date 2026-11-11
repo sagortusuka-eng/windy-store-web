@@ -24101,16 +24101,42 @@ def tab_consumption_trend():
 
 
 # ============================================================
-#  ISSUED ITEMS STOCK CHECK (new page, ADDITIVE ONLY)
-#  Items that were ISSUED up to a chosen date (e.g. 05-Nov)  ->  their CLOSING stock on the check date (e.g. 06-Nov)
-#  -> physical count in the store -> Short / Excess result -> manager-approved adjustment.
+#  ISSUED ITEMS STOCK CHECK (page, ADDITIVE ONLY)
+#  Items that were ISSUED in a chosen period (e.g. 01-Nov .. 09-Nov)  ->  their CLOSING balance on the closing date (09-Nov)
+#  -> Count sheet (Excel / PDF) for the officer  ->  physical count on the count date (10-Nov), with the DAY-SHIFT ISSUE / RECEIVE
+#  written beside it  ->  Expected = Closing + Day-shift receive - Day-shift issue  ->  Short / Excess  ->  manager-approved adjustment.
 #  It re-uses the Monthly Stock Check engine and tables (msc_*); no existing page, transaction or stock is changed.
-#  Speed: nothing runs until this page is opened; the heavy calculation runs only when "Create" is pressed.
+#  Speed: nothing runs until this page is opened; the heavy calculation runs only when "Create" is pressed;
+#  Excel / PDF files are built only when the Download button is clicked.
 # ============================================================
 NAV_ISC = "✅ Issued Items Stock Check"
 if NAV_ISC not in TAB_NAMES:
     TAB_NAMES.append(NAV_ISC)
 ISC_TAG = "[ISSUED-ITEMS]"
+ISC_TABS = ["1 · New check", "2 · Count sheet", "3 · Enter count", "4 · Result & Approve"]
+_ISC_META_RE = re.compile(r"\|\|R=(\d{4}-\d{2}-\d{2}|-)\.\.(\d{4}-\d{2}-\d{2});I=([01]);S=([01])")
+_ISC_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+_ISC_CSS = """<style>
+.isc-hero{background:linear-gradient(135deg,#102B59 0%,#1D4278 100%);border-radius:14px;padding:18px 22px;margin:0 0 14px 0;border-bottom:3px solid #C9A44C}
+.isc-hero h2{color:#fff!important;font-size:22px;margin:0 0 4px 0;padding:0;font-weight:800}
+.isc-hero p{color:#D6E0F0;font-size:13px;margin:0;line-height:1.45}
+.isc-steps{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px 0}
+.isc-step{flex:1 1 190px;background:#fff;border:1px solid #D5DFEA;border-radius:11px;padding:10px 12px;display:flex;gap:10px;align-items:flex-start}
+.isc-step b.n{background:#102B59;color:#fff;border-radius:50%;min-width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;font-size:12px}
+.isc-step span{font-size:12.5px;color:#334155;line-height:1.4}
+.isc-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:6px 0 14px 0}
+.isc-kpi{background:#fff;border:1px solid #D5DFEA;border-left:4px solid #102B59;border-radius:10px;padding:10px 14px}
+.isc-kpi .v{font-size:22px;font-weight:800;color:#102B59;line-height:1.15}
+.isc-kpi .l{font-size:11px;color:#64748B;text-transform:uppercase;letter-spacing:.4px;font-weight:650}
+.isc-kpi.warn{border-left-color:#C2410C}.isc-kpi.warn .v{color:#C2410C}
+.isc-kpi.ok{border-left-color:#0F766E}.isc-kpi.ok .v{color:#0F766E}
+.isc-kpi.gold{border-left-color:#C9A44C}
+.isc-chips{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px 0}
+.isc-chip{background:#EEF3FA;border:1px solid #D5DFEA;color:#102B59;border-radius:999px;padding:4px 12px;font-size:12px;font-weight:650}
+.isc-note{background:#FFF8E6;border:1px solid #E9D49B;border-radius:10px;padding:9px 13px;font-size:12.5px;color:#5B4A12;margin:6px 0 12px 0;line-height:1.45}
+.isc-formula{background:#EEF3FA;border:1px dashed #9DB2D3;border-radius:10px;padding:9px 13px;font-size:13px;color:#102B59;margin:6px 0 12px 0;font-weight:650}
+</style>"""
 
 
 def isc_issued_sls(fac, from_d, upto_d, include_internal=True):
@@ -24155,88 +24181,643 @@ def isc_issued_detail(fac, from_d, upto_d, include_internal=True):
     return out
 
 
+# ---------------------------------------------------------------- small helpers
+def _isc_kpis(items):
+    """items = [(label, value, tone)] - tone: '' | 'ok' | 'warn' | 'gold'"""
+    h = "".join(f"<div class='isc-kpi {t}'><div class='v'>{html_lib.escape(str(v))}</div><div class='l'>{html_lib.escape(l)}</div></div>"
+                for l, v, t in items)
+    st.markdown(f"<div class='isc-kpis'>{h}</div>", unsafe_allow_html=True)
+
+
+def isc_note_meta(note):
+    """Reads the machine part that isc_new_view stores in the session note (period / internal-issue / count-day flags)."""
+    m = _ISC_META_RE.search(str(note or ""))
+    if not m:
+        return None
+    try:
+        return {"from_d": None if m.group(1) == "-" else date.fromisoformat(m.group(1)), "upto_d": date.fromisoformat(m.group(2)),
+                "inc_int": m.group(3) == "1", "sw_day": m.group(4) == "1"}
+    except Exception:
+        return None
+
+
+def isc_issued_map(fac, sess):
+    """{sl_no: issued detail} for the period stored in this check (cached in the session until any data is saved)."""
+    meta = isc_note_meta(sess.get("note"))
+    if not meta:
+        return {}
+    key = (int(sess["id"]), _data_version())
+    box = st.session_state.get("_isc_imap_box")
+    if box and box[0] == key:
+        return box[1]
+    try:
+        det = isc_issued_detail(fac, meta["from_d"], meta["upto_d"], meta["inc_int"])
+    except Exception:
+        det = []
+    mp = {int(d["SL"]): d for d in det}
+    st.session_state["_isc_imap_box"] = (key, mp)
+    return mp
+
+
+def isc_load(sid):
+    """msc_load + two fixes for this page: (1) every item of an Issued-Items check is 'active' (an item issued down to NIL is NOT
+    dropped as 'No stock'), (2) day-shift issue / receive = software entries of the count day + what the officer wrote."""
+    df = msc_load(sid)
+    if df is None or df.empty:
+        return df
+    import numpy as np
+    df["status"] = np.select([df["physical_qty"].isna(), df["diff"].abs() < MSC_EPS, df["diff"] < 0],
+                             ["⏳ Not counted", "✅ Match", "🔻 Short"], default="🔺 Excess")
+    df["day_issue"] = df["issued_qty"].fillna(0.0) + df["extra_issued"]
+    df["day_recv"] = df["received_qty"].fillna(0.0) + df["extra_received"]
+    return df
+
+
+def isc_report_meta(sess, fac):
+    nm = isc_note_meta(sess.get("note"))
+    period = ""
+    if nm:
+        period = f"{nm['from_d'].strftime(DATE_FMT) if nm['from_d'] else 'Beginning'} to {nm['upto_d'].strftime(DATE_FMT)}"
+    return {"factory": fac, "sid": int(sess["id"]), "closing": _msc_fmt(sess["closing_date"]), "count": _msc_fmt(sess["count_date"]),
+            "period": period, "user": st.session_state.get("user", ""), "printed": local_now().strftime("%d-%b-%Y %I:%M %p"),
+            "status": sess.get("status", "")}
+
+
+def isc_report_rows(df, imap):
+    """Plain list of dicts for the Excel / PDF builders."""
+    out = []
+    for _, r in df.iterrows():
+        im = imap.get(int(r["sl_no"])) or {}
+        phys = None if pd.isna(r["physical_qty"]) else float(r["physical_qty"])
+        di, dr = float(r["day_issue"] or 0), float(r["day_recv"] or 0)
+        exp = float(r["expected_qty"] or 0)
+        diff = None if phys is None else round(phys - exp, 4)
+        status = "" if diff is None else ("OK" if abs(diff) < MSC_EPS else ("SHORT" if diff < 0 else "EXCESS"))
+        out.append({"category": str(r["category"]), "sl": int(r["sl_no"]), "erp": str(r["prod_id"] or ""), "item": str(r["item_name"] or ""),
+                    "size": str(r["size"] or ""), "uom": str(r["unit"] or ""),
+                    "issued": im.get("Issued qty"), "last": im.get("Last issue", ""),
+                    "closing": round(float(r["closing_qty"] or 0), 4),
+                    "drecv": dr if abs(dr) > MSC_EPS else None, "dissue": di if abs(di) > MSC_EPS else None,
+                    "expected": round(exp, 4), "phys": phys, "diff": diff, "status": status,
+                    "price": float(r["unit_price"] or 0) if not pd.isna(r["unit_price"]) else 0.0,
+                    "remarks": str(r["remarks"] or "")})
+    return out
+
+
+# ---------------------------------------------------------------- premium Excel report
+def isc_report_xlsx(rows, meta, mode="count", show_closing=True, blank_rows=0):
+    """mode 'count' = sheet for the officer (write columns empty);  'result' = after counting (Physical / Difference / Value).
+    Expected, Difference and Status are live Excel formulas, so the officer can also type straight into the Excel file."""
+    from openpyxl import Workbook
+    from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter as CL
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    result = mode == "result"
+    show_cl = bool(show_closing or result)
+    NAVY, NAVY2, GOLD, BAND, WRITE, ZEBRA = "102B59", "1D4278", "C9A44C", "DCE6F5", "FFF8E1", "F5F8FC"
+    spec = [("no", "#", 5), ("sl", "SL", 7), ("erp", "ERP code", 14), ("item", "Item", 40), ("size", "Size", 11), ("uom", "UOM", 7),
+            ("issued", "Issued qty\n(period)", 11), ("last", "Last issue", 12)]
+    if show_cl:
+        spec.append(("closing", f"Closing balance\n{meta['closing']}", 15))
+    spec += [("drecv", "Day-shift\nRECEIVE", 12), ("dissue", "Day-shift\nISSUE", 12)]
+    if show_cl:
+        spec.append(("expected", "Expected\nstock", 11))
+    spec.append(("phys", "PHYSICAL\nCOUNT", 14))
+    if show_cl:
+        spec += [("diff", "Difference", 11), ("status", "Status", 10)]
+    if result:
+        spec += [("price", "Unit price", 10), ("vdiff", "Value\ndifference", 12)]
+    spec.append(("remarks", "Remarks", 24))
+    keys = [k for k, _, _ in spec]
+    col = {k: i + 1 for i, k in enumerate(keys)}
+    ncol = len(spec)
+    A = lambda k, r: f"{CL(col[k])}{r}"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Count Sheet" if not result else "Result"
+    ws.sheet_view.showGridLines = False
+    thin = Side(style="thin", color="B8C4D6")
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    fill = lambda c: PatternFill("solid", start_color=c, end_color=c)
+    HDR_ROW, FIRST = 8, 9
+
+    def banner(r, text, size, color, bold=True, fg="FFFFFF", h=22, italic=False, align="left"):
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=ncol)
+        c = ws.cell(r, 1, text)
+        c.font = Font(name="Calibri", size=size, bold=bold, color=fg, italic=italic)
+        c.fill = fill(color)
+        c.alignment = Alignment(horizontal=align, vertical="center", wrap_text=True, indent=1)
+        ws.row_dimensions[r].height = h
+
+    banner(1, "KC & Windy Smart Inventory", 17, NAVY, h=30)
+    banner(2, "ISSUED ITEMS STOCK CHECK — " + ("RESULT REPORT" if result else "PHYSICAL COUNT SHEET"), 11, NAVY2, h=20)
+    banner(3, f"Unit: {meta['factory']}     |     Check #{meta['sid']}     |     Issue period: {meta['period'] or '-'}", 10, "EEF3FA", fg=NAVY, h=20)
+    banner(4, f"Closing balance date (software): {meta['closing']}     |     Physical count date: {meta['count']}     |     "
+              f"Prepared: {meta['user'] or '-'}, {meta['printed']}", 10, "EEF3FA", bold=False, fg=NAVY, h=20)
+    how = ("How to fill: DAY-SHIFT ISSUE = quantity already issued from the opening balance BEFORE you counted (not yet in software); "
+           "DAY-SHIFT RECEIVE = quantity received before the count.  Expected = Closing + Receive − Issue.  Difference = Physical − Expected."
+           if show_cl else
+           "How to fill: write the DAY-SHIFT ISSUE / RECEIVE (qty moved before you counted) and your PHYSICAL COUNT.  Every item listed was issued this period — "
+           "count it even if you expect nothing in the store.")
+    banner(5, how, 9, "FFF8E1", bold=False, fg="6B5310", h=30, italic=True)
+    ws.row_dimensions[7].height = 6
+
+    # ---- header
+    for k, head, wdt in spec:
+        c = ws.cell(HDR_ROW, col[k], head)
+        c.font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+        c.fill = fill(NAVY if k not in ("drecv", "dissue", "phys") else "8A6D1F")
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = Border(left=thin, right=thin, top=thin, bottom=Side(style="medium", color=GOLD))
+        ws.column_dimensions[CL(col[k])].width = wdt
+    ws.row_dimensions[HDR_ROW].height = 38
+
+    # ---- body
+    groups = {}
+    for r in rows:
+        groups.setdefault(r["category"], []).append(r)
+    qty_fmt, nil_fmt = "General", 'General;-General;"NIL"'
+    r_i, n_item, write_cells = FIRST, 0, []
+    first_item_row = last_item_row = None
+    for cat, items in groups.items():
+        ws.merge_cells(start_row=r_i, start_column=1, end_row=r_i, end_column=ncol)
+        c = ws.cell(r_i, 1, f"{cat}   ·   {len(items)} item(s)")
+        c.font = Font(name="Calibri", size=10.5, bold=True, color=NAVY)
+        c.fill = fill(BAND)
+        c.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        ws.row_dimensions[r_i].height = 20
+        r_i += 1
+        for n, it in enumerate(items, 1):
+            n_item += 1
+            first_item_row = first_item_row or r_i
+            last_item_row = r_i
+            vals = {"no": n, "sl": it["sl"], "erp": it["erp"], "item": it["item"], "size": it["size"], "uom": it["uom"],
+                    "issued": it["issued"], "last": it["last"], "drecv": it["drecv"], "dissue": it["dissue"],
+                    "phys": it["phys"], "remarks": it["remarks"]}
+            if show_cl:
+                vals["closing"] = it["closing"]
+                vals["expected"] = f"={A('closing', r_i)}+{A('drecv', r_i)}-{A('dissue', r_i)}"
+                vals["diff"] = f'=IF({A("phys", r_i)}="","",{A("phys", r_i)}-{A("expected", r_i)})'
+                vals["status"] = (f'=IF({A("phys", r_i)}="","",IF(ABS({A("diff", r_i)})<0.000001,"OK",'
+                                  f'IF({A("diff", r_i)}<0,"SHORT","EXCESS")))')
+            if result:
+                vals["price"] = it["price"]
+                vals["vdiff"] = f'=IF({A("diff", r_i)}="","",{A("diff", r_i)}*{A("price", r_i)})'
+            for k in keys:
+                c = ws.cell(r_i, col[k], vals.get(k))
+                c.border = box
+                c.font = Font(name="Calibri", size=10, bold=(k in ("closing", "expected", "phys")))
+                if k in ("drecv", "dissue", "phys", "remarks"):
+                    c.fill = fill(WRITE)
+                    write_cells.append(c.coordinate)
+                elif n % 2 == 0:
+                    c.fill = fill(ZEBRA)
+                if k in ("item", "erp", "remarks"):
+                    c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+                elif k in ("size", "uom", "last", "status", "no", "sl"):
+                    c.alignment = Alignment(horizontal="center", vertical="center")
+                else:
+                    c.alignment = Alignment(horizontal="right", vertical="center")
+                if k == "closing":
+                    c.number_format = nil_fmt
+                elif k in ("issued", "drecv", "dissue", "expected", "phys", "diff"):
+                    c.number_format = qty_fmt
+                elif k in ("price", "vdiff"):
+                    c.number_format = "#,##0.00;[Red]-#,##0.00"
+            ws.row_dimensions[r_i].height = 21
+            r_i += 1
+    # ---- blank rows for items that are not in the list
+    if blank_rows:
+        ws.merge_cells(start_row=r_i, start_column=1, end_row=r_i, end_column=ncol)
+        c = ws.cell(r_i, 1, "Items NOT in this list — write item name, size and quantity")
+        c.font = Font(name="Calibri", size=10, bold=True, color="6B5310")
+        c.fill = fill("FFE9B8")
+        c.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        r_i += 1
+        for _ in range(int(blank_rows)):
+            for k in keys:
+                c = ws.cell(r_i, col[k])
+                c.border = box
+                c.fill = fill(WRITE)
+                if k in ("drecv", "dissue", "phys"):
+                    write_cells.append(c.coordinate)
+            ws.row_dimensions[r_i].height = 21
+            r_i += 1
+    last_row = r_i - 1
+
+    # ---- summary line (live formulas)
+    if first_item_row:
+        rng = lambda k: f"{CL(col[k])}{first_item_row}:{CL(col[k])}{last_item_row}"
+        f = f'="Items: "&COUNT({rng("sl")})&"      Counted: "&COUNT({rng("phys")})'
+        if show_cl:
+            f += (f'&"      Match: "&COUNTIF({rng("status")},"OK")&"      Short: "&COUNTIF({rng("status")},"SHORT")'
+                  f'&"      Excess: "&COUNTIF({rng("status")},"EXCESS")')
+        if result:
+            f += f'&"      Net value difference (Tk): "&TEXT(SUM({rng("vdiff")}),"#,##0")'
+        banner(6, f, 11, "EEF3FA", fg=NAVY, h=24)
+    else:
+        banner(6, "No items", 11, "EEF3FA", fg=NAVY, h=24)
+
+    # ---- conditional formats + validation
+    if first_item_row:
+        if show_cl:
+            ws.conditional_formatting.add(f"{CL(col['closing'])}{first_item_row}:{CL(col['closing'])}{last_item_row}",
+                                          CellIsRule(operator="equal", formula=["0"], fill=fill("FDE2E2"), font=Font(color="C2410C", bold=True)))
+            st_rng = f"{CL(col['status'])}{first_item_row}:{CL(col['status'])}{last_item_row}"
+            ws.conditional_formatting.add(st_rng, CellIsRule(operator="equal", formula=['"SHORT"'], fill=fill("FDE2E2"), font=Font(color="B91C1C", bold=True)))
+            ws.conditional_formatting.add(st_rng, CellIsRule(operator="equal", formula=['"EXCESS"'], fill=fill("FFEDD5"), font=Font(color="C2410C", bold=True)))
+            ws.conditional_formatting.add(st_rng, CellIsRule(operator="equal", formula=['"OK"'], fill=fill("DCFCE7"), font=Font(color="166534", bold=True)))
+        dv = DataValidation(type="decimal", operator="greaterThanOrEqual", formula1="0", allow_blank=True, showErrorMessage=True,
+                            errorTitle="Invalid quantity", error="Enter a number (0 or more).")
+        ws.add_data_validation(dv)
+        for coord in write_cells:
+            if not coord.startswith(CL(col["remarks"])):
+                dv.add(coord)
+
+    # ---- sign-off
+    r_i = last_row + 2
+    for i, lab in enumerate(["Counted by", "Checked by", "Store Manager", "Date"]):
+        c = ws.cell(r_i, 2 + i * 3 if ncol >= 14 else 2 + i, f"{lab}: ______________________")
+        c.font = Font(name="Calibri", size=10, bold=True, color=NAVY)
+    ws.row_dimensions[r_i].height = 28
+
+    # ---- print + view setup
+    ws.freeze_panes = f"{CL(col['uom'] + 1)}{FIRST}" if first_item_row else None
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.paperSize = 9
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.print_title_rows = f"{HDR_ROW}:{HDR_ROW}"
+    ws.print_area = f"A1:{CL(ncol)}{r_i}"
+    ws.page_margins.left = ws.page_margins.right = 0.3
+    ws.page_margins.top, ws.page_margins.bottom = 0.45, 0.5
+    ws.oddFooter.left.text = "KC & Windy Smart Inventory"
+    ws.oddFooter.center.text = "Page &P of &N"
+    ws.oddFooter.right.text = f"Check #{meta['sid']} · printed &D"
+    ws.print_options.horizontalCentered = True
+
+    # ---- summary sheet
+    ss = wb.create_sheet("Summary")
+    ss.sheet_view.showGridLines = False
+    heads = ["Category", "Items", "Nil closing", "Closing value (Tk)"] if not result else \
+            ["Category", "Items", "Counted", "Match", "Short", "Excess", "Short value (Tk)", "Excess value (Tk)"]
+    ss.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(heads))
+    c = ss.cell(1, 1, f"Check #{meta['sid']} · {meta['factory']} · closing {meta['closing']} · count {meta['count']}")
+    c.font, c.fill = Font(size=13, bold=True, color="FFFFFF"), fill(NAVY)
+    c.alignment = Alignment(vertical="center", indent=1)
+    ss.row_dimensions[1].height = 28
+    for j, h in enumerate(heads, 1):
+        c = ss.cell(3, j, h)
+        c.font, c.fill, c.border = Font(bold=True, color="FFFFFF"), fill(NAVY), box
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ss.column_dimensions[CL(j)].width = 34 if j == 1 else 16
+    tot = [0] * len(heads)
+    for i, (cat, items) in enumerate(groups.items(), 4):
+        if not result:
+            vals = [cat, len(items), sum(1 for x in items if abs(x["closing"]) < MSC_EPS),
+                    round(sum(x["closing"] * x["price"] for x in items), 2)]
+        else:
+            cnt = [x for x in items if x["phys"] is not None]
+            sh = [x for x in cnt if x["diff"] < -MSC_EPS]
+            ex = [x for x in cnt if x["diff"] > MSC_EPS]
+            vals = [cat, len(items), len(cnt), len(cnt) - len(sh) - len(ex), len(sh), len(ex),
+                    round(sum(x["diff"] * x["price"] for x in sh), 2), round(sum(x["diff"] * x["price"] for x in ex), 2)]
+        for j, v in enumerate(vals, 1):
+            c = ss.cell(i, j, v)
+            c.border = box
+            c.alignment = Alignment(horizontal="left" if j == 1 else "right")
+            if j > 1:
+                tot[j - 1] += v
+    rt = 4 + len(groups)
+    ss.cell(rt, 1, "TOTAL")
+    for j in range(2, len(heads) + 1):
+        ss.cell(rt, j, round(tot[j - 1], 2))
+    for j in range(1, len(heads) + 1):
+        c = ss.cell(rt, j)
+        c.font, c.fill, c.border = Font(bold=True, color=NAVY), fill(BAND), box
+        c.alignment = Alignment(horizontal="left" if j == 1 else "right")
+    wb.properties.title = f"Issued Items Stock Check #{meta['sid']}"
+    wb.properties.creator = "KC & Windy Smart Inventory"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------- premium PDF report
+def isc_report_pdf(rows, meta, mode="count", show_closing=True, blank_rows=0):
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.platypus import CondPageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    except ImportError:
+        return None
+    result = mode == "result"
+    show_cl = bool(show_closing or result)
+    NAVY, GOLD, BAND, WRITE = colors.HexColor("#102B59"), colors.HexColor("#C9A44C"), colors.HexColor("#DCE6F5"), colors.HexColor("#FFF8E1")
+    l1 = lambda s: str(s if s is not None else "").encode("latin-1", "replace").decode("latin-1")
+    ss = getSampleStyleSheet()
+    cell = ParagraphStyle("isc_c", parent=ss["Normal"], fontSize=7.4, leading=9)
+    head = ParagraphStyle("isc_h", parent=ss["Normal"], fontSize=7, leading=8.4, textColor=colors.white, alignment=1, fontName="Helvetica-Bold")
+    cat_st = ParagraphStyle("isc_cat", parent=ss["Normal"], fontSize=9.5, leading=12, textColor=NAVY, fontName="Helvetica-Bold", spaceBefore=6, spaceAfter=3)
+    info = ParagraphStyle("isc_i", parent=ss["Normal"], fontSize=8, leading=10.5, textColor=colors.HexColor("#334155"))
+
+    spec = [("no", "#", 18), ("sl", "SL", 28), ("erp", "ERP code", 50), ("item", "Item", 150), ("size", "Size", 38), ("uom", "UOM", 32),
+            ("issued", "Issued<br/>(period)", 44), ("last", "Last issue", 50)]
+    if show_cl:
+        spec.append(("closing", f"Closing<br/>{l1(meta['closing'])}", 54))
+    spec += [("drecv", "Day-shift<br/>RECEIVE", 44), ("dissue", "Day-shift<br/>ISSUE", 44)]
+    if show_cl:
+        spec.append(("expected", "Expected", 50))
+    spec.append(("phys", "PHYSICAL<br/>COUNT", 54))
+    if show_cl:
+        spec += [("diff", "Difference", 50), ("status", "Status", 42)]
+    if result:
+        spec.append(("vdiff", "Value diff", 46))
+    spec.append(("remarks", "Remarks", 60))
+    page_w = landscape(A4)[0] - 36
+    spare = page_w - sum(w for _, _, w in spec)
+    spec = [(k, h, w + (spare if k == "item" else 0)) for k, h, w in spec]
+    keys, widths = [k for k, _, _ in spec], [w for _, _, w in spec]
+    ci = {k: i for i, k in enumerate(keys)}
+
+    title = "Issued Items Stock Check - " + ("Result Report" if result else "Physical Count Sheet")
+
+    def deco(c, d):
+        w, h = landscape(A4)
+        c.saveState()
+        c.setFillColor(NAVY)
+        c.rect(0, h - 46, w, 46, stroke=0, fill=1)
+        c.setFillColor(GOLD)
+        c.rect(0, h - 49, w, 3, stroke=0, fill=1)
+        c.setFillColor(colors.white)
+        c.setFont("Helvetica-Bold", 15)
+        c.drawString(18, h - 24, "KC & Windy Smart Inventory")
+        c.setFont("Helvetica", 9)
+        c.drawString(18, h - 38, title)
+        c.setFont("Helvetica", 8.5)
+        c.drawRightString(w - 18, h - 24, f"Unit: {l1(meta['factory'])}")
+        c.drawRightString(w - 18, h - 38, f"Check #{meta['sid']}")
+        c.setFillColor(colors.HexColor("#64748B"))
+        c.setFont("Helvetica", 7.5)
+        c.drawString(18, 12, l1(f"Printed {meta['printed']}  |  by {meta['user'] or '-'}"))
+        c.drawRightString(w - 18, 12, f"Page {d.page}")
+        c.restoreState()
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=18, rightMargin=18, topMargin=62, bottomMargin=26)
+    story = [Paragraph(l1(f"<b>Issue period:</b> {meta['period'] or '-'} &nbsp;&nbsp;|&nbsp;&nbsp; <b>Closing balance date (software):</b> {meta['closing']} "
+                          f"&nbsp;&nbsp;|&nbsp;&nbsp; <b>Physical count date:</b> {meta['count']}"), info)]
+    how = ("DAY-SHIFT ISSUE = quantity issued from the opening balance BEFORE counting (not yet in software); DAY-SHIFT RECEIVE = quantity received before counting. "
+           "Expected = Closing + Receive - Issue; Difference = Physical - Expected." if show_cl else
+           "Write the DAY-SHIFT ISSUE / RECEIVE (moved before counting) and your PHYSICAL COUNT. Every item here was issued this period - count it even if you expect nothing.")
+    story += [Paragraph(l1(how), info), Spacer(1, 4)]
+    if result:
+        cnt = [x for x in rows if x["phys"] is not None]
+        sh = sum(1 for x in cnt if x["diff"] < -MSC_EPS)
+        ex = sum(1 for x in cnt if x["diff"] > MSC_EPS)
+        nv = sum((x["diff"] or 0) * x["price"] for x in cnt)
+        story.append(Paragraph(f"<b>Items {len(rows)}</b> &nbsp;|&nbsp; Counted {len(cnt)} &nbsp;|&nbsp; Match {len(cnt) - sh - ex} &nbsp;|&nbsp; "
+                               f"<font color='#B91C1C'>Short {sh}</font> &nbsp;|&nbsp; <font color='#C2410C'>Excess {ex}</font> &nbsp;|&nbsp; Net value difference (Tk) {nv:,.0f}", info))
+    else:
+        nil = sum(1 for x in rows if abs(x["closing"]) < MSC_EPS)
+        story.append(Paragraph(f"<b>Items to count: {len(rows)}</b> &nbsp;|&nbsp; <font color='#C2410C'>Nil closing balance: {nil}</font>", info))
+    groups = {}
+    for r in rows:
+        groups.setdefault(r["category"], []).append(r)
+    for cat, items in groups.items():
+        story.append(CondPageBreak(90))
+        story.append(Paragraph(_pdf_txt(f"{cat}  -  {len(items)} item(s)"), cat_st))
+        data = [[Paragraph(h, head) for _, h, _ in spec]]
+        style = [("BACKGROUND", (0, 0), (-1, 0), NAVY), ("LINEBELOW", (0, 0), (-1, 0), 1.6, GOLD), ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#9AA8BD")),
+                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 1), (-1, -1), 5), ("BOTTOMPADDING", (0, 1), (-1, -1), 5),
+                 ("FONTSIZE", (0, 0), (-1, -1), 7.4)]
+        for n, it in enumerate(items, 1):
+            row = [""] * len(keys)
+            row[ci["no"]], row[ci["sl"]] = str(n), str(it["sl"])
+            row[ci["erp"]] = Paragraph(_pdf_txt(it["erp"]), cell)
+            row[ci["item"]] = Paragraph(_pdf_txt(it["item"]), cell)
+            row[ci["size"]] = Paragraph(_pdf_txt(it["size"]), cell)
+            row[ci["uom"]] = l1(it["uom"])
+            row[ci["issued"]] = _g(it["issued"])
+            row[ci["last"]] = l1(it["last"])
+            row[ci["drecv"]], row[ci["dissue"]], row[ci["phys"]] = _g(it["drecv"]), _g(it["dissue"]), _g(it["phys"])
+            row[ci["remarks"]] = Paragraph(_pdf_txt(it["remarks"]), cell)
+            if show_cl:
+                row[ci["closing"]] = "NIL" if abs(it["closing"]) < MSC_EPS else _g(it["closing"])
+                row[ci["expected"]] = _g(it["expected"])
+                row[ci["diff"]], row[ci["status"]] = _g(it["diff"]), it["status"]
+                if abs(it["closing"]) < MSC_EPS:
+                    style.append(("TEXTCOLOR", (ci["closing"], n), (ci["closing"], n), colors.HexColor("#C2410C")))
+                if it["status"] == "SHORT":
+                    style.append(("TEXTCOLOR", (ci["diff"], n), (ci["status"], n), colors.HexColor("#B91C1C")))
+                elif it["status"] == "EXCESS":
+                    style.append(("TEXTCOLOR", (ci["diff"], n), (ci["status"], n), colors.HexColor("#C2410C")))
+            if result:
+                row[ci["vdiff"]] = "" if it["diff"] is None else f"{it['diff'] * it['price']:,.0f}"
+            data.append(row)
+            if n % 2 == 0:
+                style.append(("BACKGROUND", (0, n), (-1, n), colors.HexColor("#F5F8FC")))
+            for k in ("drecv", "dissue", "phys", "remarks"):
+                if not (k == "remarks" and it["remarks"]) and (result is False or k in ("drecv", "dissue", "phys")):
+                    style.append(("BACKGROUND", (ci[k], n), (ci[k], n), WRITE))
+        for k in ("closing", "expected", "phys"):
+            if k in ci:
+                style.append(("FONTNAME", (ci[k], 1), (ci[k], -1), "Helvetica-Bold"))
+        for k in ("issued", "closing", "drecv", "dissue", "expected", "phys", "diff", "vdiff"):
+            if k in ci:
+                style.append(("ALIGN", (ci[k], 1), (ci[k], -1), "RIGHT"))
+        for k in ("no", "sl", "uom", "last", "status"):
+            if k in ci:
+                style.append(("ALIGN", (ci[k], 1), (ci[k], -1), "CENTER"))
+        t = Table(data, colWidths=widths, repeatRows=1)
+        t.setStyle(TableStyle(style))
+        story.append(t)
+    if blank_rows:
+        story.append(CondPageBreak(120))
+        story.append(Paragraph("Items NOT in this list - write item name, size and quantity", cat_st))
+        data = [[Paragraph(h, head) for _, h, _ in spec]] + [[""] * len(keys) for _ in range(int(blank_rows))]
+        t = Table(data, colWidths=widths, repeatRows=1, rowHeights=[None] + [20] * int(blank_rows))
+        t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), NAVY), ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#9AA8BD")),
+                               ("BACKGROUND", (0, 1), (-1, -1), WRITE)]))
+        story.append(t)
+    story.append(Spacer(1, 22))
+    sig = Table([["Counted by: ______________", "Checked by: ______________", "Store Manager: ______________", "Date: ______________"]],
+                colWidths=[page_w / 4] * 4)
+    sig.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 8.5), ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"), ("TEXTCOLOR", (0, 0), (-1, -1), NAVY)]))
+    story.append(sig)
+    doc.build(story, onFirstPage=deco, onLaterPages=deco)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------- screens
 def isc_new_view(fac):
-    st.markdown("**Kibhabe kaj kore:** apni ja bachhai korben sudhu sei issue-hoye-jaoa item gulur **closing stock (check-er tarikhe)** "
-                "software theke ber hobe. Tarpor store-e giye physical count entry korben. Shob item check korte hobe na.")
+    st.markdown(
+        "<div class='isc-steps'>"
+        "<div class='isc-step'><b class='n'>1</b><span><b>Dates &amp; period</b><br>Closing date ar issue-er period thik korun</span></div>"
+        "<div class='isc-step'><b class='n'>2</b><span><b>Select items</b><br>Je item issue hoyeche shudhu sei list</span></div>"
+        "<div class='isc-step'><b class='n'>3</b><span><b>Count sheet</b><br>Excel / PDF download kore officer-ke din</span></div>"
+        "<div class='isc-step'><b class='n'>4</b><span><b>Count &amp; approve</b><br>Physical entry → Short / Excess → Manager approve</span></div>"
+        "</div>", unsafe_allow_html=True)
     today = local_now().date()
     c1, c2 = st.columns(2)
-    upto_d = c1.date_input("Issue-r shesh tarikh (e.g. 05-Nov)", value=today - timedelta(days=1), key="isc_upto", max_value=today)
-    chk_d = c2.date_input("Closing stock check-er tarikh (e.g. 06-Nov)", value=today, key="isc_chk", max_value=today)
-    mode = st.radio("Kon shomoy-er issue-r item?",
-                    [f"Shudhu {upto_d.strftime('%d-%b')} tarikher issue", "Shesh 7 din", "Shuru theke (shob issue)", "Nijer tarikh dibo"],
+    closing_d = c1.date_input("Closing balance date  (software closing)", value=today - timedelta(days=1), key="isc_cl", max_value=today,
+                              help="Ei tarikh porjonto shob issue / receive software-e entry hoye geche. Report-er Closing balance ei tarikher.")
+    count_d = c2.date_input("Physical count date  (opening count)", value=today, key="isc_cnt", max_value=today,
+                            help="Ei tarikhe officer physical count korbe. Count-er age day-shift-e ja issue hoyeche seta sheet-e 'Day-shift issue' column-e likhbe.")
+    mode = st.radio("Which issues to include?", ["This month (from 1st)", "Closing day only", "Last 7 days", "Custom range"],
                     key="isc_mode", horizontal=True)
-    if mode.startswith("Shudhu"):
-        from_d = upto_d
-    elif mode == "Shesh 7 din":
-        from_d = upto_d - timedelta(days=6)
-    elif mode.startswith("Shuru"):
-        from_d = None
+    if mode.startswith("This month"):
+        from_d = closing_d.replace(day=1)
+    elif mode.startswith("Closing day"):
+        from_d = closing_d
+    elif mode.startswith("Last 7"):
+        from_d = closing_d - timedelta(days=6)
     else:
-        from_d = st.date_input("Issue shuru", value=upto_d.replace(day=1), key="isc_from", max_value=upto_d)
-    inc_int = st.checkbox("Internal Issue (onno unit-e pathano) item-ao dhorbo", value=True, key="isc_inc_int")
+        from_d = st.date_input("Issue period starts on", value=closing_d.replace(day=1), key="isc_from")
+    o1, o2 = st.columns(2)
+    inc_int = o1.checkbox("Include Internal Issue (sent to another unit)", value=True, key="isc_inc_int")
+    sw_day = o2.checkbox(f"Software already has {count_d.strftime('%d-%b')} entries → deduct them automatically", value=False, key="isc_swday",
+                         help="Off (recommended): sheet shows pure closing balance; officer writes the day-shift issue / receive. "
+                              "On: issue / receive already entered in software on the count date are added to the sheet automatically.")
     note = st.text_input("Note (optional)", key="isc_note")
+    if from_d > closing_d:
+        st.error("Issue period start cannot be after the closing balance date.")
+        return
     try:
-        detail = isc_issued_detail(fac, from_d, upto_d, inc_int)
+        detail = isc_issued_detail(fac, from_d, closing_d, inc_int)
     except Exception as e:
         st.warning(f"Issue item list ber kora jay nai: {e}")
         return
-    span_txt = f"{from_d.strftime(DATE_FMT) if from_d else 'shuru'} theke {upto_d.strftime(DATE_FMT)}"
+    span_txt = f"{from_d.strftime(DATE_FMT)} to {closing_d.strftime(DATE_FMT)}"
     if not detail:
         st.info(f"{span_txt} -er moddhe kono issue kora item paoa jay nai.")
         return
-    st.info(f"📌 {span_txt}: **{len(detail)}** ti item issue hoyeche. Je item check korben na tar tick tule din.")
-    all_on = st.checkbox("Shob item tick", value=True, key="isc_all")
+    nil_n = sum(1 for d in detail if d["Stock now"] <= MSC_EPS)
+    _isc_kpis([("Items issued", len(detail), ""), ("Issue entries", sum(d["Entries"] for d in detail), ""),
+               ("Stock nil / minus now", nil_n, "warn" if nil_n else "ok"), ("Period", span_txt, "gold")])
+    if nil_n:
+        st.markdown("<div class='isc-note'>⚠ <b>" + str(nil_n) + " item-er stock ekhon 0 (ba minus).</b> Officer vul kore full qty issue korle item-er stock "
+                    "zero hoye jay — tai ei item gulo-o list-e thakbe ar officer-ke physical count korte hobe. Alert column-e chinhito kora ache.</div>",
+                    unsafe_allow_html=True)
+    all_on = st.checkbox("Select all items", value=True, key="isc_all")
     pv = pd.DataFrame(detail)
+    pv["Alert"] = ["⚠ Nil stock" if d["Stock now"] <= MSC_EPS else "" for d in detail]
     pv.insert(0, "Check", all_on)
     ed = st.data_editor(pv, hide_index=True, use_container_width=True, height=min(520, 60 + 36 * len(pv)),
-                        key=f"isc_pv_{int(all_on)}_{from_d}_{upto_d}_{int(inc_int)}",
+                        key=f"isc_pv_{int(all_on)}_{from_d}_{closing_d}_{int(inc_int)}",
                         disabled=[c for c in pv.columns if c != "Check"],
-                        column_config={"Check": st.column_config.CheckboxColumn("Check?"), "SL": st.column_config.NumberColumn(format="%d")})
+                        column_config={"Check": st.column_config.CheckboxColumn("Include?"), "SL": st.column_config.NumberColumn(format="%d"),
+                                       "Issued qty": st.column_config.NumberColumn("Issued qty (period)"),
+                                       "Stock now": st.column_config.NumberColumn("Stock now (software)")})
     picked = {int(r["SL"]) for _, r in ed.iterrows() if r["Check"]}
-    st.caption(f"{len(picked)} ti item physical check list-e jabe.")
-    if st.button(f"✅ {len(picked)} ti item-er stock check toiri korun", type="primary", key="isc_create_btn",
+    st.caption(f"{len(picked)} of {len(pv)} items will go to the count sheet.  Closing balance = {closing_d.strftime(DATE_FMT)}  ·  Physical count = {count_d.strftime(DATE_FMT)}.")
+    if st.button(f"✅ Create stock check  ({len(picked)} items)", type="primary", key="isc_create_btn",
                  use_container_width=True, disabled=not picked):
-        if upto_d > chk_d:
-            st.error("Issue-r shesh tarikh check-er tarikh-er por hote pare na.")
+        if count_d < closing_d:
+            st.error("Physical count date cannot be before the closing balance date.")
         elif guard():
-            with st.spinner("Closing stock hishab hocche..."):
-                rows, flags = msc_compute(fac, chk_d, chk_d)     # closing at end of check date; nothing 'after' it is counted
+            with st.spinner("Closing balance hishab hocche..."):
+                rows, flags = msc_compute(fac, closing_d, count_d if sw_day else closing_d)
                 rows = [r for r in rows if int(r["sl_no"]) in picked]
                 if not rows:
                     st.error("Item list khali.")
                     return
-                label = f"Issued items {upto_d.strftime('%d-%b')} → closing {chk_d.strftime('%d-%b-%Y')}"
-                tag_note = f"{ISC_TAG} issued {span_txt}" + (f" | {note.strip()}" if note.strip() else "")
-                sid = msc_create(fac, chk_d, chk_d, label, "Software", "", rows, tag_note)
+                label = f"Issued items · closing {closing_d.strftime('%d-%b')} · count {count_d.strftime('%d-%b-%Y')}"
+                tag_note = (f"{ISC_TAG} issued {span_txt}" + (f" | {note.strip()}" if note.strip() else "")
+                            + f" ||R={from_d.isoformat()}..{closing_d.isoformat()};I={int(inc_int)};S={int(sw_day)}")
+                sid = msc_create(fac, closing_d, count_d, label, "Software", "", rows, tag_note)
             if sid:
                 st.session_state["isc_sid"] = sid
                 st.session_state["msc_flags"] = flags
-                done(f"Stock check #{sid} toiri hoyeche ({len(rows)} item). Ekhon 'Enter physical' e giye count likhun.")
+                st.session_state["_isc_goto"] = 1
+                done(f"Stock check #{sid} toiri hoyeche ({len(rows)} item). Ekhon Count sheet download kore officer-ke din.")
+
+
+def isc_sheet_view(sid, sess, df, fac):
+    meta = isc_report_meta(sess, fac)
+    imap = isc_issued_map(fac, sess)
+    nil = int((df["closing_qty"].abs() <= MSC_EPS).sum())
+    val = float((df["closing_qty"] * df["unit_price"].fillna(0)).sum())
+    _isc_kpis([("Items to count", len(df), ""), ("Closing balance > 0", len(df) - nil, "ok"),
+               ("Nil closing (issued out)", nil, "warn" if nil else "ok"), ("Closing value (Tk)", f"{val:,.0f}", "gold")])
+    st.markdown("<div class='isc-formula'>Expected stock  =  Closing balance (" + html_lib.escape(meta["closing"]) + ")  +  Day-shift receive  −  Day-shift issue"
+                "&nbsp;&nbsp;→&nbsp;&nbsp;Difference  =  Physical count  −  Expected</div>", unsafe_allow_html=True)
+    st.markdown("##### ⬇️ Download the count sheet")
+    d1, d2, d3 = st.columns([3, 2, 2])
+    cats = list(dict.fromkeys(df["category"]))
+    scope = d1.selectbox("Sheet for", ["All categories"] + cats, key=f"isc_scope_{sid}")
+    show_cl = d2.checkbox("Show closing balance", value=True, key=f"isc_showcl_{sid}",
+                          help="Off = blind sheet (officer cannot see system quantity).")
+    blanks = int(d3.number_input("Blank rows (items not in list)", min_value=0, max_value=30, value=5, step=1, key=f"isc_blank_{sid}"))
+    sub = df if scope == "All categories" else df[df["category"] == scope]
+    stem = f"issued_items_count_sheet_{sid}" + ("" if scope == "All categories" else "_" + re.sub(r"[^A-Za-z0-9]+", "_", scope)[:24])
+    tag = f"{sid}_{scope}_{int(show_cl)}_{blanks}"
+    b1, b2 = st.columns(2)
+    _lazy_download(b1, "📗 Download Excel (premium)", lambda: isc_report_xlsx(isc_report_rows(sub, imap), meta, "count", show_cl, blanks),
+                   f"{stem}.xlsx", _ISC_XLSX_MIME, f"isc_x_{tag}")
+    try:
+        import reportlab  # noqa: F401
+        _lazy_download(b2, "📕 Download PDF (print-ready)", lambda: isc_report_pdf(isc_report_rows(sub, imap), meta, "count", show_cl, blanks),
+                       f"{stem}.pdf", "application/pdf", f"isc_p_{tag}")
+    except ImportError:
+        b2.caption("PDF: 'pip install reportlab'")
+    st.markdown("##### 📋 Preview")
+    f1, f2 = st.columns([2, 3])
+    cat = f1.selectbox("Category", ["All"] + cats, key=f"isc_ccat_{sid}")
+    term = f2.text_input("Search item / ERP code", key=f"isc_cq_{sid}").strip().lower()
+    v = df if cat == "All" else df[df["category"] == cat]
+    if term:
+        v = v[v["item_name"].str.lower().str.contains(term, regex=False) | v["prod_id"].str.lower().str.contains(term, regex=False)]
+    out = pd.DataFrame({"Category": v["category"], "SL": v["sl_no"], "ERP code": v["prod_id"], "Item": v["item_name"], "Size": v["size"], "UOM": v["unit"],
+                        "Issued qty (period)": [(imap.get(int(s)) or {}).get("Issued qty") for s in v["sl_no"]],
+                        f"Closing {meta['closing']}": v["closing_qty"], "Unit price": v["unit_price"], "Software now": v["live_qty"]})
+    st.dataframe(out, hide_index=True, use_container_width=True, height=min(480, 60 + 36 * len(out)),
+                 column_config={"SL": st.column_config.NumberColumn(format="%d")})
 
 
 @_msc_fragment
-def isc_entry_editor(sid, df, locked, fac):
+def isc_entry_editor(sid, df, locked, fac, closing_lbl):
     cats = list(dict.fromkeys(df["category"]))
     prog = {c: (int(df[df["category"] == c]["physical_qty"].notna().sum()), int((df["category"] == c).sum())) for c in cats}
-    c1, c2 = st.columns([3, 2])
+    tot_c, tot_n = int(df["physical_qty"].notna().sum()), len(df)
+    st.progress(tot_c / tot_n if tot_n else 0.0, text=f"Counted {tot_c} of {tot_n} items")
+    c1, c2, c3 = st.columns([3, 2, 2])
     pick = c1.selectbox("Category", cats, format_func=lambda c: f"{c}  ({prog[c][0]}/{prog[c][1]} counted)", key=f"isc_ecat_{sid}")
-    show_cl = c2.checkbox("Closing balance dekhao", value=True, key=f"isc_showcl_{sid}")
+    only_open = c2.checkbox("Only not counted", value=False, key=f"isc_eopen_{sid}")
+    show_cl = c3.checkbox("Show closing balance", value=True, key=f"isc_showcl_e_{sid}")
+    term = st.text_input("Search item / ERP code", key=f"isc_eq_{sid}").strip().lower()
     sub = df[df["category"] == pick].copy()
-    cols = ["id", "sl_no", "prod_id", "item_name", "size", "unit"] + (["expected_qty"] if show_cl else []) + \
-           ["extra_issued", "extra_received", "physical_qty", "remarks"]
+    if only_open:
+        sub = sub[sub["physical_qty"].isna()]
+    if term:
+        sub = sub[sub["item_name"].str.lower().str.contains(term, regex=False) | sub["prod_id"].str.lower().str.contains(term, regex=False)]
+    if sub.empty:
+        st.info("Ei filter-e kono item nai.")
+        return
+    has_sw = bool(((sub["issued_qty"].fillna(0).abs() > MSC_EPS) | (sub["received_qty"].fillna(0).abs() > MSC_EPS)).any())
+    cols = (["id", "sl_no", "prod_id", "item_name", "size", "unit"] + (["closing_qty"] if show_cl else [])
+            + (["received_qty", "issued_qty"] if has_sw else []) + ["extra_received", "extra_issued", "physical_qty", "remarks"])
     base = sub[cols].reset_index(drop=True)
     cfg = {"id": None, "sl_no": st.column_config.NumberColumn("SL", format="%d"), "prod_id": "ERP code",
            "item_name": st.column_config.TextColumn("Item", width="large"), "size": "Size", "unit": "UOM",
-           "expected_qty": st.column_config.NumberColumn("Closing balance"),
-           "extra_issued": st.column_config.NumberColumn("ISSUED after print", min_value=0.0, step=1.0,
-                                                         help="Software-e ekhono ashe nai emon issue"),
-           "extra_received": st.column_config.NumberColumn("RECEIVED after print", min_value=0.0, step=1.0,
-                                                           help="Software-e ekhono ashe nai emon receipt"),
-           "physical_qty": st.column_config.NumberColumn("PHYSICAL", min_value=0.0, step=1.0),
+           "closing_qty": st.column_config.NumberColumn(f"Closing {closing_lbl}"),
+           "received_qty": st.column_config.NumberColumn("Software receive (count day)"),
+           "issued_qty": st.column_config.NumberColumn("Software issue (count day)"),
+           "extra_received": st.column_config.NumberColumn("Day-shift RECEIVE", min_value=0.0, step=1.0,
+                                                           help="Count-er age ja receive hoyeche, software-e ekhono nai"),
+           "extra_issued": st.column_config.NumberColumn("Day-shift ISSUE", min_value=0.0, step=1.0,
+                                                         help="Opening balance theke count-er age ja issue hoyeche, software-e ekhono nai"),
+           "physical_qty": st.column_config.NumberColumn("PHYSICAL COUNT", min_value=0.0, step=1.0),
            "remarks": st.column_config.TextColumn("Remarks")}
-    ed = st.data_editor(base, hide_index=True, use_container_width=True, key=f"isc_ed_{sid}_{pick}_{int(show_cl)}", column_config=cfg,
-                        disabled=[c for c in cols if c not in ("physical_qty", "remarks", "extra_issued", "extra_received")]
-                        + (["physical_qty", "remarks", "extra_issued", "extra_received"] if locked else []),
+    editable = ("physical_qty", "remarks", "extra_issued", "extra_received")
+    ed = st.data_editor(base, hide_index=True, use_container_width=True,
+                        key=f"isc_ed_{sid}_{pick}_{int(show_cl)}_{int(only_open)}_{term}", column_config=cfg,
+                        disabled=[c for c in cols if c not in editable] + (list(editable) if locked else []),
                         height=min(620, 60 + 36 * len(base)))
     changes = []
     for i in range(len(base)):
@@ -24249,7 +24830,7 @@ def isc_entry_editor(sid, df, locked, fac):
             changes.append((int(base.loc[i, "id"]), None if pd.isna(n) else float(n), nrem, ni, nrc))
     if locked:
         st.warning("Ei check closed - entry lock kora.")
-    elif st.button(f"💾 Ei category save korun ({len(changes)} changed)", key=f"isc_save_{sid}_{pick}", type="primary",
+    elif st.button(f"💾 Save this list  ({len(changes)} changed)", key=f"isc_save_{sid}_{pick}", type="primary",
                    use_container_width=True, disabled=not changes):
         if guard():
             n = msc_save_physical(sid, changes)
@@ -24257,30 +24838,56 @@ def isc_entry_editor(sid, df, locked, fac):
                 done(f"{n} physical count save hoyeche.")
 
 
-def isc_closing_view(sid, sess, df):
-    st.markdown(f"##### 📋 Closing balance — {_msc_fmt(sess['count_date'])}")
-    cats = ["All"] + list(dict.fromkeys(df["category"]))
-    f1, f2 = st.columns([2, 3])
-    cat = f1.selectbox("Category", cats, key=f"isc_ccat_{sid}")
-    term = f2.text_input("Item search", key=f"isc_cq_{sid}").strip().lower()
-    v = df if cat == "All" else df[df["category"] == cat]
-    if term:
-        v = v[v["item_name"].str.lower().str.contains(term, regex=False) | v["prod_id"].str.lower().str.contains(term, regex=False)]
-    out = v[["category", "sl_no", "prod_id", "item_name", "size", "unit", "expected_qty", "unit_price", "live_qty"]].rename(columns={
-        "category": "Category", "sl_no": "SL", "prod_id": "ERP code", "item_name": "Item", "size": "Size", "unit": "UOM",
-        "expected_qty": "Closing balance", "unit_price": "Unit price", "live_qty": "Software now"})
-    m = st.columns(3)
-    m[0].metric("Items", len(out))
-    m[1].metric("Closing > 0", int((out["Closing balance"].abs() > MSC_EPS).sum()))
-    m[2].metric("Closing value", f"{(out['Closing balance'] * out['Unit price'].fillna(0)).sum():,.0f}")
-    st.dataframe(out, hide_index=True, use_container_width=True, height=480)
-    export_buttons(out, f"issued_items_closing_{sid}", f"Issued items closing balance #{sid}")
+def isc_result_view(sid, sess, df, fac):
+    meta = isc_report_meta(sess, fac)
+    imap = isc_issued_map(fac, sess)
+    counted = df[df["physical_qty"].notna()]
+    short, exc = counted[counted["diff"] < -MSC_EPS], counted[counted["diff"] > MSC_EPS]
+    match_n = len(counted) - len(short) - len(exc)
+    nv = float(counted["diff_value"].fillna(0).sum())
+    _isc_kpis([("Items", len(df), ""), ("Counted", len(counted), "ok" if len(counted) == len(df) else ""), ("Not counted", len(df) - len(counted), "warn" if len(df) > len(counted) else "ok"),
+               ("Match", match_n, "ok"), ("Short", len(short), "warn" if len(short) else ""), ("Excess", len(exc), "warn" if len(exc) else ""),
+               ("Net value diff (Tk)", f"{nv:,.0f}", "gold")])
+    summ = (df.groupby("category").agg(Items=("id", "count"), Counted=("physical_qty", "count"),
+                                       Match=("status", lambda s: int((s == "✅ Match").sum())), Short=("status", lambda s: int((s == "🔻 Short").sum())),
+                                       Excess=("status", lambda s: int((s == "🔺 Excess").sum())), Net_value_diff=("diff_value", "sum"))
+            .reset_index().rename(columns={"category": "Category", "Net_value_diff": "Net value diff"}))
+    with st.expander("Category summary", expanded=False):
+        st.dataframe(summ, hide_index=True, use_container_width=True)
+    f1, f2 = st.columns(2)
+    cats = list(dict.fromkeys(df["category"]))
+    cat = f1.selectbox("Category", ["All"] + cats, key=f"isc_rcat_{sid}")
+    stt = f2.selectbox("Status", ["All", "🔻 Short", "🔺 Excess", "✅ Match", "⏳ Not counted"], key=f"isc_rst_{sid}")
+    view = df if cat == "All" else df[df["category"] == cat]
+    show = view if stt == "All" else view[view["status"] == stt]
+    out = pd.DataFrame({"Category": show["category"], "SL": show["sl_no"], "ERP code": show["prod_id"], "Item": show["item_name"], "Size": show["size"],
+                        "UOM": show["unit"], f"Closing {meta['closing']}": show["closing_qty"], "Day-shift receive": show["day_recv"],
+                        "Day-shift issue": show["day_issue"], "Expected": show["expected_qty"], "Physical": show["physical_qty"],
+                        "Difference": show["diff"], "Value diff": show["diff_value"], "Status": show["status"], "Remarks": show["remarks"]})
+    st.dataframe(out, hide_index=True, use_container_width=True, height=min(460, 60 + 36 * len(out)),
+                 column_config={"SL": st.column_config.NumberColumn(format="%d")})
+    st.markdown("##### ⬇️ Download result report")
+    only_diff = st.checkbox("Only items with Short / Excess", value=False, key=f"isc_odiff_{sid}")
+    rep = df[df["status"].isin(["🔻 Short", "🔺 Excess"])] if only_diff else view
+    tag = f"{sid}_{cat}_{int(only_diff)}_{len(counted)}"
+    stem = f"issued_items_result_{sid}"
+    b1, b2 = st.columns(2)
+    _lazy_download(b1, "📗 Download Excel (premium)", lambda: isc_report_xlsx(isc_report_rows(rep, imap), meta, "result", True, 0),
+                   f"{stem}.xlsx", _ISC_XLSX_MIME, f"isc_rx_{tag}")
+    try:
+        import reportlab  # noqa: F401
+        _lazy_download(b2, "📕 Download PDF (print-ready)", lambda: isc_report_pdf(isc_report_rows(rep, imap), meta, "result", True, 0),
+                       f"{stem}.pdf", "application/pdf", f"isc_rp_{tag}")
+    except ImportError:
+        b2.caption("PDF: 'pip install reportlab'")
+    msc_approve_panel(sid, sess, df, fac)
 
 
 def tab_issued_stock_check():
-    st.title("✅ Issued Items Stock Check")
-    st.caption("Issue hoye jaoa item gulur closing stock store-e physically gune software-er sathe milan. "
-               "Stock sudhu Manager approve korle bodlay.")
+    st.markdown(_ISC_CSS, unsafe_allow_html=True)
+    st.markdown("<div class='isc-hero'><h2>✅ Issued Items Stock Check</h2>"
+                "<p>Je item issue hoyeche shudhu sei item gulor closing balance (software) niye officer physical count kore — "
+                "Short / Excess Manager approve korle tabei stock adjust hoy.</p></div>", unsafe_allow_html=True)
     if "CONSOLIDATED" in FAC:
         st.info("Upor theke ekta factory select korun.")
         return
@@ -24290,13 +24897,16 @@ def tab_issued_stock_check():
         st.error(f"Stock check tables toiri kora jay nai: {e}")
         return
     fac = FAC
-    tab = lazy_tab_select(["🆕 New check", "📋 Closing balance", "✍️ Enter physical", "📊 Result & Approve", "🖨 Print sheet"], "lz_isc")
+    goto = st.session_state.pop("_isc_goto", None)
+    if goto is not None:                      # after "Create": open the Count sheet tab (set BEFORE the radio is drawn)
+        st.session_state["lz_isc2"] = ISC_TABS[int(goto)]
+    tab = lazy_tab_select(ISC_TABS, "lz_isc2")
     if tab == 0:
         isc_new_view(fac)
         return
     sessions = isc_sessions(fac)
     if not sessions:
-        st.info("Age '🆕 New check' theke ekta check toiri korun.")
+        st.info("Age '1 · New check' theke ekta check toiri korun.")
         return
     ids = [s["id"] for s in sessions]
     cur = st.session_state.get("isc_sid")
@@ -24304,24 +24914,27 @@ def tab_issued_stock_check():
         cur = ids[0]
     by = {s["id"]: s for s in sessions}
     sid = st.selectbox("Stock check", ids, index=ids.index(cur), key="isc_pick",
-                       format_func=lambda i: f"#{i} · {by[i]['month_label']} · {by[i]['status']}")
+                       format_func=lambda i: f"#{i}  ·  closing {_msc_fmt(by[i]['closing_date'])}  →  count {_msc_fmt(by[i]['count_date'])}  ·  {by[i]['status']}")
     st.session_state["isc_sid"] = sid
     sess = by[sid]
-    df = msc_load(sid)
+    df = isc_load(sid)
     if df is None or df.empty:
         st.warning("Ei check-e kono item nai.")
         return
-    st.caption(f"Closing stock tarikh: **{_msc_fmt(sess['count_date'])}** · Item: **{len(df)}** · Counted: **{int(df['physical_qty'].notna().sum())}**")
+    nm = isc_note_meta(sess.get("note"))
+    chips = [f"Check #{sid}", f"Closing balance: {_msc_fmt(sess['closing_date'])}", f"Physical count: {_msc_fmt(sess['count_date'])}"]
+    if nm:
+        chips.append(f"Issues: {nm['from_d'].strftime(DATE_FMT) if nm['from_d'] else 'start'} to {nm['upto_d'].strftime(DATE_FMT)}")
+    chips += [f"{len(df)} items", f"{int(df['physical_qty'].notna().sum())} counted", f"Status: {sess['status']}"]
+    st.markdown("<div class='isc-chips'>" + "".join(f"<span class='isc-chip'>{html_lib.escape(c)}</span>" for c in chips) + "</div>", unsafe_allow_html=True)
     if tab == 1:
-        isc_closing_view(sid, sess, df)
+        isc_sheet_view(sid, sess, df, fac)
     elif tab == 2:
-        st.caption("Closing balance dekhe store-e gune PHYSICAL-e likhun. Count-er por jodi notun issue/receipt hoy ja software-e ekhono nai, "
-                   "sheta 'after print' column-e likhun.")
-        isc_entry_editor(sid, df, sess["status"] != "Open", fac)
+        st.caption("Closing balance dekhe store-e gune PHYSICAL COUNT-e likhun. Count-er age day-shift-e ja issue / receive hoyeche (software-e ekhono nai) "
+                   "seta Day-shift ISSUE / RECEIVE column-e likhun.")
+        isc_entry_editor(sid, df, sess["status"] != "Open", fac, _msc_fmt(sess["closing_date"]))
     elif tab == 3:
-        msc_result_view(sid, sess, df, fac)
-    elif tab == 4:
-        msc_print_view(sid, sess, df, fac)
+        isc_result_view(sid, sess, df, fac)
 
 
 # Brand and account/login appear first; Workspace and Management remain clearly grouped below.
