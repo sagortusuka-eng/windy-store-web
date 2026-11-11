@@ -24233,6 +24233,22 @@ def isc_load(sid):
     return df
 
 
+ISC_KINDS = ["All items", "Issued items only", "Issued & now NIL (closing 0)", "In stock, not issued"]
+
+
+def isc_kind_filter(df, imap, choice):
+    """Splits an Issued-Items check: items issued in the period (incl. those that went to NIL) / in-stock items that were not issued."""
+    if not imap or choice == ISC_KINDS[0]:
+        return df
+    issued = df["sl_no"].astype(int).isin(set(imap))
+    nil = df["closing_qty"].abs() <= MSC_EPS
+    if choice == ISC_KINDS[1]:
+        return df[issued]
+    if choice == ISC_KINDS[2]:
+        return df[issued & nil]
+    return df[~issued]
+
+
 def isc_report_meta(sess, fac):
     nm = isc_note_meta(sess.get("note"))
     period = ""
@@ -24320,8 +24336,8 @@ def isc_report_xlsx(rows, meta, mode="count", show_closing=True, blank_rows=0):
     how = ("How to fill: DAY-SHIFT ISSUE = quantity already issued from the opening balance BEFORE you counted (not yet in software); "
            "DAY-SHIFT RECEIVE = quantity received before the count.  Expected = Closing + Receive − Issue.  Difference = Physical − Expected."
            if show_cl else
-           "How to fill: write the DAY-SHIFT ISSUE / RECEIVE (qty moved before you counted) and your PHYSICAL COUNT.  Every item listed was issued this period — "
-           "count it even if you expect nothing in the store.")
+           "How to fill: write the DAY-SHIFT ISSUE / RECEIVE (qty moved before you counted) and your PHYSICAL COUNT.  Items marked NIL were issued out this period — "
+           "count them even if you expect nothing in the store.")
     banner(5, how, 9, "FFF8E1", bold=False, fg="6B5310", h=30, italic=True)
     ws.row_dimensions[7].height = 6
 
@@ -24574,7 +24590,7 @@ def isc_report_pdf(rows, meta, mode="count", show_closing=True, blank_rows=0):
                           f"&nbsp;&nbsp;|&nbsp;&nbsp; <b>Physical count date:</b> {meta['count']}"), info)]
     how = ("DAY-SHIFT ISSUE = quantity issued from the opening balance BEFORE counting (not yet in software); DAY-SHIFT RECEIVE = quantity received before counting. "
            "Expected = Closing + Receive - Issue; Difference = Physical - Expected." if show_cl else
-           "Write the DAY-SHIFT ISSUE / RECEIVE (moved before counting) and your PHYSICAL COUNT. Every item here was issued this period - count it even if you expect nothing.")
+           "Write the DAY-SHIFT ISSUE / RECEIVE (moved before counting) and your PHYSICAL COUNT. Items marked NIL were issued out this period - count them even if you expect nothing.")
     story += [Paragraph(l1(how), info), Spacer(1, 4)]
     if result:
         cnt = [x for x in rows if x["phys"] is not None]
@@ -24681,6 +24697,9 @@ def isc_new_view(fac):
         from_d = st.date_input("Issue period starts on", value=closing_d.replace(day=1), key="isc_from")
     o1, o2 = st.columns(2)
     inc_int = o1.checkbox("Include Internal Issue (sent to another unit)", value=True, key="isc_inc_int")
+    all_stock = o1.checkbox("Also include ALL items that have stock (closing > 0)", value=True, key="isc_allstock",
+                            help="On: report-e (a) je item gulo ei period-e issue hoyeche (stock 0 hole-o) ar (b) je item gulor closing balance ache - duto-i thakbe. "
+                                 "Off: shudhu issue-hoya item.")
     sw_day = o2.checkbox(f"Software already has {count_d.strftime('%d-%b')} entries → deduct them automatically", value=False, key="isc_swday",
                          help="Off (recommended): sheet shows pure closing balance; officer writes the day-shift issue / receive. "
                               "On: issue / receive already entered in software on the count date are added to the sheet automatically.")
@@ -24698,8 +24717,15 @@ def isc_new_view(fac):
         st.info(f"{span_txt} -er moddhe kono issue kora item paoa jay nai.")
         return
     nil_n = sum(1 for d in detail if d["Stock now"] <= MSC_EPS)
-    _isc_kpis([("Items issued", len(detail), ""), ("Issue entries", sum(d["Entries"] for d in detail), ""),
-               ("Stock nil / minus now", nil_n, "warn" if nil_n else "ok"), ("Period", span_txt, "gold")])
+    try:
+        instock_n = int(q_c("SELECT COUNT(*) AS n FROM inventory WHERE factory_name=%s AND COALESCE(current_stock,0) > 0", (fac,))[0]["n"])
+    except Exception:
+        instock_n = 0
+    _isc_kpis([("Items issued", len(detail), ""), ("Issued & stock now NIL", nil_n, "warn" if nil_n else "ok"),
+               ("Items with stock now", instock_n if all_stock else "off", "ok" if all_stock else ""), ("Period", span_txt, "gold")])
+    st.markdown("<div class='isc-note'><b>Report-e thakbe:</b> (1) ekhane tick-kora issue-hoya item — stock 0 hoye gele-o; "
+                + ("(2) tar sathe je item gulor closing balance ache (issue hok ba na hok). " if all_stock else "")
+                + "Je item-er stock 0 ar issue-o hoy ni, shei item report-e ashbe na.</div>", unsafe_allow_html=True)
     if nil_n:
         st.markdown("<div class='isc-note'>⚠ <b>" + str(nil_n) + " item-er stock ekhon 0 (ba minus).</b> Officer vul kore full qty issue korle item-er stock "
                     "zero hoye jay — tai ei item gulo-o list-e thakbe ar officer-ke physical count korte hobe. Alert column-e chinhito kora ache.</div>",
@@ -24715,15 +24741,17 @@ def isc_new_view(fac):
                                        "Issued qty": st.column_config.NumberColumn("Issued qty (period)"),
                                        "Stock now": st.column_config.NumberColumn("Stock now (software)")})
     picked = {int(r["SL"]) for _, r in ed.iterrows() if r["Check"]}
-    st.caption(f"{len(picked)} of {len(pv)} items will go to the count sheet.  Closing balance = {closing_d.strftime(DATE_FMT)}  ·  Physical count = {count_d.strftime(DATE_FMT)}.")
-    if st.button(f"✅ Create stock check  ({len(picked)} items)", type="primary", key="isc_create_btn",
+    issued_all = {int(d["SL"]) for d in detail}
+    st.caption(f"{len(picked)} of {len(pv)} issued items" + (" + all in-stock items" if all_stock else "") + f" will go to the count sheet.  Closing balance = {closing_d.strftime(DATE_FMT)}  ·  Physical count = {count_d.strftime(DATE_FMT)}.")
+    if st.button(f"✅ Create stock check  ({len(picked)} issued items" + (" + in-stock items)" if all_stock else ")"), type="primary", key="isc_create_btn",
                  use_container_width=True, disabled=not picked):
         if count_d < closing_d:
             st.error("Physical count date cannot be before the closing balance date.")
         elif guard():
             with st.spinner("Closing balance hishab hocche..."):
                 rows, flags = msc_compute(fac, closing_d, count_d if sw_day else closing_d)
-                rows = [r for r in rows if int(r["sl_no"]) in picked]
+                rows = [r for r in rows if int(r["sl_no"]) in picked
+                        or (all_stock and int(r["sl_no"]) not in issued_all and abs(float(r["closing"] or 0)) > MSC_EPS)]
                 if not rows:
                     st.error("Item list khali.")
                     return
@@ -24743,20 +24771,22 @@ def isc_sheet_view(sid, sess, df, fac):
     imap = isc_issued_map(fac, sess)
     nil = int((df["closing_qty"].abs() <= MSC_EPS).sum())
     val = float((df["closing_qty"] * df["unit_price"].fillna(0)).sum())
-    _isc_kpis([("Items to count", len(df), ""), ("Closing balance > 0", len(df) - nil, "ok"),
-               ("Nil closing (issued out)", nil, "warn" if nil else "ok"), ("Closing value (Tk)", f"{val:,.0f}", "gold")])
+    n_iss = int(df["sl_no"].astype(int).isin(set(imap)).sum()) if imap else 0
+    _isc_kpis([("Items to count", len(df), ""), ("Issued in period", n_iss if imap else "-", ""),
+               ("Issued & closing NIL", nil, "warn" if nil else "ok"), ("Closing value (Tk)", f"{val:,.0f}", "gold")])
     st.markdown("<div class='isc-formula'>Expected stock  =  Closing balance (" + html_lib.escape(meta["closing"]) + ")  +  Day-shift receive  −  Day-shift issue"
                 "&nbsp;&nbsp;→&nbsp;&nbsp;Difference  =  Physical count  −  Expected</div>", unsafe_allow_html=True)
     st.markdown("##### ⬇️ Download the count sheet")
     d1, d2, d3 = st.columns([3, 2, 2])
     cats = list(dict.fromkeys(df["category"]))
     scope = d1.selectbox("Sheet for", ["All categories"] + cats, key=f"isc_scope_{sid}")
+    kind = st.radio("Items on the sheet", ISC_KINDS, horizontal=True, key=f"isc_kind_{sid}") if imap else ISC_KINDS[0]
     show_cl = d2.checkbox("Show closing balance", value=True, key=f"isc_showcl_{sid}",
                           help="Off = blind sheet (officer cannot see system quantity).")
     blanks = int(d3.number_input("Blank rows (items not in list)", min_value=0, max_value=30, value=5, step=1, key=f"isc_blank_{sid}"))
-    sub = df if scope == "All categories" else df[df["category"] == scope]
+    sub = isc_kind_filter(df if scope == "All categories" else df[df["category"] == scope], imap, kind)
     stem = f"issued_items_count_sheet_{sid}" + ("" if scope == "All categories" else "_" + re.sub(r"[^A-Za-z0-9]+", "_", scope)[:24])
-    tag = f"{sid}_{scope}_{int(show_cl)}_{blanks}"
+    tag = f"{sid}_{scope}_{int(show_cl)}_{blanks}_{ISC_KINDS.index(kind)}"
     b1, b2 = st.columns(2)
     _lazy_download(b1, "📗 Download Excel (premium)", lambda: isc_report_xlsx(isc_report_rows(sub, imap), meta, "count", show_cl, blanks),
                    f"{stem}.xlsx", _ISC_XLSX_MIME, f"isc_x_{tag}")
@@ -24770,9 +24800,10 @@ def isc_sheet_view(sid, sess, df, fac):
     f1, f2 = st.columns([2, 3])
     cat = f1.selectbox("Category", ["All"] + cats, key=f"isc_ccat_{sid}")
     term = f2.text_input("Search item / ERP code", key=f"isc_cq_{sid}").strip().lower()
-    v = df if cat == "All" else df[df["category"] == cat]
+    v = sub if cat == "All" else sub[sub["category"] == cat]
     if term:
         v = v[v["item_name"].str.lower().str.contains(term, regex=False) | v["prod_id"].str.lower().str.contains(term, regex=False)]
+    st.caption(f"{len(sub)} items on the sheet.")
     out = pd.DataFrame({"Category": v["category"], "SL": v["sl_no"], "ERP code": v["prod_id"], "Item": v["item_name"], "Size": v["size"], "UOM": v["unit"],
                         "Issued qty (period)": [(imap.get(int(s)) or {}).get("Issued qty") for s in v["sl_no"]],
                         f"Closing {meta['closing']}": v["closing_qty"], "Unit price": v["unit_price"], "Software now": v["live_qty"]})
@@ -24858,7 +24889,8 @@ def isc_result_view(sid, sess, df, fac):
     cats = list(dict.fromkeys(df["category"]))
     cat = f1.selectbox("Category", ["All"] + cats, key=f"isc_rcat_{sid}")
     stt = f2.selectbox("Status", ["All", "🔻 Short", "🔺 Excess", "✅ Match", "⏳ Not counted"], key=f"isc_rst_{sid}")
-    view = df if cat == "All" else df[df["category"] == cat]
+    kind = st.radio("Items", ISC_KINDS, horizontal=True, key=f"isc_rkind_{sid}") if imap else ISC_KINDS[0]
+    view = isc_kind_filter(df if cat == "All" else df[df["category"] == cat], imap, kind)
     show = view if stt == "All" else view[view["status"] == stt]
     out = pd.DataFrame({"Category": show["category"], "SL": show["sl_no"], "ERP code": show["prod_id"], "Item": show["item_name"], "Size": show["size"],
                         "UOM": show["unit"], f"Closing {meta['closing']}": show["closing_qty"], "Day-shift receive": show["day_recv"],
@@ -24868,8 +24900,8 @@ def isc_result_view(sid, sess, df, fac):
                  column_config={"SL": st.column_config.NumberColumn(format="%d")})
     st.markdown("##### ⬇️ Download result report")
     only_diff = st.checkbox("Only items with Short / Excess", value=False, key=f"isc_odiff_{sid}")
-    rep = df[df["status"].isin(["🔻 Short", "🔺 Excess"])] if only_diff else view
-    tag = f"{sid}_{cat}_{int(only_diff)}_{len(counted)}"
+    rep = view[view["status"].isin(["🔻 Short", "🔺 Excess"])] if only_diff else view
+    tag = f"{sid}_{cat}_{int(only_diff)}_{len(counted)}_{ISC_KINDS.index(kind)}"
     stem = f"issued_items_result_{sid}"
     b1, b2 = st.columns(2)
     _lazy_download(b1, "📗 Download Excel (premium)", lambda: isc_report_xlsx(isc_report_rows(rep, imap), meta, "result", True, 0),
@@ -24886,7 +24918,7 @@ def isc_result_view(sid, sess, df, fac):
 def tab_issued_stock_check():
     st.markdown(_ISC_CSS, unsafe_allow_html=True)
     st.markdown("<div class='isc-hero'><h2>✅ Issued Items Stock Check</h2>"
-                "<p>Je item issue hoyeche shudhu sei item gulor closing balance (software) niye officer physical count kore — "
+                "<p>Closing balance ache emon shob item + je item issue hoye balance 0 hoye geche (NIL) — officer physical count kore. "
                 "Short / Excess Manager approve korle tabei stock adjust hoy.</p></div>", unsafe_allow_html=True)
     if "CONSOLIDATED" in FAC:
         st.info("Upor theke ekta factory select korun.")
