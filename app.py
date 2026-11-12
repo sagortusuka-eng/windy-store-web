@@ -14325,12 +14325,14 @@ def _ri_pending_view():
     if not rows:
         st.success("✅ Kono pending issue nei.")
     else:
-        st.info(f"Pending: **{len(rows)}** ti line · Stock ashche (issue kora jabe): **{ready_n}** ti")
+        link_n = sum(1 for r in rows if not r["ready"] and r.get("alts"))
+        st.info(f"Pending: **{len(rows)}** ti line · Stock ashche (issue kora jabe): **{ready_n}** ti"
+                + (f" · 🔗 Onno nam-er item-e stock ache (Link korun): **{link_n}** ti" if link_n else ""))
         df = pd.DataFrame([{"SR No": r["sr_no"], "Item": r["item_name"], "Size": r["size"] or "", "ERP Code": r["prod_id"],
                             "Pending Qty": r["left"], "Stock ekhon": r["stock"], "Section": r["section"] or "", "Slip Date": r["slip_date"],
                             "Entry by": r["created_by"],
                             "Status": ("✅ Stock ashche" if r["stock"] >= r["left"] - 1e-9 else ("🔁 Onno unit-e stock ache (auto-transfer hobe)" if r["xok"]
-                                                                         else ("🟠 Ongsho stock ache" if r["stock"] > 0 else "⛔ Stock nei")))}
+                                                                         else ("🟠 Ongsho stock ache" if r["stock"] > 0 else ("🔗 Onno item-e stock ache (Link korun)" if r.get("alts") else "⛔ Stock nei"))))}
                            for r in rows])
         st.dataframe(df, hide_index=True, use_container_width=True, height=min(80 + 36 * len(df), 360))
         can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
@@ -14339,16 +14341,22 @@ def _ri_pending_view():
         for r in rows:
             _ri_pending_row(r, fac, can_write, vm)
         if is_mgr:
-            with st.expander("🗑 Pending cancel (Store Manager)"):
+            with st.expander("🗑 Manually thik kora item remove / Pending cancel (Store Manager)"):
+                st.caption("Je item ta apni onno bhabe (manual transaction / adjustment diye) thik kore felechen, seta ekhan theke remove korun — "
+                           "ar ekhane ashbe na. Kono stock / transaction poriborton hobe na. Remove howa line 'Ager shesh howa' history-te thakbe.")
                 lab = {f"SR {r['sr_no']} · {r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · pending {r['left']:g}": r for r in rows}
-                pick = st.selectbox("Kon pending line cancel korben?", list(lab), key="rip_cx_pick")
-                why = st.text_input("Karon (optional)", key="rip_cx_why")
-                sure = st.checkbox("Ami confirm korchi - ei pending line cancel hobe (kono stock/transaction poriborton hobe na).", key="rip_cx_ok")
-                if st.button("Cancel pending", key="rip_cx_btn") and guard():
-                    if not sure:
+                picks = st.multiselect("Kon pending line (gulo) remove korben? (ek / ekadhik)", list(lab), key="rip_cx_picks")
+                why = st.text_input("Karon (optional) — jemon: manually stock adjust / issue kora hoyeche", key="rip_cx_why")
+                sure = st.checkbox("Ami confirm korchi - ei pending line(gulo) remove hobe (kono stock/transaction poriborton hobe na).", key="rip_cx_ok")
+                if st.button("Remove from Pending", key="rip_cx_btn") and guard():
+                    if not picks:
+                        st.error("Kon line remove korben select korun.")
+                    elif not sure:
                         st.error("Confirm tick korun.")
-                    elif _ri_pending_cancel(lab[pick]["id"], why.strip(), pick):
-                        done("Pending line cancel hoyeche.")
+                    else:
+                        _n_ok = sum(1 for p_ in picks if _ri_pending_cancel(lab[p_]["id"], ("Manually thik kora: " + why.strip()).strip(), p_))
+                        if _n_ok:
+                            done(f"{_n_ok} ti pending line remove hoyeche.")
     if rows:
         with st.expander("🔎 Item details — stock kothay gelo? (opening, received, issued, kon officer)"):
             _ri_item_trail_ui(fac, [(int(r["sl_no"]), f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']} · SR {r['sr_no']}") for r in rows], key="ptr")
@@ -14536,6 +14544,75 @@ def _iw_view():
 #  SR CENTER: type an SR number -> what was issued, what is still pending; fix / add / issue from one place
 #  (auto-transfer and the physical-verification tick are handled right on the line that needs them)
 # ------------------------------------------------------------
+def _ri_tokens(s):
+    return set(re.findall(r"[a-z0-9]+", str(s or "").lower()))
+
+
+def _ri_alt_items(r, inv_all):
+    """Other items of this unit that look like the pending item (same ERP code, or same / shorter / longer name such as
+    'Office plastic file' vs 'Office File') AND have stock. Finds stock that was received under a different item row."""
+    tk = _ri_tokens(r["item_name"])
+    if not tk:
+        return []
+    code = str(r.get("prod_id") or "").strip()
+    has_code = bool(code) and not is_blank_code(code) and not code.upper().startswith("TEMP-")
+    nk = {t for t in tk if t.isdigit()}
+    sp = norm_size(r.get("size"))
+    out = []
+    for c in inv_all:
+        if int(c["sl_no"]) == int(r["sl_no"]):
+            continue
+        same_code = has_code and str(c["prod_id"] or "").strip() == code
+        if not same_code:
+            ct = _ri_tokens(c["item_name"])
+            nc = {t for t in ct if t.isdigit()}
+            if not (tk & ct) or (nk and nc and nk != nc):
+                continue
+            sc_ = norm_size(c.get("size"))
+            if sp and sc_ and sp != sc_:          # both have a size and they differ -> not the same item
+                continue
+            small, big = (tk, ct) if len(tk) <= len(ct) else (ct, tk)
+            if not (len(small) >= 2 and small <= big) and _name_match_score(r["item_name"], c["item_name"]) < 0.85:
+                continue
+        exact = norm_name(r["item_name"]) == norm_name(c["item_name"])
+        out.append((0 if same_code else (1 if exact else 2), 0 if sp == norm_size(c.get("size")) else 1, -float(c["stock"] or 0), c))
+    out.sort(key=lambda x: x[:3])
+    return [x[3] for x in out[:5]]
+
+
+@tx
+def _ri_pending_relink(pid, new_sl, label):
+    """Point a waiting (pending) line at another inventory item of the same unit - the stock was received under a different
+    item row / name. No stock or transaction is touched; the normal 'Issue korun' button does the real issue afterwards."""
+    p = q("SELECT * FROM ri_pending_issues WHERE id=%s AND status='Pending'", (int(pid),))
+    if not p:
+        st.error("Ei pending line ekhon r Pending nei (onno keu change korechhe) - page refresh korun.")
+        return None
+    p = p[0]
+    inv = q("""SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size, COALESCE(NULLIF(TRIM(unit_name),''),'Pcs') AS unit,
+               COALESCE(unit_price,0) AS price FROM inventory WHERE factory_name=%s AND sl_no=%s""", (p["factory_name"], int(new_sl)))
+    if not inv:
+        st.error("Target item paoa jayni.")
+        return None
+    n = inv[0]
+    left = max(float(p["qty"] or 0) - float(p["issued_qty"] or 0), 0.0)
+    me = st.session_state.get("user", "")
+    now_s = local_now().strftime("%d-%b-%Y %I:%M %p")
+    note = f"[Linked by {me} {now_s}: {p['item_name']} [{p['size'] or '-'}] {p['prod_id']} -> {n['item_name']} [{n['size'] or '-'}] {n['prod_id']}]"
+    dup = q("SELECT id FROM ri_pending_issues WHERE factory_name=%s AND sr_no=%s AND sl_no=%s AND status='Pending' AND id<>%s",
+            (p["factory_name"], p["sr_no"], int(new_sl), int(pid)))
+    if dup:      # same SR already waits for the target item -> merge the remaining qty into it
+        run("UPDATE ri_pending_issues SET qty=qty+%s WHERE id=%s", (left, dup[0]["id"]))
+        run("UPDATE ri_pending_issues SET status='Cancelled', closed_by=%s, closed_at=%s, close_note=%s WHERE id=%s",
+            (me, now_s, "Merged into another pending line of same SR. " + note, int(pid)))
+    else:
+        run("""UPDATE ri_pending_issues SET sl_no=%s, prod_id=%s, item_name=%s, size=%s, unit=%s,
+               rate=CASE WHEN %s>0 THEN %s ELSE rate END, notes=TRIM(COALESCE(notes,'') || ' ' || %s) WHERE id=%s""",
+            (int(n["sl_no"]), n["prod_id"], n["item_name"], n["size"], n["unit"], float(n["price"]), float(n["price"]), note, int(pid)))
+    audit("RI_PENDING_RELINK", f"{p['factory_name']}: SR {p['sr_no']} pending line {pid} {note}")
+    return True
+
+
 def _ri_pending_rows(fac, sr=None):
     rows = q("""SELECT p.id, p.factory_name, p.sr_no, p.sl_no, p.prod_id, p.item_name, p.size, p.unit, p.qty, COALESCE(p.issued_qty,0) AS issued_qty,
                 COALESCE(p.rate,0) AS rate, p.section, p.issue_type, p.slip_date, p.notes, p.created_by, p.created_at,
@@ -14556,6 +14633,21 @@ def _ri_pending_rows(fac, sr=None):
             except Exception:
                 r["other"], r["xok"] = None, False
         r["ready"] = r["ready"] or r["xok"]
+    for r in rows:
+        r["alts"] = []
+    _short = [r for r in rows if r["left"] > 0 and r["stock"] < r["left"] - 1e-9]
+    if _short:       # stock may sit under a similar-name item (received with a different name / row) - one query for all lines
+        try:
+            _inv_all = q("""SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size, COALESCE(current_stock,0) AS stock,
+                            COALESCE(NULLIF(TRIM(unit_name),''),'Pcs') AS unit, COALESCE(unit_price,0) AS price
+                            FROM inventory WHERE factory_name=%s AND COALESCE(current_stock,0) > 0""", (fac,))
+        except Exception:
+            _inv_all = []
+        for r in _short:
+            try:
+                r["alts"] = _ri_alt_items(r, _inv_all)
+            except Exception:
+                r["alts"] = []
     return rows
 
 
@@ -14605,6 +14697,15 @@ def _ri_pending_row(r, fac, can_write, vm, kp="rip"):
                                                     "time": local_now().strftime("%d-%b-%Y %I:%M %p"), "kind": "save"}
                     done(f"✅ {_who}, SR {r['sr_no']}: {r['item_name']} × {qv:g} issue hoyeche, stock komeche."
                          + (f" 🔁 {short_now:g} pcs {r['other']['factory_name']} theke auto-transfer hoyeche." if xtick else ""))
+        alts = r.get("alts") or []
+        if alts and can_write and r["stock"] < r["left"] - 1e-9:
+            amap = {f"{c['item_name']} [{c['size'] or '-'}] ({c['unit']}) · {c['prod_id']} · stock {float(c['stock']):g}": c for c in alts}
+            st.caption("🔗 Same / similar nam-er onno item-e stock ache — receive onno item hishabe hoye thakle ekhane link korun, tarpor 'Issue korun' chapun.")
+            l1, l2 = st.columns([4, 1.3])
+            pk = l1.selectbox("Stock ache emon similar item", list(amap), key=f"{kp}_alt_{k}", label_visibility="collapsed")
+            if l2.button("🔗 Link korun", key=f"{kp}_lnk_{k}", use_container_width=True) and guard():
+                if _ri_pending_relink(r["id"], int(amap[pk]["sl_no"]), pk):
+                    done(f"🔗 SR {r['sr_no']}: {r['item_name']} → {amap[pk]['item_name']} [{amap[pk]['size'] or '-'}] link hoyeche. Ekhon 'Issue korun' chapun.")
 
 
 # ------------------------------------------------------------
@@ -14763,7 +14864,7 @@ def _ri_sr_center():
         st.dataframe(pd.DataFrame([{"Item": r["item_name"], "Size": r["size"] or "", "ERP Code": r["prod_id"], "Pending Qty": r["left"],
                                     "Stock ekhon": r["stock"],
                                     "Status": ("✅ Stock ashche" if r["stock"] >= r["left"] - 1e-9 else
-                                               ("🔁 Onno unit-e stock ache" if r["xok"] else "⛔ Stock nei"))} for r in pend]),
+                                               ("🔁 Onno unit-e stock ache" if r["xok"] else ("🔗 Onno item-e stock ache (Link korun)" if r.get("alts") else "⛔ Stock nei")))} for r in pend]),
                      hide_index=True, use_container_width=True, height=min(80 + 36 * len(pend), 300))
     t = lazy_tab_select(["⏳ Pending issue korun", "➕ Notun item add korun", "✏️ Issued line thik korun", "🔎 Item details (stock trail)"], "lz_src")
     slip_d = parse_date(sdate_s)
