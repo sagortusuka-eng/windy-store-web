@@ -16823,6 +16823,8 @@ def ensure_gate_pass_table():
                 sl_no INTEGER, prod_id TEXT, item_name TEXT, size TEXT, qty REAL, stock_before REAL DEFAULT 0,
                 remarks TEXT, officer_name TEXT, created_at TEXT)""")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_gpr_fac_gp ON gate_pass_receipts(factory_name, gate_pass_no)")
+            cur.execute("""CREATE TABLE IF NOT EXISTS gate_pass_settings (key TEXT PRIMARY KEY, value TEXT, set_by TEXT, set_at TEXT)""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS gate_pass_opening_bal (lot_id INTEGER PRIMARY KEY, opening_qty REAL, set_by TEXT, set_at TEXT)""")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -16864,18 +16866,59 @@ def save_gate_pass_receipt(fac, lines, tx_dt, gp_no, source, notes):
         (fac, gp_no, source, date_s, notes, user, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
          sls, [info[sl][0] for sl in sls], [info[sl][1] for sl in sls], [info[sl][3] for sl in sls], qtys,
          [info[sl][2] for sl in sls]))
-    audit("GATE_PASS_IN", f"{fac}: Gate Pass {gp_no} from {source} - {len(sls)} item line(s), {sum(qtys):g} pcs received")
+    audit("GATE_PASS_IN", f"{fac}: Gate Pass {gp_no} from {source} - {len(sls)} item line(s), {sum(qtys):g} qty received")
     return len(sls)
+
+
+class _GpIssued(dict):
+    """{lot_id: issued qty}. Extra attributes: .basis {lot_id: qty the issues are taken from - the Opening-Day balance for lots received
+    before the Opening Day, else the received qty}, .auto {lot_id: automatic opening balance}, .saved_ids (opening balances typed in by hand)."""
+    basis = None
+    auto = None
+    saved_ids = None
+
+
+GP_OPENING_DEFAULT = "29-Oct-2026"      # software go-live day: gate passes received before it start from their physical balance on this day
+
+
+def _gp_opening_date():
+    v = GP_OPENING_DEFAULT
+    try:
+        r = q_c("SELECT value FROM gate_pass_settings WHERE key='opening_date'")
+        if r:
+            v = str(r[0]["value"] or "")
+    except Exception:
+        pass
+    return parse_date(v) if v.strip() else None
+
+
+def _gp_saved_opening():
+    try:
+        return {int(r["lot_id"]): float(r["opening_qty"] or 0) for r in q_c("SELECT lot_id, opening_qty FROM gate_pass_opening_bal")}
+    except Exception:
+        return {}
+
+
+def _gp_basis_col(df, issued):
+    b = getattr(issued, "basis", None) or {}
+    return pd.Series([float(b.get(int(i), q_)) for i, q_ in zip(df["id"], df["qty"])], index=df.index)
 
 
 def _gp_compute(lots):
     """FIFO attribution. lots = list of gate_pass_receipts rows (dicts with id, factory_name, sl_no, rec_date, qty,
-    stock_before). Per item, stock is a queue: the stock that existed before the first gate-pass receipt is oldest, then
-    every receipt joins at the back; every Issue takes from the front. Returns ({lot_id: issued}, [allocation rows])."""
-    issued = {int(r["id"]): 0.0 for r in lots}
+    stock_before). Per item, stock is a queue: older stock first, then every receipt joins at the back; every Issue takes from the front.
+    OPENING DAY: a lot received BEFORE the Opening Day (software go-live) does not join with its full received qty - it joins on the Opening
+    Day with its physical balance of that day, and only Issues from the Opening Day onward are taken from it. The opening balance is the one
+    typed in 'Opening Day Set' or, if none, estimated from today's stock (stock now + issued since - received since), newest lot first.
+    Returns ({lot_id: issued} (with .basis / .auto / .saved_ids), [allocation rows])."""
+    issued = _GpIssued({int(r["id"]): 0.0 for r in lots})
+    issued.basis = {int(r["id"]): float(r.get("qty") or 0) for r in lots}
+    issued.auto, issued.saved_ids = {}, set()
     alloc = []
     if not lots:
         return issued, alloc
+    O = _gp_opening_date()
+    saved = _gp_saved_opening() if O is not None else {}
     facs = sorted({r["factory_name"] for r in lots})
     sls = sorted({int(r["sl_no"]) for r in lots})
     # JSON-array parameters keep the query hashable, so it is served from the cache until something is saved
@@ -16883,8 +16926,14 @@ def _gp_compute(lots):
                       COALESCE(TRIM(section),'') AS section, COALESCE(officer_name,'') AS officer
                FROM transactions WHERE factory_name = ANY(SELECT jsonb_array_elements_text(%s::jsonb))
                AND sl_no = ANY(SELECT jsonb_array_elements_text(%s::jsonb)::int)
-               AND trans_type IN ('Issued','Internal Issue','Supplier. Rec','Internal Rec','Stock Adjustment (+)')""",
+               AND trans_type IN ('Issued','Internal Issue','Supplier. Rec','Internal Rec','Stock Adjustment (+)','Stock Adjustment (-)')""",
               (json.dumps(facs), json.dumps(sls)))
+    stock_now = {}
+    if O is not None:
+        for s_ in q_c("""SELECT factory_name, sl_no, COALESCE(current_stock,0) AS stock FROM inventory
+                         WHERE factory_name = ANY(SELECT jsonb_array_elements_text(%s::jsonb))
+                         AND sl_no = ANY(SELECT jsonb_array_elements_text(%s::jsonb)::int)""", (json.dumps(facs), json.dumps(sls))):
+            stock_now[(s_["factory_name"], int(s_["sl_no"]))] = float(s_["stock"] or 0)
     by_item = {}
     for r in lots:
         by_item.setdefault((r["factory_name"], int(r["sl_no"])), []).append(r)
@@ -16892,25 +16941,60 @@ def _gp_compute(lots):
     for t in txs:
         tx_by_item.setdefault((t["factory_name"], int(t["sl_no"])), []).append(t)
     for key, item_lots in by_item.items():
+        lot_d = {int(r["id"]): (parse_date(r["rec_date"]) or datetime.min) for r in item_lots}
+        pre = sorted([r for r in item_lots if O is not None and lot_d[int(r["id"])] < O], key=lambda r: (lot_d[int(r["id"])], int(r["id"])))
+        pre_ids = {int(r["id"]) for r in pre}
+        item_tx = tx_by_item.get(key, [])
+        front = None
+        if pre:
+            out_s = rec_s = 0.0
+            for t in item_tx:
+                d = parse_date(t["date"])
+                if d is None or d < O:
+                    continue
+                qv = float(t["qty"] or 0)
+                if t["trans_type"] in ISSUE_TYPES or t["trans_type"] == ADJ_OUT:
+                    out_s += qv
+                    m = re.search(r"Auto-transferred ([0-9.]+)", str(t["notes"]))
+                    if m:
+                        rec_s += float(m.group(1))
+                elif t["trans_type"] in RECEIPT_TYPES:
+                    rec_s += qv
+            est = max(stock_now.get(key, 0.0) + out_s - rec_s, 0.0)      # physical stock of the item on the Opening Day (estimate)
+            remaining, auto, bases = est, {}, {}
+            for r in reversed(pre):                                       # newest lot holds what is left (oldest is consumed first)
+                b = min(float(r["qty"] or 0), remaining)
+                auto[int(r["id"])] = b
+                remaining -= b
+            for r in pre:
+                i = int(r["id"])
+                bases[i] = min(max(saved[i], 0.0), float(r["qty"] or 0)) if i in saved else auto[i]
+            issued.auto.update(auto)
+            issued.saved_ids |= {i for i in bases if i in saved}
+            issued.basis.update(bases)
+            front = max(est - sum(bases.values()), 0.0)                  # older stock that is not from these gate passes
         ev = []
-        for r in item_lots:
-            d = parse_date(r["rec_date"]) or datetime.min
-            ev.append((d, 0, int(r["id"]), "lot", r))
-        first_d = min(e[0] for e in ev)
-        first_lot = min(item_lots, key=lambda r: (parse_date(r["rec_date"]) or datetime.min, int(r["id"])))
-        for t in tx_by_item.get(key, []):
+        for n_, r in enumerate(item_lots):
+            i = int(r["id"])
+            if i in pre_ids:
+                ev.append((O, 0, -10**8 + pre.index(r), "lot", r))        # joins on the Opening Day with its opening balance
+            else:
+                ev.append((lot_d[i], 0, i, "lot", r))
+        first_d = O if pre else min(e[0] for e in ev)
+        first_lot = min(item_lots, key=lambda r: (lot_d[int(r["id"])], int(r["id"])))
+        for t in item_tx:
             d = parse_date(t["date"])
             if d is None or d < first_d:
                 continue
             if t["trans_type"] in ISSUE_TYPES:
                 ev.append((d, 1, int(t["id"]), "iss", t))
-            elif GP_TAG not in str(t["notes"]):   # other receipts (supplier etc.) join the queue as ordinary stock
+            elif t["trans_type"] in RECEIPT_TYPES and GP_TAG not in str(t["notes"]):   # other receipts (supplier etc.) join the queue as ordinary stock
                 ev.append((d, 0, int(t["id"]) + 10**9, "old", t))
         ev.sort(key=lambda e: (e[0], e[1], e[2]))
-        queue = [[None, float(first_lot["stock_before"] or 0)]]
+        queue = [[None, front if front is not None else float(first_lot["stock_before"] or 0)]]
         for d, _k, _i, kind, r in ev:
             if kind == "lot":
-                queue.append([int(r["id"]), float(r["qty"] or 0)])
+                queue.append([int(r["id"]), issued.basis.get(int(r["id"]), float(r["qty"] or 0))])
             elif kind == "old":
                 queue.append([None, float(r["qty"] or 0)])
             else:
@@ -16928,6 +17012,113 @@ def _gp_compute(lots):
                     if head[1] <= 1e-9:
                         queue.pop(0)
     return issued, alloc
+
+
+@tx
+def _gp_save_opening_date(value):
+    me = st.session_state.get("user", "")
+    run("""INSERT INTO gate_pass_settings (key, value, set_by, set_at) VALUES ('opening_date', %s, %s, %s)
+           ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, set_by=EXCLUDED.set_by, set_at=EXCLUDED.set_at""",
+        (value, me, local_now().strftime("%d-%b-%Y %I:%M %p")))
+    audit("GATE_PASS_OPENING_DATE", f"Gate Pass Opening Day set to {value or 'OFF'}")
+    return True
+
+
+@tx
+def _gp_save_opening_bal(rows, reset_ids):
+    me = st.session_state.get("user", "")
+    now_s = local_now().strftime("%d-%b-%Y %I:%M %p")
+    for lid, qv in rows:
+        run("""INSERT INTO gate_pass_opening_bal (lot_id, opening_qty, set_by, set_at) VALUES (%s,%s,%s,%s)
+               ON CONFLICT (lot_id) DO UPDATE SET opening_qty=EXCLUDED.opening_qty, set_by=EXCLUDED.set_by, set_at=EXCLUDED.set_at""",
+            (int(lid), float(qv), me, now_s))
+    for lid in reset_ids:
+        run("DELETE FROM gate_pass_opening_bal WHERE lot_id=%s", (int(lid),))
+    audit("GATE_PASS_OPENING_BAL", f"Gate Pass opening balance: {len(rows)} lot(s) set ({', '.join(f'#{a}={b:g}' for a, b in rows[:20])}); "
+                                   f"{len(reset_ids)} lot(s) back to automatic")
+    return True
+
+
+def _gp_opening_setup():
+    """Gate Pass > Opening Day Set: the go-live date + the physical balance (on that day) of every gate-pass lot received before it."""
+    O = _gp_opening_date()
+    st.markdown("##### 🏁 Gate Pass Opening Day Set")
+    st.caption("Software live hoyar age (Opening Day-er age) je Gate Pass-er mal receive hoyechhe, tar moddhe **Opening Day-te physically koto chhilo** seta ekhane "
+               "thake. Issue shudhu Opening Day theke hishab hoy — ager issue (software-e chhilo na) ar gonai hoy na, tai 'বাকি' (balance) physical stock-er sathe mile jay. "
+               "Opening balance na likhle software nijei hishab kore: *ekhon-er stock + Opening Day-er por issue − Opening Day-er por receive*, newest Gate Pass theke bhore.")
+    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES and not is_cons_view
+    c1, c2 = st.columns([1, 2])
+    on = c1.checkbox("Opening Day cholu", value=O is not None, key="gpo_on")
+    d_val = c2.date_input("Opening Day (software live-er tarikh)", value=(O.date() if O else date(2026, 10, 29)), key="gpo_date")
+    new_val = d_val.strftime(DATE_FMT) if on else ""
+    cur_val = O.strftime(DATE_FMT) if O else ""
+    if new_val != cur_val:
+        st.warning(f"Opening Day {cur_val or 'OFF'} → **{new_val or 'OFF'}** (save korle sob Gate Pass-er hishab bodle jabe).")
+        pw1 = mgr_check("gpo_pw_date")
+        if st.button("💾 Opening Day save", key="gpo_save_date", type="primary", disabled=not can_write):
+            if not pw1:
+                st.error("Manager password thik nei.")
+            elif guard() and _gp_save_opening_date(new_val):
+                done(f"✅ Opening Day {new_val or 'OFF'} save hoyeche.")
+    if O is None:
+        st.info("Opening Day bondho — Gate Pass-er hishab ager moto (receive-er tarikh theke).")
+        return
+    fsql, fp = fw(FAC)
+    df = qdf(f"""SELECT id, factory_name, gate_pass_no, source_place, rec_date, sl_no, prod_id, item_name, COALESCE(size,'') AS size,
+                        COALESCE(qty,0) AS qty, COALESCE(stock_before,0) AS stock_before FROM gate_pass_receipts WHERE 1=1{fsql} ORDER BY id""", fp)
+    if df.empty:
+        st.info("Kono Gate Pass nei.")
+        return
+    issued, _al = _gp_compute(df.to_dict("records"))
+    pre_ids = set(issued.auto)
+    d = df[df["id"].isin(pre_ids)].copy()
+    if d.empty:
+        st.success(f"{O.strftime(DATE_FMT)}-er age receive kora kono Gate Pass nei — kichu set korar nei.")
+        return
+    d["basis"] = d["id"].map(lambda i: float(issued.basis[int(i)]))
+    d["issued"] = d["id"].map(lambda i: round(float(issued.get(int(i), 0.0)), 4))
+    stk = {(s_["factory_name"], int(s_["sl_no"])): float(s_["stock"] or 0) for s_ in q_c("SELECT factory_name, sl_no, COALESCE(current_stock,0) AS stock FROM inventory")}
+    d["stock_now"] = [stk.get((a, int(b)), 0.0) for a, b in zip(d["factory_name"], d["sl_no"])]
+    d["uom"] = [_uom_of({"sl_no": a, "factory_name": b}) for a, b in zip(d["sl_no"], d["factory_name"])]
+    d["src"] = ["✍️ Saved" if int(i) in issued.saved_ids else "🤖 Auto" for i in d["id"]]
+    d["_dt"] = [parse_date(x) or datetime.min for x in d["rec_date"]]
+    d = d.sort_values(["item_name", "_dt", "id"])
+    show = pd.DataFrame({"Lot": d["id"].values, "Gate Pass": d["gate_pass_no"].values, "Received on": d["rec_date"].values, "Item": d["item_name"].values,
+                         "Size": d["size"].values, "UOM": d["uom"].values, "Received qty": d["qty"].astype(float).values,
+                         "Stock now (item)": d["stock_now"].values, "Opening Bal. ✎": d["basis"].round(6).values,
+                         f"Issued after {O.strftime('%d-%b')}": d["issued"].values,
+                         "Balance now": (d["basis"] - d["issued"]).clip(lower=0).round(6).values, "Source": d["src"].values})
+    st.markdown(f"**{len(show)}** ti Gate Pass line ({O.strftime('%d-%b-%Y')}-er age receive). **Opening Bal. ✎** column-e Opening Day-te physical balance likhun, tarpor Save.")
+    edited = st.data_editor(show, hide_index=True, use_container_width=True, height=min(90 + 36 * len(show), 520), key=f"gpo_ed_{st.session_state.get('gpo_gen', 0)}",
+                            disabled=[c for c in show.columns if c != "Opening Bal. ✎"] if can_write else True,
+                            column_config={"Opening Bal. ✎": st.column_config.NumberColumn(min_value=0.0, format="%g"),
+                                           "Received qty": st.column_config.NumberColumn(format="%g"),
+                                           "Stock now (item)": st.column_config.NumberColumn(format="%g")})
+    chg, bad = [], []
+    for (_, a), (_, b) in zip(show.iterrows(), edited.iterrows()):
+        nv, ov = float(b["Opening Bal. ✎"] or 0), float(a["Opening Bal. ✎"])
+        if abs(nv - ov) > 1e-9:
+            if nv < 0 or nv > float(a["Received qty"]) + 1e-9:
+                bad.append(a["Item"])
+            else:
+                chg.append((int(a["Lot"]), nv))
+    if bad:
+        st.error("Opening balance 0-r kom ba Received qty-r beshi hote pare na: " + ", ".join(sorted(set(bad))))
+    saved_lots = [int(i) for i in d["id"] if int(i) in issued.saved_ids]
+    pw2 = mgr_check("gpo_pw_bal") if (chg or saved_lots) else False
+    b1, b2 = st.columns(2)
+    if b1.button(f"💾 Opening balance save ({len(chg)})", key="gpo_save_bal", type="primary", disabled=(not can_write or not chg or bool(bad)), use_container_width=True):
+        if not pw2:
+            st.error("Manager password thik nei.")
+        elif guard() and _gp_save_opening_bal(chg, []):
+            st.session_state["gpo_gen"] = st.session_state.get("gpo_gen", 0) + 1
+            done(f"✅ {len(chg)}ti opening balance save hoyeche.")
+    if b2.button(f"↩ Hater likha {len(saved_lots)}ti Auto-te phirie din", key="gpo_reset_bal", disabled=(not can_write or not saved_lots), use_container_width=True):
+        if not pw2:
+            st.error("Manager password thik nei.")
+        elif guard() and _gp_save_opening_bal([], saved_lots):
+            st.session_state["gpo_gen"] = st.session_state.get("gpo_gen", 0) + 1
+            done("✅ Auto hishabe phirche.")
 
 
 @_frag
@@ -16972,7 +17163,7 @@ def _gp_receive_form():
             st.session_state["gp_msg"] = ("error", "পরিমাণ ০-র বেশি দিন।")
         else:
             cur.append({"sl": int(r["sl_no"]), "pid": r["prod_id"], "name": r["item_name"], "size": r["size"],
-                        "stock": float(r["stock"])})
+                        "stock": float(r["stock"]), "unit": _unit_of(fac, int(r["sl_no"]))})
             st.session_state[f"gp_q_{gen}_{int(r['sl_no'])}"] = qty_v
             st.session_state["gp_lines"] = cur
             st.session_state[f"gp_search_{gen}"] = ""
@@ -16987,21 +17178,28 @@ def _gp_receive_form():
     if not lines:
         st.info("এখনো কোনো আইটেম যোগ হয়নি।")
         return
-    h = st.columns([0.4, 3.4, 1.2, 1.1, 1.4, 0.7])
-    for col, t in zip(h, ["#", "আইটেম", "ERP Code", "বর্তমান স্টক", "গ্রহণ পরিমাণ", ""]):
+    h = st.columns([0.4, 3.0, 1.1, 1.2, 1.3, 1.5, 0.7])
+    for col, t in zip(h, ["#", "আইটেম", "ERP Code", "বর্তমান স্টক", "গ্রহণ পরিমাণ", "UOM (Unit) — বদলানো যাবে", ""]):
         col.caption(t)
-    remove, qtys, bad = None, [], False
+    remove, qtys, bad, changed = None, [], False, []
+    ulist = list(get_uoms())
     for i, ln in enumerate(lines):
-        r = st.columns([0.4, 3.4, 1.2, 1.1, 1.4, 0.7])
+        cu_ = ln.get("unit") or _unit_of(fac, ln["sl"])
+        opts_u = ulist if any(u.lower() == str(cu_).lower() for u in ulist) else [cu_] + ulist
+        r = st.columns([0.4, 3.0, 1.1, 1.2, 1.3, 1.5, 0.7])
         r[0].write(i + 1)
-        r[1].write(f"{ln['name']} [{ln['size'] or '-'}]{_uom_tag(ln)}")
+        r[1].write(f"{ln['name']} [{ln['size'] or '-'}]")
         r[2].write(ln["pid"])
-        r[3].write(f"{ln['stock']:g}")
+        r[3].write(f"{ln['stock']:g} {cu_}")
         q_ = r[4].number_input("q", min_value=0.0, step=1.0, format="%g", key=f"gp_q_{gen}_{ln['sl']}", label_visibility="collapsed")
+        nu_ = r[5].selectbox("UOM", opts_u, index=next((k for k, u in enumerate(opts_u) if u.lower() == str(cu_).lower()), 0),
+                             key=f"gp_u_{gen}_{ln['sl']}", label_visibility="collapsed")
         qtys.append(float(q_))
+        if str(nu_).lower() != str(cu_).lower():
+            changed.append((ln, nu_, cu_, float(q_)))
         if q_ <= 0:
             bad = True
-        if r[5].button("✖", key=f"gp_rm_{gen}_{ln['sl']}", help="সারি মুছুন"):
+        if r[6].button("✖", key=f"gp_rm_{gen}_{ln['sl']}", help="সারি মুছুন"):
             remove = i
     if remove is not None:
         lines.pop(remove)
@@ -17011,6 +17209,25 @@ def _gp_receive_form():
         except TypeError:
             st.rerun()
     st.caption(f"মোট আইটেম-লাইন: {len(lines)} · মোট পরিমাণ: {sum(qtys):g}")
+    risky, risk_pw, risk_cf, both_units = [], True, True, False
+    if changed:
+        st.info("🔤 Save-er somoy ei item-er UOM bodlabe: " + " · ".join(f"**{x[0]['name']}**: {x[2]} → **{x[1]}** (receive {x[3]:g} {x[1]})" for x in changed)
+                + ". Apni ja likhechen (jemon 45) seta notun unit-e (45 Kg) hishabe save hobe — qty convert hoy na.")
+        risky = [x for x in changed if abs(float(x[0]["stock"])) > 1e-9]
+        if risky:
+            st.warning("⚠️ " + "; ".join(f"{x[0]['name']}: ager stock {x[0]['stock']:g} {x[2]} ache" for x in risky)
+                       + ". Unit bodlale oi ager stock-o oi number-e notun unit-e dhora hobe (convert hobe na). Sothik hole Manager password + confirm din.")
+            risk_pw = mgr_check(f"gp_up_pw_{gen}")
+            risk_cf = confirm_box(f"gp_up_cf_{gen}", "⚠️ Ami nishchit — ager stock / entry gulo-o notun unit-e-i dhora jabe (convert korar dorkar nei).")
+        both_units = st.checkbox(f"🏭 {short_fac(other_factory(fac))}-er matching item-eo ei UOM set korun (duita unit-e same UOM thakbe)", value=True, key=f"gp_ub_{gen}")
+        if both_units:
+            for x in changed:
+                try:
+                    o_ = find_same_in_other(x[0]["pid"], x[0]["name"], other_factory(fac), x[0]["size"])
+                except Exception:
+                    o_ = None
+                st.caption(f"• {x[0]['name']}: " + (f"{short_fac(other_factory(fac))}-e {o_['item_name']} [{o_['size'] or '-'}] · {o_['prod_id']} · ekhon unit {_unit_of(other_factory(fac), o_['sl_no'])} · stock {float(o_['stock'] or 0):g} → unit {x[1]} hobe"
+                                                     if o_ else f"{short_fac(other_factory(fac))}-e matching item paoa jayni"))
     can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
     if not can_write:
         st.caption("সংরক্ষণ করতে login লাগবে (Auditor role শুধু দেখতে পারে)।")
@@ -17022,8 +17239,23 @@ def _gp_receive_form():
             st.error("কোনো লাইনে পরিমাণ ০ — ঠিক করে আবার চেষ্টা করুন।")
         elif not confirm_existing:
             st.error("এই Gate Pass আগে গ্রহণ হয়েছে — নিশ্চিত করার টিক দিন।")
+        elif risky and not (risk_pw and risk_cf):
+            st.error("Unit bodlale ager stock-er unit-o bodlay — Manager password ar confirm tick din.")
         elif guard():
-            n = save_gate_pass_receipt(fac, [(ln["sl"], q_) for ln, q_ in zip(lines, qtys)], tx_date, gp_no, source, notes.strip())
+            ok_u = True
+            for ln_, nu_, cu_, _q in changed:
+                rows_u = [(fac, int(ln_["sl"]))]
+                if both_units:
+                    try:
+                        o_ = find_same_in_other(ln_["pid"], ln_["name"], other_factory(fac), ln_["size"])
+                    except Exception:
+                        o_ = None
+                    if o_:
+                        rows_u.append((other_factory(fac), int(o_["sl_no"])))
+                if not ia_unit_relabel(rows_u, nu_, f"Gate Pass {gp_no} receive: UOM {cu_} -> {nu_}"):
+                    ok_u = False
+                    break
+            n = save_gate_pass_receipt(fac, [(ln["sl"], q_) for ln, q_ in zip(lines, qtys)], tx_date, gp_no, source, notes.strip()) if ok_u else None
             if n:
                 st.session_state["gp_lines"] = []
                 st.session_state["gp_gen"] = gen + 1
@@ -17050,7 +17282,9 @@ def _gp_tracking(view):
     issued, alloc = _gp_compute(lots)   # FIFO is always worked out on every lot; the filters below only choose what is shown
     df = df.copy()
     df["issued"] = df["id"].map(lambda i: round(issued.get(int(i), 0.0), 4))
-    df["balance"] = (df["qty"] - df["issued"]).clip(lower=0)
+    df["basis"] = _gp_basis_col(df, issued)
+    df["opening"] = [float(b) if int(i) in issued.auto else None for i, b in zip(df["id"], df["basis"])]
+    df["balance"] = (df["basis"] - df["issued"]).clip(lower=0)
     df["status"] = df.apply(lambda r: "✅ সব ইস্যু হয়েছে" if r["balance"] <= 1e-9
                             else ("🟡 আংশিক ইস্যু" if r["issued"] > 0 else "🔵 স্টোরে আছে"), axis=1)
     if term:
@@ -17067,9 +17301,11 @@ def _gp_tracking(view):
         return
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Gate Pass", df[["factory_name", "gate_pass_no"]].drop_duplicates().shape[0])
-    m2.metric("মোট গ্রহণ (pcs)", f"{df['qty'].sum():g}")
-    m3.metric("মোট ইস্যু (pcs)", f"{df['issued'].sum():g}")
-    m4.metric("এখনো বাকি (pcs)", f"{df['balance'].sum():g}")
+    m2.metric("মোট গ্রহণ (qty)", f"{df['qty'].sum():g}")
+    m3.metric("মোট ইস্যু (qty)", f"{df['issued'].sum():g}")
+    m4.metric("এখনো বাকি (qty)", f"{df['balance'].sum():g}")
+    df = df.copy()
+    df["uom"] = [_uom_of({"sl_no": a, "factory_name": b}) for a, b in zip(df["sl_no"], df["factory_name"])]
     if view == 1:
         g = (df.groupby(["factory_name", "gate_pass_no", "source_place", "rec_date"], sort=False)
                .agg(items=("sl_no", "count"), received=("qty", "sum"), issued=("issued", "sum"), balance=("balance", "sum"))
@@ -17082,14 +17318,18 @@ def _gp_tracking(view):
         st.dataframe(out, hide_index=True, use_container_width=True)
         export_buttons(out, "gate_pass_summary")
     elif view == 2:
-        out = df[["factory_name", "gate_pass_no", "source_place", "rec_date", "item_name", "size", "prod_id", "qty", "issued",
-                  "balance", "current_stock", "status", "remarks"]].rename(columns={
+        out = df[["factory_name", "gate_pass_no", "source_place", "rec_date", "item_name", "size", "prod_id", "uom", "qty", "opening", "issued",
+                  "balance", "current_stock", "status", "remarks"]].rename(columns={"uom": "UOM", "opening": "Opening Bal. (Opening Day)",
             "factory_name": "Unit", "gate_pass_no": "Gate Pass", "source_place": "কোথা থেকে", "rec_date": "তারিখ",
             "item_name": "আইটেম", "size": "Size", "prod_id": "ERP Code", "qty": "গ্রহণ", "issued": "ইস্যু", "balance": "বাকি",
             "current_stock": "বর্তমান মোট স্টক", "status": "অবস্থা", "remarks": "Remarks"})
         st.dataframe(out, hide_index=True, use_container_width=True)
         export_buttons(out, "gate_pass_itemwise")
         st.caption("ইস্যু হিসাব FIFO পদ্ধতিতে: Gate Pass-এর আগে থাকা পুরোনো স্টক আগে খরচ হয়, তারপর Gate Pass-এর মাল গ্রহণের ক্রমে।")
+        _od = _gp_opening_date()
+        if _od is not None:
+            st.caption(f"🏁 Opening Day {_od.strftime('%d-%b-%Y')}: ei tarikher age receive howa Gate Pass-er jonno 'Opening Bal.' = oi din physically koto chhilo; "
+                       "issue shudhu oi tarikh theke hishab hoy, tai 'বাকি' physical stock-er sathe mele. Thik korte '🏁 Opening Day Set' tab dekhun.")
     else:
         opts = (df[["factory_name", "gate_pass_no", "source_place", "rec_date"]].drop_duplicates()
                 .apply(lambda r: f"{r['gate_pass_no']} · {r['source_place']} · {r['rec_date']} · {r['factory_name']}", axis=1).tolist())
@@ -17098,12 +17338,12 @@ def _gp_tracking(view):
         fac_sel = sel.split(" · ")[-1]
         sub = df[(df["gate_pass_no"] == gp_no) & (df["factory_name"] == fac_sel)]
         ids = {int(i) for i in sub["id"]}
-        names = {int(r["id"]): f"{r['item_name']} [{r['size'] or '-'}]" for r in sub.to_dict("records")}
+        names = {int(r["id"]): f"{r['item_name']} [{r['size'] or '-'}] ({r['uom'] or '-'})" for r in sub.to_dict("records")}
         rows = [{"আইটেম": names[a["lot_id"]], "ইস্যুর তারিখ": a["date"], "SR No.": a["req_no"],
-                 "ধরন": TRANS_LABELS.get(a["type"], a["type"]), "এই Gate Pass থেকে (pcs)": a["qty"]}
+                 "ধরন": TRANS_LABELS.get(a["type"], a["type"]), "এই Gate Pass থেকে (qty)": a["qty"]}
                 for a in alloc if a["lot_id"] in ids]
-        st.dataframe(sub[["item_name", "size", "qty", "issued", "balance"]].rename(columns={
-            "item_name": "আইটেম", "size": "Size", "qty": "গ্রহণ", "issued": "ইস্যু", "balance": "বাকি"}),
+        st.dataframe(sub[["item_name", "size", "uom", "qty", "issued", "balance"]].rename(columns={
+            "item_name": "আইটেম", "size": "Size", "uom": "UOM", "qty": "গ্রহণ", "issued": "ইস্যু", "balance": "বাকি"}),
             hide_index=True, use_container_width=True)
         if rows:
             st.markdown("**কোন তারিখে / কোন SR-এ কতটুকু ইস্যু হয়েছে**")
@@ -17196,7 +17436,7 @@ def _gp_print_html(fac, lots):
     first = lots[0]
     rows = "".join(
         f"<tr><td>{i}</td><td>{e(str(r['item_name']))}</td><td>{e(str(r.get('size') or '-'))}</td><td>{e(str(r['prod_id']))}</td>"
-        f"<td class='n'>{float(r['qty']):g}</td></tr>" for i, r in enumerate(lots, 1))
+        f"<td class='n'>{float(r['qty']):g} {e(str(r.get('unit') or ''))}</td></tr>" for i, r in enumerate(lots, 1))
     total = sum(float(r["qty"]) for r in lots)
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>Gate Pass {e(str(first['gate_pass_no']))}</title>
 <style>body{{font-family:Arial,Helvetica,sans-serif;margin:24px;color:#111}}h2{{margin:0 0 4px}}
@@ -17209,7 +17449,7 @@ th{{background:#eee}}td.n,th.n{{text-align:right}}.sig{{display:flex;justify-con
 <h2>Gate Pass Receipt (Store In)</h2><div style="font-size:13px;color:#555">{e(fac)}</div>
 <div class="meta"><div><b>Gate Pass No:</b> {e(str(first['gate_pass_no']))}</div><div><b>Date:</b> {e(str(first['rec_date']))}</div>
 <div><b>Received from:</b> {e(str(first['source_place']))}</div><div><b>Remarks:</b> {e(str(first.get('remarks') or '-'))}</div></div>
-<table><tr><th>#</th><th>Item</th><th>Size</th><th>ERP Code</th><th class="n">Qty (pcs)</th></tr>{rows}
+<table><tr><th>#</th><th>Item</th><th>Size</th><th>ERP Code</th><th class="n">Qty (with UOM)</th></tr>{rows}
 <tr><th colspan="4" class="n">Total</th><th class="n">{total:g}</th></tr></table>
 <div class="sig"><div>Delivered by</div><div>Received by (Store)</div><div>Store In-charge</div><div>Approved by</div></div>
 </body></html>"""
@@ -17230,9 +17470,11 @@ def _gp_manage():
     sel = st.selectbox("Gate Pass বাছুন", list(opts), key="gp_mg_sel")
     f_, n_, s_, d_ = opts[sel]
     sub = df[(df.factory_name == f_) & (df.gate_pass_no == n_) & (df.source_place == s_) & (df.rec_date == d_)].sort_values("id")
+    sub = sub.copy()
+    sub["unit"] = [_uom_of({"sl_no": a, "factory_name": b}) for a, b in zip(sub["sl_no"], sub["factory_name"])]
     lots = sub.to_dict("records")
-    st.dataframe(sub[["item_name", "size", "prod_id", "qty"]].rename(columns={
-        "item_name": "আইটেম", "size": "Size", "prod_id": "ERP Code", "qty": "গ্রহণ (pcs)"}), hide_index=True, use_container_width=True)
+    st.dataframe(sub[["item_name", "size", "prod_id", "unit", "qty"]].rename(columns={
+        "item_name": "আইটেম", "size": "Size", "prod_id": "ERP Code", "unit": "UOM", "qty": "গ্রহণ (qty)"}), hide_index=True, use_container_width=True)
 
     html_doc = _gp_print_html(f_, lots)
     p1, p2 = st.columns([1, 1])
@@ -17273,10 +17515,10 @@ def _gp_manage():
             st.caption("Delete করতে login + নির্দিষ্ট Unit নির্বাচন (CONSOLIDATED নয়) + non-Auditor role লাগবে।")
         else:
             k = lots[0]["id"]
-            lab = {f"{r['item_name']} [{r['size'] or '-'}] · {float(r['qty']):g} pcs": r for r in lots}
+            lab = {f"{r['item_name']} [{r['size'] or '-'}] · {float(r['qty']):g} {r.get('unit') or ''}": r for r in lots}
             pick = st.multiselect("কোন লাইন মুছবেন? (ফাঁকা রাখলে পুরো Gate Pass)", list(lab), key=f"gp_d_pick_{k}")
             tgt = [lab[p] for p in pick] or lots
-            st.warning(f"{len(tgt)}টি লাইন মুছে যাবে এবং {sum(float(r['qty']) for r in tgt):g} pcs স্টক থেকে কমবে। "
+            st.warning(f"{len(tgt)}টি লাইন মুছে যাবে এবং {sum(float(r['qty']) for r in tgt):g} (qty) স্টক থেকে কমবে। "
                        "মাল ইতিমধ্যে ইস্যু হয়ে গেলে মোছা যাবে না।")
             pw_ok = mgr_check(f"gp_d_pw_{k}")
             conf = confirm_box(f"gp_d_conf_{k}", "⚠️ আমি নিশ্চিত — এই লাইন(গুলো) মুছে স্টক ফেরত যাবে।")
@@ -17300,7 +17542,7 @@ def tab_gate_pass():
     except Exception as e:
         st.error(f"Gate Pass table setup failed: {e}")
         return
-    sec = lazy_tab_select(["📥 Gate Pass গ্রহণ", "📊 Gate Pass সারাংশ", "📦 আইটেম-ভিত্তিক", "🔎 ইস্যুর বিস্তারিত", "🛠 Edit / Delete / Print"], "lz_gp")
+    sec = lazy_tab_select(["📥 Gate Pass গ্রহণ", "📊 Gate Pass সারাংশ", "📦 আইটেম-ভিত্তিক", "🔎 ইস্যুর বিস্তারিত", "🛠 Edit / Delete / Print", "🏁 Opening Day Set"], "lz_gp")
     if sec == 0:
         if is_cons_view:
             st.info("ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ গ্রহণ করা যায় না)।")
@@ -17308,6 +17550,8 @@ def tab_gate_pass():
             _gp_receive_form()
     elif sec == 4:
         _gp_manage()
+    elif sec == 5:
+        _gp_opening_setup()
     else:
         _gp_tracking(sec)
 
@@ -19501,8 +19745,9 @@ def rp_gate_pass(P):
     df = _rpn(df, "qty", "stock_before", "price")
     issued, alloc = _gp_compute(df.to_dict("records"))    # FIFO runs on every lot of the chosen items; filters below only choose what is shown
     df["issued"] = df["id"].map(lambda i: float(issued.get(int(i), 0.0)))
-    df["issued"] = df[["issued", "qty"]].min(axis=1)
-    df["balance"] = (df["qty"] - df["issued"]).clip(lower=0)
+    df["basis"] = _gp_basis_col(df, issued)
+    df["issued"] = df[["issued", "basis"]].min(axis=1)
+    df["balance"] = (df["basis"] - df["issued"]).clip(lower=0)
     df["rv"], df["iv"], df["bv"] = df["qty"] * df["price"], df["issued"] * df["price"], df["balance"] * df["price"]
     df["dt"] = _parse_dates(df["rec_date"])
     df = period_filter_df(df, "rec_date", P["d1"], P["d2"])
