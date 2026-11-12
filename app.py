@@ -3258,7 +3258,7 @@ def tab_dashboard():
 # ============================================================
 #  TAB 1 - TRANSACTIONS (daily entry, top priority)
 # ============================================================
-def _receipt_core(fac, user, item, qty, ttype, day, notes, date_s, time_s, supplier, challan, po_flag, po_date, rate, rate_mode):
+def _receipt_core(fac, user, item, qty, ttype, day, notes, date_s, time_s, supplier, challan, po_flag, po_date, rate, rate_mode, req_qty=None):
     """Everything a received item needs: stock, purchase rate -> unit price, the receipt row and the requisition Received qty.
     Runs inside the caller's transaction (used by the single Transactions form and by the multi-item receipt slip)."""
     sl, pid, name = item["sl_no"], item["prod_id"], item["item_name"]
@@ -3287,7 +3287,7 @@ def _receipt_core(fac, user, item, qty, ttype, day, notes, date_s, time_s, suppl
     if price_note:
         audit("PURCHASE_RATE", f"{fac}: {pid} ({name}){price_note}")
     if ttype == "Supplier. Rec":
-        _got = req_auto_receive(fac, sl, pid, qty, date_s)
+        _got = req_auto_receive(fac, sl, pid, qty if req_qty is None else req_qty, date_s)
         if _got:
             _txt = ", ".join(f"{n} +{v:g}" for n, v in _got)
             _prev = st.session_state.get("_req_auto_note", "")
@@ -3296,7 +3296,7 @@ def _receipt_core(fac, user, item, qty, ttype, day, notes, date_s, time_s, suppl
 
 @tx
 def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, supplier="", challan="", po_pending=False,
-                     erp_open=None, price_open=None, rate=None, rate_mode=None, req_no=""):
+                     erp_open=None, price_open=None, rate=None, rate_mode=None, req_no="", pack=None):
     user = st.session_state.get("user", "")
     req_no = (req_no or "").strip() if ttype in ISSUE_TYPES else ""
     sl, pid, name = item["sl_no"], item["prod_id"], item["item_name"]
@@ -3358,7 +3358,12 @@ def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, sup
         return True
 
     if ttype in RECEIPT_TYPES:
-        _receipt_core(fac, user, item, qty, ttype, day, notes, date_s, time_s, supplier, challan, po_flag, po_date, rate, rate_mode)
+        _req_q = None
+        if pack and ttype == "Supplier. Rec":   # Pkt/Box/Roll -> Pcs/Yds (see RECEIVE-TIME PACK PROMPT)
+            _req_q = qty
+            qty, rate, notes = _pk_apply(fac, sl, qty, rate, notes, pack)
+            item = q(f"SELECT {INV_COLS} FROM inventory WHERE sl_no=%s AND factory_name=%s", (sl, fac))[0]
+        _receipt_core(fac, user, item, qty, ttype, day, notes, date_s, time_s, supplier, challan, po_flag, po_date, rate, rate_mode, req_qty=_req_q)
     else:
         if qty > stock:
             st.error(f"Available stock ({stock:g}) kom ache requested qty ({qty:g}) theke.")
@@ -3384,14 +3389,19 @@ def save_supplier_receipt(fac, lines, tx_dt, supplier, challan, notes, po_pendin
         return 0
     n = 0
     for ln in lines:
+        line_notes, req_q = notes, None
+        if ln.get("pack"):   # Pkt/Box/Roll -> Pcs/Yds (see RECEIVE-TIME PACK PROMPT)
+            ln = dict(ln)
+            req_q = float(ln["qty"])
+            ln["qty"], ln["rate"], line_notes = _pk_apply(fac, int(ln["sl"]), ln["qty"], ln.get("rate"), notes, ln["pack"])
         r = q(f"SELECT {INV_COLS} FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE", (int(ln["sl"]), fac))
         if not r:
             raise ValueError("Item ar paoa jacche na - page refresh kore abar chesta korun.")
         item, qty = r[0], float(ln["qty"])
         if qty <= 0:
             raise ValueError(f"{item['item_name']}: quantity 0-r beshi din.")
-        _receipt_core(fac, user, item, qty, "Supplier. Rec", day, notes, date_s, time_s, supplier, challan, po_flag, po_date,
-                      (float(ln.get("rate") or 0) or None), rate_mode)
+        _receipt_core(fac, user, item, qty, "Supplier. Rec", day, line_notes, date_s, time_s, supplier, challan, po_flag, po_date,
+                      (float(ln.get("rate") or 0) or None), rate_mode, req_qty=req_q)
         audit("TRANSACTION", f"{fac}: Supplier. Rec {qty:g} of {item['prod_id']} ({item['item_name']}) [Challan {challan}]"
               + (" [ERP PO Pending ticked]" if po_pending else ""))
         n += 1
@@ -3764,6 +3774,10 @@ def tab_transactions():
             qc, dc = st.columns(2)
             qty = qc.number_input("Physical Stock" if ttype == OPENING_TYPE else "Quantity",
                                   min_value=0.0, step=1.0, key=f"tx_qty_{g}")
+            _pack = None
+            if ttype == "Supplier. Rec" and item is not None:   # Pkt/Box/Roll question (only for such items)
+                _pack, _pack_bad = _pk_ui(f"tx_pk_{g}_{item['sl_no']}", _pk_states(fac, [item["sl_no"]]).get(int(item["sl_no"])), float(qty))
+                blocked = blocked or _pack_bad
             erp_open, price_open = None, None
             if ttype == OPENING_TYPE:
                 # Shown ONLY for Opening Balance - Issue / Receipt forms never see these boxes.
@@ -3872,7 +3886,7 @@ def tab_transactions():
                                      "Quantity / remarks bodle ba kichukkhon por abar korun.")
                         elif save_transaction(fac, item, qty, ttype, tx_date, notes, verified, xfer_ok,
                                               supplier.strip(), challan.strip(), po_pending, erp_open=erp_open,
-                                              price_open=price_open, rate=rate_in, rate_mode=rate_mode, req_no=req_no):
+                                              price_open=price_open, rate=rate_in, rate_mode=rate_mode, req_no=req_no, pack=_pack):
                             if ttype in ISSUE_TYPES:
                                 st.session_state["last_req_no"] = req_no.strip()
                             st.session_state["tx_saved_gen"] = g
@@ -15902,6 +15916,7 @@ def _rr_form():
             col.markdown(f'<div class="pv-th">{t}</div>', unsafe_allow_html=True)
         remove, qtys, rates, bad = None, [], [], False
         uoms = get_uoms()
+        _pks, packs = _pk_states(fac, [x["sl"] for x in lines]), []
         can_write_ui = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
         for i, ln in enumerate(lines):
             r = st.columns([0.4, 2.7, 1.1, 0.8, 1.1, 1.1, 1.1, 1.6, 0.7])
@@ -15935,6 +15950,9 @@ def _rr_form():
                 r[7].write("✅")
             if r[8].button("✖", key=f"rr_rm_{gen}_{ln['sl']}", help="সারি মুছুন"):
                 remove = i
+            _pk, _pk_bad = _pk_ui(f"rr_pk_{gen}_{ln['sl']}", _pks.get(int(ln["sl"])), float(q_))   # Pkt/Box/Roll question
+            packs.append(_pk)
+            bad = bad or _pk_bad
     if remove is not None:
         lines.pop(remove)
         st.session_state["rr_lines"] = lines
@@ -15959,11 +15977,11 @@ def _rr_form():
         elif not challan:
             st.error("Challan No. likhun - eta bad-dhomulok.")
         elif bad:
-            st.error("তালিকায় সমস্যা আছে (পরিমাণ ০) — ঠিক করে আবার চেষ্টা করুন।")
+            st.error("তালিকায় সমস্যা আছে (পরিমাণ ০ বা Pack/Pcs প্রশ্নের উত্তর বাকি) — ঠিক করে আবার চেষ্টা করুন।")
         elif not confirm_existing:
             st.error("এই challan আগে রিসিভ হয়েছে — নিশ্চিত করার টিক দিন।")
         elif guard():
-            n = save_supplier_receipt(fac, [{"sl": ln["sl"], "qty": q_, "rate": rt_} for ln, q_, rt_ in zip(lines, qtys, rates)],
+            n = save_supplier_receipt(fac, [{"sl": ln["sl"], "qty": q_, "rate": rt_, "pack": pk_} for ln, q_, rt_, pk_ in zip(lines, qtys, rates, packs)],
                                       tx_date, supplier, challan, notes.strip(), po_pending, rate_mode)
             if n:
                 who = st.session_state.get("user", "")
@@ -22255,6 +22273,292 @@ def _ia_fix_panel(item, an, diff_ok, gen):
                 done(f"✅ Stock {_ia_g(stock)} → {_ia_g(want)} করা হয়েছে (Stock Adjustment হিসেবে লেখা আছে)।")
 
 
+# ============================================================
+#  ITEM AUDIT - PACK -> PCS SETUP (NEW, ADDITIVE ONLY; lives inside Item Audit, nothing else in the app was changed)
+#  Example: Sheet Protector File was received as 1 Pkt (challan = 1 Pkt) but is issued in Pcs. Set "1 Pkt = 100 Pcs" here and
+#  this ONE item is converted to Pcs: stock, ERP stock, minimum stock, every old Receipt / Issue / Opening qty (x100) and the rate (/100).
+#  The old Pkt quantity stays visible in each row's notes ("[Pack x100: 1->100]") so it still matches the challan. After that every
+#  normal Issue page accepts Pcs (10 Pcs, 25 Pcs ...) and the stock reaches 0 when the last Pcs of the packet is issued.
+#  Every change is logged in item_pack_conversions + audit log and can be reverted (only while no newer transaction exists).
+# ============================================================
+_IA_PACK_MARK = " [Pack ×"
+
+
+def _ia_pack_schema():
+    if st.session_state.get("_ia_pack_ready"):
+        return
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS item_pack_conversions (
+                id SERIAL PRIMARY KEY, factory_name TEXT, sl_no INTEGER, prod_id TEXT, item_name TEXT, size TEXT,
+                pack_name TEXT, old_unit TEXT, new_unit TEXT, factor DOUBLE PRECISION, old_price DOUBLE PRECISION,
+                status TEXT DEFAULT 'Active', reason TEXT, converted_by TEXT, converted_at TEXT, reverted_by TEXT, reverted_at TEXT)""")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    st.session_state["_ia_pack_ready"] = True
+
+
+def _ia_has_table(name):
+    return bool(run("SELECT to_regclass(%s) IS NOT NULL", (name,))[0][0])
+
+
+@tx
+def ia_pack_convert(fac, sl, pack_name, factor, new_unit, reason):
+    f = float(factor)
+    if f <= 1:
+        st.error("Pack size 1-er cheye boro hote hobe.")
+        return False
+    inv = q("""SELECT prod_id, item_name, COALESCE(size,'') AS size, COALESCE(unit_name,'') AS unit, COALESCE(unit_price,0) AS price,
+               COALESCE(current_stock,0) AS stock FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE""", (sl, fac))
+    if not inv:
+        st.error("Inventory item paoa jay nai.")
+        return False
+    inv = inv[0]
+    if q("SELECT 1 AS x FROM item_pack_conversions WHERE factory_name=%s AND sl_no=%s AND status='Active'", (fac, sl)):
+        st.error("এই item-এ আগে থেকেই Pack setup করা আছে।")
+        return False
+    if not _ia_load_transfers(fac, inv["prod_id"], inv["item_name"], inv["size"]).empty:
+        st.error("এই item-এর Inter-factory transfer আছে — দুই factory-র unit আলাদা হয়ে যাবে, তাই এখানে convert করা যাবে না।")
+        return False
+    new_unit = _pk_ensure_uom(new_unit)
+    r6 = lambda x: round(float(x), 6)
+    run("""UPDATE inventory SET current_stock=COALESCE(current_stock,0)*%s, erp_stock=COALESCE(erp_stock,0)*%s,
+           min_stock=COALESCE(min_stock,0)*%s, moq=COALESCE(moq,0)*%s, unit_price=COALESCE(unit_price,0)/%s, unit_name=%s
+           WHERE sl_no=%s AND factory_name=%s""", (f, f, f, f, f, new_unit, sl, fac))
+    n_tx = 0
+    for r in q("SELECT id, qty, notes, unit_price_at_tx FROM transactions WHERE factory_name=%s AND sl_no=%s ORDER BY id FOR UPDATE", (fac, sl)):
+        oq = float(r["qty"] or 0)
+        nq = r6(oq * f)
+        note = ((r["notes"] or "") + f"{_IA_PACK_MARK}{f:g}: {oq:g}→{nq:g}]").strip()
+        up = r["unit_price_at_tx"]
+        run("UPDATE transactions SET qty=%s, notes=%s, unit_price_at_tx=%s WHERE id=%s",
+            (nq, note, None if up is None else r6(float(up) / f), r["id"]))
+        n_tx += 1
+    run("UPDATE issue_returns SET qty=COALESCE(qty,0)*%s, original_qty=COALESCE(original_qty,0)*%s WHERE factory_name=%s AND sl_no=%s", (f, f, fac, sl))
+    if _ia_has_table("ri_pending_issues"):
+        run("""UPDATE ri_pending_issues SET qty=COALESCE(qty,0)*%s, issued_qty=COALESCE(issued_qty,0)*%s, rate=COALESCE(rate,0)/%s, unit=%s
+               WHERE factory_name=%s AND sl_no=%s""", (f, f, f, new_unit, fac, sl))
+    if _ia_has_table("gate_pass_receipts"):
+        run("UPDATE gate_pass_receipts SET qty=COALESCE(qty,0)*%s, stock_before=COALESCE(stock_before,0)*%s WHERE factory_name=%s AND sl_no=%s", (f, f, fac, sl))
+    run("""INSERT INTO item_pack_conversions (factory_name, sl_no, prod_id, item_name, size, pack_name, old_unit, new_unit, factor, old_price,
+           status, reason, converted_by, converted_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'Active',%s,%s,%s)""",
+        (fac, sl, inv["prod_id"], inv["item_name"], inv["size"], pack_name, inv["unit"], new_unit, f, float(inv["price"]),
+         reason, st.session_state.get("user") or "SYSTEM", _now_s()))
+    audit("PACK_CONVERT", f"{fac}: {inv['prod_id']} ({inv['item_name']}) SL {sl}: 1 {pack_name} = {f:g} {new_unit}; stock {float(inv['stock']):g} -> "
+                          f"{float(inv['stock']) * f:g}; {n_tx} transaction row(s) converted; rate {float(inv['price']):g} -> {float(inv['price']) / f:g}. Reason: {reason}")
+    return True
+
+
+@tx
+def ia_pack_revert(cid, fac, sl):
+    c = q("SELECT * FROM item_pack_conversions WHERE id=%s AND status='Active' FOR UPDATE", (cid,))
+    if not c:
+        st.error("Active Pack setup paoa jay nai.")
+        return False
+    c = c[0]
+    f = float(c["factor"])
+    txr = q("SELECT id, qty, notes, unit_price_at_tx FROM transactions WHERE factory_name=%s AND sl_no=%s ORDER BY id FOR UPDATE", (fac, sl))
+    late = [int(r["id"]) for r in txr if _IA_PACK_MARK not in (r["notes"] or "")]
+    if late:
+        st.error(f"Pack setup-er পরে {len(late)}টি নতুন transaction হয়েছে ({', '.join('#' + str(i) for i in late[:8])}) — "
+                 "সেগুলো Pcs-এ লেখা, তাই Pkt-এ ফেরানো যাবে না।")
+        return False
+    if _ia_has_table("ri_pending_issues") and q("SELECT 1 AS x FROM ri_pending_issues WHERE factory_name=%s AND sl_no=%s AND created_at>%s LIMIT 1",
+                                                 (fac, sl, c["converted_at"] or "")):
+        st.error("Pack setup-er পরে এই item-এ নতুন pending issue লেখা হয়েছে — Pkt-এ ফেরানো যাবে না।")
+        return False
+    r6 = lambda x: round(float(x), 6)
+    run("""UPDATE inventory SET current_stock=COALESCE(current_stock,0)/%s, erp_stock=COALESCE(erp_stock,0)/%s, min_stock=COALESCE(min_stock,0)/%s,
+           moq=COALESCE(moq,0)/%s, unit_price=%s, unit_name=%s WHERE sl_no=%s AND factory_name=%s""",
+        (f, f, f, f, float(c["old_price"] or 0), c["old_unit"] or "Pcs", sl, fac))
+    for r in txr:
+        note = re.sub(r"\s*\[Pack ×[0-9.eE+-]+: [^\]]*\]", "", r["notes"] or "")
+        up = r["unit_price_at_tx"]
+        run("UPDATE transactions SET qty=%s, notes=%s, unit_price_at_tx=%s WHERE id=%s",
+            (r6(float(r["qty"] or 0) / f), note, None if up is None else r6(float(up) * f), r["id"]))
+    run("UPDATE issue_returns SET qty=COALESCE(qty,0)/%s, original_qty=COALESCE(original_qty,0)/%s WHERE factory_name=%s AND sl_no=%s", (f, f, fac, sl))
+    if _ia_has_table("ri_pending_issues"):
+        run("""UPDATE ri_pending_issues SET qty=COALESCE(qty,0)/%s, issued_qty=COALESCE(issued_qty,0)/%s, rate=COALESCE(rate,0)*%s, unit=%s
+               WHERE factory_name=%s AND sl_no=%s""", (f, f, f, c["old_unit"] or "Pcs", fac, sl))
+    if _ia_has_table("gate_pass_receipts"):
+        run("UPDATE gate_pass_receipts SET qty=COALESCE(qty,0)/%s, stock_before=COALESCE(stock_before,0)/%s WHERE factory_name=%s AND sl_no=%s", (f, f, fac, sl))
+    run("UPDATE item_pack_conversions SET status='Reverted', reverted_by=%s, reverted_at=%s WHERE id=%s",
+        (st.session_state.get("user") or "SYSTEM", _now_s(), cid))
+    audit("PACK_REVERT", f"{fac}: {c['prod_id']} ({c['item_name']}) SL {sl}: Pack setup (1 {c['pack_name']} = {f:g} {c['new_unit']}) reverted to {c['old_unit']}")
+    return True
+
+
+def _ia_pack_panel(item, an, trf, gen):
+    fac, sl = item["factory_name"], int(item["sl_no"])
+    stock, unit = float(item["stock"]), item["unit"]
+    try:
+        _ia_pack_schema()
+        act = q("SELECT * FROM item_pack_conversions WHERE factory_name=%s AND sl_no=%s AND status='Active' ORDER BY id DESC LIMIT 1", (fac, sl))
+    except Exception as e:
+        st.error(f"Pack setup load hoyni: {e}")
+        return
+    act = act[0] if act else None
+    with st.expander("📦 Pack → Pcs setup — Pkt-এ receive, Pcs-এ issue", expanded=False):
+        if act:
+            f = float(act["factor"])
+            st.markdown(f'<div class="ia-note ok">✅ Pack setup চালু: <b>1 {_ia_e(act["pack_name"])} = {f:g} {_ia_e(act["new_unit"])}</b>. '
+                        f'এখনকার stock <b>{_ia_g(stock)} {_ia_e(unit)}</b> = {stock / f:,.2f} {_ia_e(act["pack_name"])}. '
+                        f'পুরোনো Receipt/Issue-র Notes-এ <i>[Pack ×{f:g}: আগের→এখনকার]</i> লেখা আছে, তাই challan-এর {_ia_e(act["pack_name"])} qty-র সাথে মিলিয়ে দেখা যাবে। '
+                        f'এখন যেকোনো Issue page-এ Pcs দিন — stock Pcs-এ কমবে, শেষ Pcs issue হলে 0 হবে।</div>', unsafe_allow_html=True)
+            st.caption(f"Setup করেছেন: {act['converted_by']} · {act['converted_at']} · কারণ: {act['reason'] or '-'}")
+            pw_ok = mgr_check(f"ia_pk_rpw_{sl}_{gen}")
+            conf = confirm_box(f"ia_pk_rcf_{sl}_{gen}", "⚠️ আমি Pack setup বাতিল করে আবার আগের unit-এ ফিরতে চাই।")
+            if st.button("↩️ Pack setup বাতিল করুন", key=f"ia_pk_rev_{sl}_{gen}"):
+                if not pw_ok:
+                    st.error("Manager password ঠিক নেই।")
+                elif not conf:
+                    st.error("Confirm টিক দিন।")
+                elif guard() and ia_pack_revert(int(act["id"]), fac, sl):
+                    st.session_state["ia_gen"] = gen + 1
+                    done("✅ Pack setup বাতিল হয়েছে — আগের unit ও qty ফিরে এসেছে।")
+            return
+        st.caption("একটা item যদি Packet-এ receive হয় (challan: 1 Pkt) কিন্তু issue হয় Pcs-এ, এখানে 1 Pkt = কত Pcs বলে দিন। শুধু এই একটি item Pcs-এ convert হবে: "
+                   "stock, ERP stock, Minimum stock ও আগের সব Receipt/Issue/Opening qty × pack size, আর rate ÷ pack size (মোট টাকার মূল্য একই থাকে)। "
+                   "অন্য কোনো item বা page বদলায় না।")
+        c1, c2, c3 = st.columns(3)
+        pname = c1.text_input("Pack-এর নাম", value="Pkt", key=f"ia_pk_n_{sl}_{gen}", max_chars=20).strip() or "Pkt"
+        size = c2.number_input(f"1 {pname} = কত?", min_value=2, value=100, step=1, key=f"ia_pk_s_{sl}_{gen}")
+        ulist = list(get_uoms())
+        ulist += [x for x in ("Yds",) if x.upper() not in {u.upper() for u in ulist}]
+        nunit = c3.selectbox("নতুন Unit", ulist, index=ulist.index("Pcs") if "Pcs" in ulist else 0, key=f"ia_pk_u_{sl}_{gen}")
+        f = float(size)
+        n_tx = int(len(an["tx"]))
+        st.markdown(f'<div class="ia-note info">Stock <b>{_ia_g(stock)} {_ia_e(unit)}</b> → <b>{_ia_g(stock * f)} {_ia_e(nunit)}</b> · '
+                    f'ERP {_ia_g(item["erp"])} → {_ia_g(float(item["erp"]) * f)} · rate ৳{float(item["price"]):,.2f} → ৳{float(item["price"]) / f:,.4f} per {_ia_e(nunit)} · '
+                    f'{n_tx}টি transaction-এর qty ×{f:g} হবে।</div>', unsafe_allow_html=True)
+        if trf is not None and not trf.empty:
+            st.markdown('<div class="ia-note bad">⛔ এই item-এর Inter-factory transfer আছে — দুই factory-র unit মিলবে না, তাই এখানে convert করা যাবে না।</div>', unsafe_allow_html=True)
+            return
+        reason = st.text_input("কারণ (বাধ্যতামূলক)", key=f"ia_pk_r_{sl}_{gen}", placeholder=f"যেমন: challan-এ 1 {pname} = {int(f)} Pcs, issue হয় Pcs-এ")
+        pw_ok = mgr_check(f"ia_pk_pw_{sl}_{gen}")
+        conf = confirm_box(f"ia_pk_cf_{sl}_{gen}", f"⚠️ আমি নিশ্চিত — এই item-এর আগের সব Receipt/Issue/Opening qty {pname} হিসেবেই লেখা ছিল (Pcs হিসেবে নয়)।")
+        if st.button("📦 Pack setup করুন", type="primary", key=f"ia_pk_go_{sl}_{gen}"):
+            if not reason.strip():
+                st.error("কারণ লিখুন।")
+            elif not pw_ok:
+                st.error("Manager password ঠিক নেই।")
+            elif not conf:
+                st.error("Confirm টিক দিন।")
+            elif guard() and ia_pack_convert(fac, sl, pname, f, nunit, reason.strip()):
+                st.session_state["ia_gen"] = gen + 1
+                done(f"✅ Pack setup হয়েছে: 1 {pname} = {f:g} {nunit}। এখন Pcs-এ issue করতে পারবেন।")
+
+
+# ============================================================
+#  RECEIVE-TIME PACK PROMPT (NEW, ADDITIVE): when an item whose unit is Pkt / Box / Carton / Roll ... is received, the receipt form asks
+#  "is it physically issued in Pcs (Roll: in Yds)?". If yes, the store officer gives the conversion (1 Pkt = 100 Pcs, or the total Yds
+#  of the Rolls) and the stock goes in as Pcs / Yds. The first time, the item is converted (same routine as Item Audit > Pack setup);
+#  afterwards the saved setup pre-fills the factor. Notes keep "[Pack ×100: 1→100]" so the challan quantity can still be matched, and the
+#  requisition's Received qty still gets the ORIGINAL pack count.
+# ============================================================
+_PK_UNITS = {"pkt", "packet", "pack", "box", "carton", "ctn", "roll", "bundle"}
+
+
+def _pk_is_pack(unit):
+    return str(unit or "").strip().lower() in _PK_UNITS
+
+
+def _pk_target(unit):
+    return "Yds" if str(unit or "").strip().lower() == "roll" else "Pcs"
+
+
+def _pk_ensure_uom(name):
+    name = (name or "").strip() or "Pcs"
+    for u in get_uoms():
+        if u.upper() == name.upper():
+            return u
+    run("""INSERT INTO uom_master (uom_name) SELECT %s
+           WHERE NOT EXISTS (SELECT 1 FROM uom_master WHERE UPPER(TRIM(uom_name))=UPPER(%s))""", (name, name))
+    return name
+
+
+def _pk_states(fac, sls):
+    """{sl_no: {unit, stock, n_tx, conv}} for the given items in ONE query. conv = the Active pack setup or None."""
+    sls = sorted({int(x) for x in sls})
+    if not sls:
+        return {}
+    try:
+        _ia_pack_schema()
+        rows = q("""SELECT i.sl_no, COALESCE(NULLIF(i.unit_name,''),'Pcs') AS unit, COALESCE(i.current_stock,0) AS stock,
+                    c.factor, c.pack_name, c.new_unit,
+                    (SELECT COUNT(*) FROM transactions t WHERE t.factory_name=i.factory_name AND t.sl_no=i.sl_no) AS n_tx
+                    FROM inventory i LEFT JOIN item_pack_conversions c
+                      ON c.factory_name=i.factory_name AND c.sl_no=i.sl_no AND c.status='Active'
+                    WHERE i.factory_name=%s AND i.sl_no = ANY(%s)""", (fac, sls))
+    except Exception:
+        return {}
+    return {int(r["sl_no"]): {"unit": r["unit"], "stock": float(r["stock"] or 0), "n_tx": int(r["n_tx"] or 0),
+                              "conv": ({"factor": float(r["factor"]), "pack_name": r["pack_name"], "new_unit": r["new_unit"]}
+                                       if r["factor"] else None)} for r in rows}
+
+
+def _pk_ui(k, sti, qty):
+    """Renders the pack question under a receipt line. Returns (pack, bad): pack = dict for the save step (or None = receive as typed),
+    bad = True while the officer still has to decide / fill something (the Save button must stay blocked)."""
+    if not sti:
+        return None, False
+    unit, conv = sti["unit"], sti["conv"]
+    if conv is None and not _pk_is_pack(unit):
+        return None, False
+    pk = conv["pack_name"] if conv else unit
+    tgt = conv["new_unit"] if conv else _pk_target(unit)
+    is_roll = pk.strip().lower() == "roll" or tgt.strip().lower() in ("yds", "yd", "yard", "yards")
+    with st.container(border=True):
+        if conv:
+            st.markdown(f"📦 **Pack setup আছে:** 1 {html_lib.escape(str(pk))} = {conv['factor']:g} {html_lib.escape(str(tgt))} — stock {html_lib.escape(str(tgt))}-এ জমা হয়।")
+            opts = [f"{pk} দিচ্ছি → {tgt}-এ জমা হবে", f"আমি নিজেই {tgt}-এ qty দিচ্ছি"]
+            pick = st.selectbox("Stock কীভাবে বাড়বে?", opts, key=k + "_ch")
+            convert = opts.index(pick) == 0
+        else:
+            st.warning(f"📦 এই item-এর unit **{unit}**। Physically কি **{tgt}**-এ issue হয়?")
+            opts = ["— বাছুন —", f"✅ হ্যাঁ — {tgt}-এ issue হয় (convert করব)", f"❌ না — {unit}-ই থাকুক"]
+            pick = st.selectbox("Issue-র unit", opts, key=k + "_ch")
+            if opts.index(pick) == 0:
+                return None, True
+            convert = opts.index(pick) == 1
+        if not convert:
+            return None, False
+        c1, c2 = st.columns(2)
+        f = c1.number_input(f"1 {pk} = কত {tgt}?", min_value=0.0, step=1.0, format="%g",
+                            value=float(conv["factor"]) if conv else 0.0, key=k + "_f")
+        alt = False
+        if is_roll:
+            alt = c2.checkbox(f"Roll-এর দৈর্ঘ্য আলাদা — মোট {tgt} নিজে দেব", key=k + "_alt")
+        total = float(qty) * float(f)
+        if alt:
+            total = float(c2.number_input(f"মোট {tgt} (এই receipt-এ)", min_value=0.0, step=1.0, format="%g", key=k + "_t"))
+        first = conv is None
+        if (first and f <= 1) or (not first and not alt and f <= 0) or (alt and total <= 0):
+            st.error(f"1 {pk} = কত {tgt} সেটা দিন।" if not alt or (first and f <= 1) else f"মোট {tgt} দিন।")
+            return None, True
+        st.caption(f"{qty:g} {pk} → **{total:g} {tgt}** জমা হবে" + (f" · আগের stock {sti['stock']:g} {unit} → {sti['stock'] * f:g} {tgt}" if first and sti["stock"] else ""))
+        if first and (sti["n_tx"] or sti["stock"]):
+            if not st.checkbox(f"⚠️ নিশ্চিত — এই item-এর আগের সব Receipt/Issue/Opening qty আর stock {pk} হিসেবেই ছিল; সব ×{f:g} হয়ে {tgt}-এ যাবে।", key=k + "_cf"):
+                return None, True
+        return {"factor": float(f), "pack_name": pk, "tgt": tgt, "total": float(total), "orig_qty": float(qty), "first": first}, False
+
+
+def _pk_apply(fac, sl, qty, rate, notes, pack):
+    """Runs INSIDE the caller's transaction. Converts the item the first time, then returns (qty in Pcs/Yds, rate per Pcs/Yds, notes)."""
+    if pack["first"]:
+        ok = ia_pack_convert.__wrapped__(fac, int(sl), pack["pack_name"], float(pack["factor"]), pack["tgt"],
+                                         f"Receive-er somoy Pack setup: 1 {pack['pack_name']} = {pack['factor']:g} {pack['tgt']}")
+        if not ok:
+            raise ValueError("Pack setup hoyni — receipt save kora hoyni.")
+    qty, total = float(qty), round(float(pack["total"]), 6)
+    new_rate = (float(rate) * qty / total) if rate else rate
+    note = ((notes or "") + f"{_IA_PACK_MARK}{total / qty:g}: {qty:g}→{total:g}]").strip()
+    return total, new_rate, note
+
+
 def tab_item_audit():
     st.markdown(_IA_CSS, unsafe_allow_html=True)
     st.title("🔬 Item Audit")
@@ -22328,6 +22632,7 @@ def tab_item_audit():
         st.markdown('<div class="ia-note ok">✅ Opening + Receipt − Issue ± Transfer = এখনকার stock — হিসাব মিলছে।</div>', unsafe_allow_html=True)
 
     _ia_fix_panel(item, an, diff_ok, gen)
+    _ia_pack_panel(item, an, trf, gen)
     sec = lazy_tab_select(["🧾 Transactions", "📑 SR / Requisition", "🔁 Transfers", "🕵️ Audit trail"], "lz_ia")
     if sec == 0:
         if txa.empty:
