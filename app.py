@@ -22192,6 +22192,56 @@ def _ia_tx_section(item, an, tx_show, gen):
             done(f"✅ {ok}টি transaction মুছে stock ঠিক করা হয়েছে।")
 
 
+# ---- Item Audit > SR / Requisition: per-SR "Audit OK" tick (so an item that was already checked is not checked again) ----
+def _ia_ok_create():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS item_sr_audit_ok (id SERIAL PRIMARY KEY, factory_name TEXT, sl_no INTEGER, sr_no TEXT,
+                           signature TEXT, ok_by TEXT, ok_at TEXT, UNIQUE (factory_name, sl_no, sr_no))""")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _ia_ok_map(fac, sl):
+    try:
+        run_once_per_process("ia_sr_ok_v1", _ia_ok_create)
+        return {r["sr_no"]: r for r in q("SELECT sr_no, signature, ok_by, ok_at FROM item_sr_audit_ok WHERE factory_name=%s AND sl_no=%s",
+                                         (fac, int(sl)))}
+    except Exception:
+        return {}
+
+
+def _ia_sr_sig(g):
+    """Fingerprint of one SR's issue lines (transaction id + qty + date). If any of them changes later, the OK is shown as 'changed'."""
+    return ",".join(f"{int(i)}:{float(qv):g}:{d}" for i, qv, d in sorted(zip(g["id"], g["qty"], g["date"].astype(str)), key=lambda x: int(x[0])))
+
+
+def _ia_ok_badge(row, sig):
+    if not row:
+        return '<span class="ia-sm">—</span>'
+    if row["signature"] == sig:
+        return f'<span class="ia-b g">✅ OK</span> <span class="ia-sm">{_ia_e(row["ok_by"])} · {_ia_e(row["ok_at"])}</span>'
+    return '<span class="ia-b a">🔄 Change hoyeche — abar check</span>'
+
+
+@tx
+def _ia_ok_save(fac, sl, name, on, off):
+    me = st.session_state.get("user", "")
+    now_s = local_now().strftime("%d-%b-%Y %I:%M %p")
+    for sr, sig in on:
+        run("""INSERT INTO item_sr_audit_ok (factory_name, sl_no, sr_no, signature, ok_by, ok_at) VALUES (%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (factory_name, sl_no, sr_no) DO UPDATE SET signature=EXCLUDED.signature, ok_by=EXCLUDED.ok_by, ok_at=EXCLUDED.ok_at""",
+            (fac, int(sl), str(sr), sig, me, now_s))
+    for sr in off:
+        run("DELETE FROM item_sr_audit_ok WHERE factory_name=%s AND sl_no=%s AND sr_no=%s", (fac, int(sl), str(sr)))
+    audit("ITEM_SR_AUDIT_OK", f"{fac}: Item Audit - {name} (SL {int(sl)}): SR marked OK: {', '.join(str(s) for s, _ in on) or '-'}"
+                              f"; OK removed: {', '.join(str(s) for s in off) or '-'}")
+    return True
+
+
 def _ia_sr_section(item, an):
     tx = an["tx"]
     iss = tx[tx["trans_type"].isin(ISSUE_TYPES)].copy()
@@ -22201,17 +22251,55 @@ def _ia_sr_section(item, an):
         st.info("এই item-এর কোনো Issue নেই।")
     else:
         iss["sr"] = iss["req_no"].astype(str).str.strip().replace("", "—")
+        ok_map = _ia_ok_map(item["factory_name"], item["sl_no"])
+        sr_info = []
         rows = []
         for sr, g in sorted(iss.groupby("sr"), key=lambda kv: kv[1]["_d"].max() if kv[1]["_d"].notna().any() else pd.Timestamp.min, reverse=True):
             dts = g["_d"].dropna()
+            sig = _ia_sr_sig(g)
             rng = (dts.min().strftime("%d-%b-%Y") + (" → " + dts.max().strftime("%d-%b-%Y") if dts.min() != dts.max() else "")) if len(dts) else "-"
             flag = '<span class="ia-b r">⛔ Opening-er age</span>' if bool(g["pre"].any()) else ""
             rows.append(("ia-pre" if bool(g["pre"].any()) else "",
                          [f'<span class="ia-b a">SR {_ia_e(sr)}</span>' if sr != "—" else '<span class="ia-sm">SR নেই</span>',
                           str(len(g)), f'<span class="ia-q-m">−{_ia_g(g["qty"].sum())}</span>', _ia_e(rng),
-                          _ia_e(", ".join(sorted(set(g["officer"])))), _ia_e(", ".join(sorted(set(x for x in g["section"] if x)))), flag,
+                          _ia_e(", ".join(sorted(set(g["officer"])))), _ia_e(", ".join(sorted(set(x for x in g["section"] if x)))), flag, _ia_ok_badge(ok_map.get(sr), sig),
                           _ia_e(", ".join(f"#{int(i)}" for i in g["id"]))]))
-        _ia_table(["SR No", "Lines", "Total Issue", "Date", "Officer", "Section", "Check", "Transaction IDs"], rows, 420)
+            sr_info.append((sr, sig, rng, len(g), float(g["qty"].sum())))
+        _ia_table(["SR No", "Lines", "Total Issue", "Date", "Officer", "Section", "Check", "Audit OK", "Transaction IDs"], rows, 420)
+
+        fac_, sl_ = item["factory_name"], int(item["sl_no"])
+        is_ok = lambda sr_, sig_: bool(ok_map.get(sr_)) and ok_map[sr_]["signature"] == sig_
+        n_ok = sum(1 for s_ in sr_info if is_ok(s_[0], s_[1]))
+        n_chg = sum(1 for s_ in sr_info if ok_map.get(s_[0]) and not is_ok(s_[0], s_[1]))
+        st.markdown(f"##### ✅ Audit OK — {n_ok} / {len(sr_info)} SR check kora" + (f" · 🔄 {n_chg} ti change hoyeche" if n_chg else ""))
+        st.caption("SR number, date ar issue qty thik thakle **OK ✔** tick diye Save korun — porer bar ei item-e eta abar check korte hobe na. "
+                   "Pore oi SR-er kono transaction (qty / date / notun entry) change hole 'Change hoyeche — abar check' dekhabe. Tick tule dile OK soriye jabe.")
+        can_ok = bool(st.session_state.get("user")) and st.session_state.get("role") not in NEW_RO_ROLES
+        df_ok = pd.DataFrame({"SR No": [s_[0] for s_ in sr_info], "Date": [s_[2] for s_ in sr_info], "Lines": [s_[3] for s_ in sr_info],
+                              "Total Issue": [s_[4] for s_ in sr_info],
+                              "Status": ["✅ OK" if is_ok(s_[0], s_[1]) else ("🔄 Change hoyeche" if ok_map.get(s_[0]) else "") for s_ in sr_info],
+                              "OK ✔": [is_ok(s_[0], s_[1]) for s_ in sr_info]})
+        gen_ok = st.session_state.get("ia_ok_gen", 0)
+        edited = st.data_editor(df_ok, hide_index=True, use_container_width=True, height=min(80 + 36 * len(df_ok), 380),
+                                key=f"ia_ok_ed_{sl_}_{gen_ok}",
+                                disabled=([c for c in df_ok.columns if c != "OK ✔"] if can_ok else True),
+                                column_config={"OK ✔": st.column_config.CheckboxColumn("OK ✔ (thik ache)"),
+                                               "Total Issue": st.column_config.NumberColumn(format="%g")})
+        new_ok = edited["OK ✔"].astype(bool).tolist()
+        on = [(sr_info[i][0], sr_info[i][1]) for i in range(len(sr_info)) if new_ok[i] and not df_ok["OK ✔"].iloc[i]]
+        off = [sr_info[i][0] for i in range(len(sr_info)) if not new_ok[i] and df_ok["OK ✔"].iloc[i]]
+        b1, b2 = st.columns([2, 1])
+        if b1.button(f"💾 Save OK ({len(on)} OK, {len(off)} OK soranor)", key=f"ia_ok_save_{sl_}", type="primary",
+                     disabled=(not can_ok or not (on or off)), use_container_width=True) and guard():
+            if _ia_ok_save(fac_, sl_, str(item["item_name"]), on, off):
+                st.session_state["ia_ok_gen"] = gen_ok + 1
+                done(f"✅ Audit OK save hoyeche: {len(on)} SR OK" + (f", {len(off)} OK soranor" if off else "") + ".")
+        all_on = [(s_[0], s_[1]) for s_ in sr_info if not is_ok(s_[0], s_[1])]
+        if b2.button(f"☑ Baki {len(all_on)} SR-i OK", key=f"ia_ok_all_{sl_}", disabled=(not can_ok or not all_on),
+                     use_container_width=True) and guard():
+            if _ia_ok_save(fac_, sl_, str(item["item_name"]), all_on, []):
+                st.session_state["ia_ok_gen"] = gen_ok + 1
+                done(f"✅ Audit OK save hoyeche: {len(all_on)} SR OK.")
     pend = _ia_pending_rows(item["factory_name"], item["sl_no"])
     if pend:
         st.markdown("##### ⏳ Pending SR (stock ছিল না — এখনও issue হয়নি)")
