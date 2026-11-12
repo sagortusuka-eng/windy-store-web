@@ -1965,9 +1965,41 @@ def other_factory(f):
     return "Windy Washing LTD" if f == "KC Washing Plant" else "KC Washing Plant"
 
 
+# ---- UOM everywhere: the item's unit (Pcs / Pkt / Box / Yds ...) is shown next to its name in the item pickers and lists.
+# ---- One lookup table of (factory, SL) -> unit, rebuilt only after a save (same data-version counter as q_c), so a label costs a dict lookup.
+@st.cache_resource(show_spinner=False)
+def _uom_box():
+    return {"v": None, "m": {}}
+
+
+def _uom_map():
+    b, v = _uom_box(), _data_version()
+    if b["v"] != v:
+        _c, rows = fetch("SELECT factory_name, sl_no, COALESCE(NULLIF(TRIM(unit_name),''),'Pcs') FROM inventory", None)
+        b["m"] = {(str(f), int(s)): u for f, s, u in rows if s is not None}
+        b["v"] = v
+    return b["m"]
+
+
+def _uom_of(x):
+    """Unit of the inventory item described by a dict / row / Series (needs sl_no or sl; factory_name or the current factory)."""
+    try:
+        sl = x.get("sl_no", x.get("sl"))
+        if sl is None or sl != sl:
+            return ""
+        return _uom_map().get((str(x.get("factory_name") or FAC), int(sl)), "")
+    except Exception:
+        return ""
+
+
+def _uom_tag(x):
+    u = _uom_of(x)
+    return f" ({u})" if u else ""
+
+
 def item_label(r):
     return (f"SL {r['sl_no']} | S/N {r.get('serial') or '-'} | {r['factory_name']} | {r['item_name']} "
-            f"[{r['size'] or '-'}] | {r['prod_id']} | Stock {float(r['stock'] or 0):g}")
+            f"[{r['size'] or '-'}]{_uom_tag(r)} | {r['prod_id']} | Stock {float(r['stock'] or 0):g}")
 
 
 def next_free_temp(fac):
@@ -2171,7 +2203,7 @@ def inv_options(fac):
                  COALESCE(serial_no,'') AS serial_no, COALESCE(erp_stock,0) AS erp_stock, COALESCE(current_stock,0) AS current_stock,
                  COALESCE(unit_price,0) AS unit_price, COALESCE(NULLIF(unit_name,''),'Pcs') AS unit_name
                  FROM inventory WHERE 1=1{fsql} ORDER BY factory_name, sl_no""", fp)
-    return {f"SL {r['sl_no']} | {r['factory_name']} | {r['item_name']} [{r['size'] or '-'}] | {r['prod_id']}"
+    return {f"SL {r['sl_no']} | {r['factory_name']} | {r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} | {r['prod_id']}"
             + (f" | S/N {r['serial_no']}" if r["serial_no"] else ""): r for r in rows}
 
 
@@ -3631,7 +3663,7 @@ def tx_manager_panel(df, kp, title="🔐 Manager: Delete / Edit a transaction"):
             st.markdown("**🔁 Vul item select hoyechilo? Item bodlan** (duto item-er stock auto thik hobe)")
             ft = st.text_input("Notun item khujun (nam / ERP code / size)", key=f"{kp}_it_q_{tid}").strip()
             cands = search_items(c0["factory_name"], ft)[:30] if len(ft) >= 2 else []
-            lab = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · stock {float(r['stock']):g}": r
+            lab = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']} · stock {float(r['stock']):g}": r
                    for r in cands if int(r["sl_no"]) != int(c0["sl_no"])}
             pk = st.selectbox("Notun (shothik) item", list(lab) if lab else ["— age item khujun —"], key=f"{kp}_it_pk_{tid}")
             ic = confirm_box(f"{kp}_it_conf_{tid}", "⚠️ Ami confirm korchi - ei transaction onno item-e jabe, duto item-er stock thik hobe.")
@@ -3837,8 +3869,8 @@ def tab_transactions():
             notes = st.text_input("Remarks", key=f"tx_notes_{g}", placeholder="Optional note")
 
             if item is not None:
-                st.info(f"**{item['item_name']}** [{item['size'] or '-'}]  ·  Serial **{item['serial'] or '-'}**  ·  SL {item['sl_no']}  ·  "
-                        f"ERP {item['prod_id']}  ·  Stock **{float(item['stock']):g}**  ·  "
+                st.info(f"**{item['item_name']}** [{item['size'] or '-'}]{_uom_tag(item)}  ·  Serial **{item['serial'] or '-'}**  ·  SL {item['sl_no']}  ·  "
+                        f"ERP {item['prod_id']}  ·  Stock **{float(item['stock']):g} {_uom_of(item) or ''}**  ·  "
                         f"Short: {max(float(item['erp']) - float(item['stock']), 0):g}")
                 if ttype in ISSUE_TYPES:
                     _price_budget_warning(fac, item)
@@ -3922,7 +3954,8 @@ def tab_transactions():
             tdf["type"] = tdf["trans_type"].map(lambda c: TRANS_LABELS.get(c, c))
             tdf["status"] = tdf["verification_status"].fillna("N/A")
             show = tdf[["id", "factory_name", "officer_name", "sl_no", "serial_no", "prod_id", "item_name", "qty", "type",
-                        "supplier_name", "challan_no", "purchase_rate", "req_no", "status", "notes", "date_time"]]
+                        "supplier_name", "challan_no", "purchase_rate", "req_no", "status", "notes", "date_time"]].copy()
+            show.insert(list(show.columns).index("qty") + 1, "uom", [_uom_of({"factory_name": f_, "sl_no": s_}) for f_, s_ in zip(show["factory_name"], show["sl_no"])])
             st.dataframe(show.style.apply(zebra_styles, axis=1), hide_index=True,
                          use_container_width=True, height=340,
                          column_config={"purchase_rate": st.column_config.NumberColumn("Purchase Rate (৳)", format="%.2f"),
@@ -3940,6 +3973,7 @@ def tab_transactions():
                      COALESCE(size,'') AS size, current_stock
                      FROM inventory WHERE current_stock <= 5{fsql} ORDER BY current_stock ASC""", fp)
     if not alerts.empty:
+        alerts.insert(list(alerts.columns).index("current_stock") + 1, "uom", [_uom_of({"factory_name": f_, "sl_no": s_}) for f_, s_ in zip(alerts["factory_name"], alerts["sl_no"])])
         alerts["status"] = alerts.current_stock.apply(lambda s: "🔴 NEGATIVE (URGENT)" if s < 0 else "⚠️ LOW STOCK")
     st.dataframe(alerts, hide_index=True, use_container_width=True)
     export_buttons(alerts, "low_stock_alerts")
@@ -5253,14 +5287,14 @@ def tab_stock_report():
         st.markdown("---")
         st.markdown("### 📋 Item-wise Transaction History & Management")
         if not view_sr.empty:
-            opts_sr = {f"SL {r['sl_no']} | {r['item_name']} [{r['size'] or '-'}] | ERP QTY: {r['ERP Stock QTY']:g} | Phys QTY: {r['Physical Stock QTY']:g}": r
+            opts_sr = {f"SL {r['sl_no']} | {r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} | ERP QTY: {r['ERP Stock QTY']:g} | Phys QTY: {r['Physical Stock QTY']:g}": r
                        for r in view_sr.to_dict("records")}
             sel_key = st.selectbox("Select an item to view its transactions & manage", list(opts_sr.keys()), key="sr_item_select")
             sel_item = opts_sr[sel_key]
             item_txs = qdf_c("""SELECT id, date, time, trans_type, qty, officer_name, supplier_name, challan_no, notes, verification_status
                               FROM transactions WHERE factory_name=%s AND sl_no=%s ORDER BY id DESC""",
                            (sel_item["factory_name"], sel_item["sl_no"]))
-            st.markdown(f"**Transaction history for: {sel_item['item_name']} [{sel_item['size'] or '-'}] (SL {sel_item['sl_no']}, ERP Code: {sel_item['prod_id']})**")
+            st.markdown(f"**Transaction history for: {sel_item['item_name']} [{sel_item['size'] or '-'}]{_uom_tag(sel_item)} (SL {sel_item['sl_no']}, ERP Code: {sel_item['prod_id']})**")
             if not item_txs.empty:
                 st.dataframe(item_txs, hide_index=True, use_container_width=True, height=220)
             else:
@@ -5850,7 +5884,7 @@ def tab_erp_audit():
                 if vt.empty:
                     st.success("Sob item ERP-er sathe matched." if not term.strip() else "Search-e kono variance item nei.")
                 else:
-                    labels = {f"SL {r['sl_no']} | {r['item_name']} [{r['size'] or '-'}] | S/N {r['serial_no'] or '-'} | "
+                    labels = {f"SL {r['sl_no']} | {r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} | S/N {r['serial_no'] or '-'} | "
                               f"{r['factory_name']} | Var {r['variance']:g}": r for r in vt.to_dict("records")}
                     row = labels[st.selectbox("Item", list(labels), key="adj_sel")]
                     limit = abs(float(row["variance"]))
@@ -7474,7 +7508,7 @@ def req_import_view():
         for p, hits in sim_lines:
             opts = {"➕ Notun item create korun": None}
             for sc, h in hits:
-                opts[f"Use: {h['item_name']} [{h['size'] or '-'}] · {h['prod_id']} · stock {float(h['stock']):g} · mil {int(round(sc * 100))}%"] = int(h["sl_no"])
+                opts[f"Use: {h['item_name']} [{h['size'] or '-'}]{_uom_tag(h)} · {h['prod_id']} · stock {float(h['stock']):g} · mil {int(round(sc * 100))}%"] = int(h["sl_no"])
             pick = st.selectbox(f"Line {p['line']}: {p['item']}" + (f" [{p['size']}]" if p.get("size") else ""), list(opts),
                                 key=f"req_sim_{hi}_{p['line']}")
             p["use_sl"] = opts[pick]
@@ -8955,7 +8989,7 @@ def render_budget_line_fixer():
     if not items:
         st.info("কোনো আইটেম মেলেনি। নাম/ERP code দিয়ে খুঁজুন।")
     else:
-        lab = {f"SL {r['sl_no']} · {r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · এখন: {r['category'] or 'ফাঁকা'}": int(r["sl_no"])
+        lab = {f"SL {r['sl_no']} · {r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']} · এখন: {r['category'] or 'ফাঁকা'}": int(r["sl_no"])
                for r in items}
         picks = st.multiselect(f"কোন আইটেমগুলো সরাবেন? ({len(items)}টি দেখাচ্ছে, সর্বোচ্চ ২০০)", list(lab), key=f"bfx_items_{fsel}")
         llab = {f"{r['category_name']}  ·  {r['department_name']}  ·  বাজেট ৳{float(r['b']):,.0f}": str(r["category_name"]) for r in lines}
@@ -9352,7 +9386,7 @@ def pc_entry():
     opts = {}
     if term.strip():
         for r in search_items(FAC, term.strip())[:30]:
-            lbl = f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']}" + (f" · S/N {r['serial']}" if r["serial"] else "")
+            lbl = f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']}" + (f" · S/N {r['serial']}" if r["serial"] else "")
             opts[lbl] = r
     st.session_state["pc_opts"] = opts
     if term.strip() and not opts:
@@ -9828,7 +9862,7 @@ def pc_verify_view():
                                 "Difference": st.column_config.NumberColumn(format="%+.2f")})
     pool = [r for r in recs if (not only_diff or abs(r["diff"]) >= 1e-9)]
     pool.sort(key=lambda r: (-abs(r["diff"]), str(r["item_name"])))
-    labels = {f"SL {r['sl_no']} | {r['item_name']} [{r['size'] or '-'}] | System {r['stock_now']:g} vs Counted {float(r['counted_qty']):g} ({r['diff']:+g})": r
+    labels = {f"SL {r['sl_no']} | {r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} | System {r['stock_now']:g} vs Counted {float(r['counted_qty']):g} ({r['diff']:+g})": r
               for r in pool}
     st.markdown("---")
     sel = st.selectbox("🔎 Kon item-er history check korben", list(labels), key="pc_vsel")
@@ -9972,7 +10006,7 @@ def pc_delete_view():
         items = q_c(f"""SELECT i.id, i.count_id, i.sl_no, i.item_name, COALESCE(i.size,'') AS size, i.counted_qty
                         FROM stock_count_items i JOIN stock_counts c ON c.id=i.count_id
                         WHERE 1=1{cf}{where} ORDER BY i.count_id DESC, i.id""", params)
-        ilabels = {f"Count #{r['count_id']} · SL {r['sl_no']} · {r['item_name']} [{r['size'] or '-'}] · counted {float(r['counted_qty']):g}": r["id"]
+        ilabels = {f"Count #{r['count_id']} · SL {r['sl_no']} · {r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · counted {float(r['counted_qty']):g}": r["id"]
                    for r in items}
         pick = st.multiselect("Item select korun", list(ilabels), key="pc_del_ipick")
         ids = [ilabels[k] for k in pick]
@@ -10756,7 +10790,7 @@ def do_manual_transfer(sug, qty, date_s, note, leave_note):
 
 def transfer_form(sug):
     with st.container(border=True):
-        st.markdown(f"#### 🔁 ট্রান্সফার ফর্ম — {sug['item_name']} [{sug['size'] or '-'}]")
+        st.markdown(f"#### 🔁 ট্রান্সফার ফর্ম — {sug['item_name']} [{sug['size'] or '-'}]{_uom_tag(sug)}")
         live = q("""SELECT factory_name, COALESCE(current_stock,0) AS stock FROM inventory
                     WHERE (sl_no=%s AND factory_name=%s) OR (sl_no=%s AND factory_name=%s)""",
                  (sug["src_sl"], sug["src_factory"], sug["dst_sl"], sug["dst_factory"]))
@@ -11342,7 +11376,7 @@ def similar_item_alert(fac, name, size):
         return
     if not hits:
         return
-    lines = "\n".join(f"- **{h['item_name']}** [{h['size'] or '-'}] · ERP {h['prod_id']} · SL {h['sl_no']} · "
+    lines = "\n".join(f"- **{h['item_name']}** [{h['size'] or '-'}]{_uom_tag(h)} · ERP {h['prod_id']} · SL {h['sl_no']} · "
                       f"stock {float(h['stock']):g} · মিল {int(round(s * 100))}%" for s, h in hits)
     st.warning(f"⚠️ এই নামের কাছাকাছি আইটেম আগে থেকেই আছে — এটাই কি?\n\n{lines}\n\n"
                "এটাই হলে নতুন আইটেম না বানিয়ে Transactions-এ গিয়ে ওই আইটেমে stock যোগ করুন। সত্যিই আলাদা আইটেম হলে নিচে চালিয়ে যান।")
@@ -11358,7 +11392,7 @@ def similar_item_alert(fac, name, size):
 #  8. Item one-page history  (Stock Cover -> "📄 আইটেমের ইতিহাস")
 # ------------------------------------------------------------------
 def _ih_label(r):
-    return (f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id'] or '-'} · "
+    return (f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id'] or '-'} · "
             f"{short_fac(r['factory_name'])} · SL {r['sl_no']}")
 
 
@@ -12203,7 +12237,7 @@ def audit_manual_view():
         sql = (f"SELECT sl_no, COALESCE(prod_id,'') AS prod_id, item_name, COALESCE(size,'') AS size, COALESCE(current_stock,0) AS stock "
                f"FROM inventory WHERE factory_name=%s AND " + " AND ".join([f"{hay} LIKE %s"] * len(toks)) + " ORDER BY item_name, size LIMIT 100")
         res = q_c(sql, [fac] + [f"%{t}%" for t in toks])
-        labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id'] or '-'} · stock {float(r['stock']):g}": int(r["sl_no"]) for r in res}
+        labels = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id'] or '-'} · stock {float(r['stock']):g}": int(r["sl_no"]) for r in res}
         st.session_state["ram_res"] = labels
         if not labels:
             st.warning("এই নামে কোনো item পাওয়া যায়নি। ছোট/অন্য শব্দ দিয়ে খুঁজে দেখুন।")
@@ -12224,7 +12258,7 @@ def audit_manual_view():
         if not r_:
             continue
         cA, cB = st.columns([6, 1])
-        cA.markdown(f"• {r_['item_name']} [{r_['size'] or '-'}] · {r_['prod_id'] or '-'}")
+        cA.markdown(f"• {r_['item_name']} [{r_['size'] or '-'}]{_uom_tag(r_)} · {r_['prod_id'] or '-'}")
         cB.button("❌", key=f"ram_rm_{sl}", on_click=_ram_remove, args=(sl,))
     items = [({"req_qty": None}, by_sl[sl]) for sl in chosen if sl in by_sl]
     if not items:
@@ -12266,7 +12300,7 @@ def _search_inventory(fac, term, limit=100):
 
 
 def _inv_label(r):
-    return f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id'] or '-'} · ERP {float(r['erp']):g} · Physical {float(r['stock']):g}"
+    return f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id'] or '-'} · ERP {float(r['erp']):g} · Physical {float(r['stock']):g}"
 
 
 @tx
@@ -12633,7 +12667,7 @@ def render_budget_issue_check():
     zero = df[df["price"] <= 0].drop_duplicates(["factory_name", "sl_no"])
     if not zero.empty:
         with st.expander(f"💲 দাম 0 আইটেমে দাম বসান ({len(zero)}টি) — Manager"):
-            lab = {f"{r['item_name']} [{r['size'] or '-'}] · {short_fac(r['factory_name'])}": r for r in zero.to_dict("records")}
+            lab = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {short_fac(r['factory_name'])}": r for r in zero.to_dict("records")}
             pick = lab[st.selectbox("আইটেম", list(lab), key="bic_pick")]
             newp = st.number_input("Unit Price (৳ প্রতি একক)", min_value=0.0, step=1.0, key=f"bic_price_{pick['factory_name']}_{pick['sl_no']}")
             pw = mgr_check("bic_pw")
@@ -12658,7 +12692,7 @@ def render_budget_issue_check():
             if not lines:
                 st.info("এই Factory-র কোনো Budget লাইন নেই। আগে Budget যোগ করুন।")
             else:
-                ilab = {f"{r['item_name']} [{r['size'] or '-'}] · এখনকার Category: {r['category'] or 'ফাঁকা'}": int(r["sl_no"])
+                ilab = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · এখনকার Category: {r['category'] or 'ফাঁকা'}": int(r["sl_no"])
                         for r in sub.to_dict("records")}
                 picks = st.multiselect("কোন আইটেমগুলো", list(ilab), default=list(ilab), key=f"bic_cat_items_{fsel}")
                 llab = {f"{r['category_name']}  ·  {r['department_name']}  ·  বাজেট ৳{float(r['b']):,.0f}": r["category_name"] for r in lines}
@@ -13614,7 +13648,7 @@ def _ls_item_log():
         st.dataframe(out, hide_index=True, use_container_width=True, height=420)
         export_buttons(out, "log_sheet_audit_only")
         return
-    labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id'] or '-'} · {short_fac(r['factory_name'])} · SL {r['sl_no']}": r for r in items}
+    labels = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id'] or '-'} · {short_fac(r['factory_name'])} · SL {r['sl_no']}": r for r in items}
     row = labels[st.selectbox("আইটেম বেছে নিন", list(labels), key="ls_pick")]
     fac, sl = row["factory_name"], int(row["sl_no"])
     name, pid = str(row["item_name"]), str(row["prod_id"]).strip()
@@ -14306,7 +14340,7 @@ def _ri_pending_view():
             _ri_pending_row(r, fac, can_write, vm)
         if is_mgr:
             with st.expander("🗑 Pending cancel (Store Manager)"):
-                lab = {f"SR {r['sr_no']} · {r['item_name']} [{r['size'] or '-'}] · pending {r['left']:g}": r for r in rows}
+                lab = {f"SR {r['sr_no']} · {r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · pending {r['left']:g}": r for r in rows}
                 pick = st.selectbox("Kon pending line cancel korben?", list(lab), key="rip_cx_pick")
                 why = st.text_input("Karon (optional)", key="rip_cx_why")
                 sure = st.checkbox("Ami confirm korchi - ei pending line cancel hobe (kono stock/transaction poriborton hobe na).", key="rip_cx_ok")
@@ -14317,7 +14351,7 @@ def _ri_pending_view():
                         done("Pending line cancel hoyeche.")
     if rows:
         with st.expander("🔎 Item details — stock kothay gelo? (opening, received, issued, kon officer)"):
-            _ri_item_trail_ui(fac, [(int(r["sl_no"]), f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · SR {r['sr_no']}") for r in rows], key="ptr")
+            _ri_item_trail_ui(fac, [(int(r["sl_no"]), f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']} · SR {r['sr_no']}") for r in rows], key="ptr")
     with st.expander("🕘 Ager shesh howa / cancel howa pending (last 30)"):
         h = qdf("""SELECT sr_no AS "SR No", item_name AS "Item", size AS "Size", qty AS "Qty", issued_qty AS "Issued", status AS "Status",
                    slip_date AS "Slip Date", closed_by AS "By", closed_at AS "When", close_note AS "Note"
@@ -14487,7 +14521,7 @@ def _iw_view():
     st.dataframe(top, hide_index=True, use_container_width=True, height=min(90 + 36 * len(top), 360))
     export_buttons(df, "skip_watch", f"Skip Watch ({plabel})")
     with st.expander("✍️ Officer-er jobab / karon likhe rakhun"):
-        lab = {f"#{r['id']} · {r['created_at']} · {r['officer']} · {r['item_name']} [{r['size'] or '-'}]": r for r in show[:150]}
+        lab = {f"#{r['id']} · {r['created_at']} · {r['officer']} · {r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)}": r for r in show[:150]}
         with st.form("iw_review_form"):
             pk = st.selectbox("Kon record", list(lab), key="iw_rev_pick")
             why = st.text_input("Officer ki jobab dilo / karon", value="", key="iw_rev_why")
@@ -14531,7 +14565,7 @@ def _ri_pending_row(r, fac, can_write, vm, kp="rip"):
     k = str(r["id"])
     with st.container(border=True):
         c = st.columns([3.2, 1.1, 1.1, 1.2])
-        c[0].markdown(f"**{r['item_name']}** [{r['size'] or '-'}] · {r['prod_id']}  \n"
+        c[0].markdown(f"**{r['item_name']}** [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']}  \n"
                       f"<span style='color:#64748b;font-size:12px'>SR {r['sr_no']} · Pending {r['left']:g} {r['unit'] or ''} · "
                       f"Stock ekhon {r['stock']:g} · Section {r['section'] or '-'}" + (f" · M/C {r['mc_no']}" if r.get("mc_no") else "") + "</span>",
                       unsafe_allow_html=True)
@@ -14666,7 +14700,7 @@ def _ri_item_trail_ui(fac, pairs, key="itr"):
     t2 = st.text_input("Onno item-er details dekhte khujun (nam / ERP code / size) — optional", key=f"{key}_s").strip()
     if len(t2) >= 2:
         for r in search_items(fac, t2)[:30]:
-            opts[f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · stock {float(r['stock']):g}"] = int(r["sl_no"])
+            opts[f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']} · stock {float(r['stock']):g}"] = int(r["sl_no"])
     if not opts:
         st.info("Item khujun.")
         return
@@ -14744,7 +14778,7 @@ def _ri_sr_center():
     elif t == 1:
         term2 = st.text_input("Item khujun (nam / ERP code / size)", key="src_addterm").strip()
         cands = search_items(fac, term2)[:30] if len(term2) >= 2 else []
-        lab = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · stock {float(r['stock']):g}": r for r in cands}
+        lab = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']} · stock {float(r['stock']):g}": r for r in cands}
         pk = st.selectbox("Item", list(lab) if lab else ["— age item khujun —"], key="src_addpick")
         a1, a2 = st.columns([1, 3])
         aq = a1.number_input("Qty", min_value=0.0, step=1.0, format="%g", key="src_addqty")
@@ -15525,7 +15559,7 @@ def _ri_form():
             cands = cand_rows
         else:
             cands = search_items(fac, term)[:30] if len(term) >= 2 else []
-        labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · স্টক {float(r['stock']):g}": r for r in cands}
+        labels = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']} · স্টক {float(r['stock']):g}": r for r in cands}
         pick = a2.selectbox(f"আইটেম ({len(labels)}টি)" if labels else "আইটেম", list(labels) if labels else ["— আগে Category বা নাম খুঁজুন —"],
                             key=f"ri_pick_{gen}")
         qty_in = a3.number_input("পরিমাণ", min_value=0.0, step=1.0, format="%g", key=f"ri_qty_{gen}")
@@ -15864,7 +15898,7 @@ def _rr_form():
                             ORDER BY item_name, size LIMIT 400""", (fac, cat_sel, term, like, like, like, like, term))
         else:
             cands = search_items(fac, term)[:30] if len(term) >= 2 else []
-        labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · স্টক {float(r['stock']):g}": r for r in cands}
+        labels = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']} · স্টক {float(r['stock']):g}": r for r in cands}
         pick = a2.selectbox(f"আইটেম ({len(labels)}টি)" if labels else "আইটেম", list(labels) if labels else ["— আগে Category বা নাম খুঁজুন —"],
                             key=f"rr_pick_{gen}")
         a3.number_input("পরিমাণ", min_value=0.0, step=1.0, format="%g", key=f"rr_qty_{gen}")
@@ -16374,7 +16408,7 @@ def _ri_fix_panel():
             st.markdown("**📨 Slip-e ekta item bhule gele: add-er request pathan** (manager approve korle oi SR-e jog hobe)")
             t_ = st.text_input("Item khujun (nam / ERP code / size)", key="rifix_addterm").strip()
             cands = search_items(fac, t_)[:30] if len(t_) >= 2 else []
-            lab = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · stock {float(r['stock']):g}": r for r in cands}
+            lab = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']} · stock {float(r['stock']):g}": r for r in cands}
             pk = st.selectbox("Item", list(lab) if lab else ["— age item khujun —"], key="rifix_addpick")
             a1, a2 = st.columns([1, 3])
             aq = a1.number_input("Qty", min_value=0.0, step=1.0, format="%g", key="rifix_addqty")
@@ -16817,7 +16851,7 @@ def _gp_receive_form():
     a1, a2, a3 = st.columns([2.6, 1.6, 1])
     term = a1.text_input("🔍 খুঁজুন (নাম / ERP code / size / serial)", key=f"gp_search_{gen}").strip()
     cands = search_items(fac, term)[:30] if len(term) >= 2 else []
-    labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · স্টক {float(r['stock']):g}": r for r in cands}
+    labels = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']} · স্টক {float(r['stock']):g}": r for r in cands}
     pick = a2.selectbox("আইটেম", list(labels) if labels else ["— আগে খুঁজুন —"], key=f"gp_pick_{gen}")
     a3.number_input("পরিমাণ", min_value=0.0, step=1.0, format="%g", key=f"gp_qty_{gen}")
 
@@ -16859,7 +16893,7 @@ def _gp_receive_form():
     for i, ln in enumerate(lines):
         r = st.columns([0.4, 3.4, 1.2, 1.1, 1.4, 0.7])
         r[0].write(i + 1)
-        r[1].write(f"{ln['name']} [{ln['size'] or '-'}]")
+        r[1].write(f"{ln['name']} [{ln['size'] or '-'}]{_uom_tag(ln)}")
         r[2].write(ln["pid"])
         r[3].write(f"{ln['stock']:g}")
         q_ = r[4].number_input("q", min_value=0.0, step=1.0, format="%g", key=f"gp_q_{gen}_{ln['sl']}", label_visibility="collapsed")
@@ -17120,7 +17154,7 @@ def _gp_manage():
             new_rem = st.text_input("Remarks", value=lots[0]["remarks"], key=f"gp_e_rem_{k}")
             new_qty = {}
             for r in lots:
-                new_qty[int(r["id"])] = st.number_input(f"{r['item_name']} [{r['size'] or '-'}] — পরিমাণ", min_value=0.0, step=1.0,
+                new_qty[int(r["id"])] = st.number_input(f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} — পরিমাণ", min_value=0.0, step=1.0,
                                                         format="%g", value=float(r["qty"]), key=f"gp_e_q_{r['id']}")
             st.caption("নতুন আইটেম যোগ করতে: '📥 Gate Pass গ্রহণ'-এ একই Gate Pass No দিয়ে আইটেম যোগ করুন।")
             pw_ok = mgr_check(f"gp_e_pw_{k}")
@@ -22584,7 +22618,7 @@ def tab_item_audit():
     if not items:
         st.warning("এই নামে কোনো item পাওয়া যায়নি।")
         return
-    labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id'] or '-'} · {short_fac(r['factory_name'])} · SL {r['sl_no']}": r for r in items}
+    labels = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id'] or '-'} · {short_fac(r['factory_name'])} · SL {r['sl_no']}": r for r in items}
     pick = st.selectbox(f"{len(items)}টি item পাওয়া গেছে — একটি বাছুন", list(labels), key="ia_pick")
     item = labels[pick]
     fac, sl = item["factory_name"], int(item["sl_no"])
@@ -22845,7 +22879,7 @@ def _wr_view_add(fac):
         d = parse_date(r["date"])
         if r["has"] or not d or d.date() < cutoff:
             continue
-        opts[f"{r['date']} · {r['item']} [{r['size'] or '-'}] · {float(r['qty']):g} · {r['supplier'] or '-'} · Challan {r['challan'] or '-'}"] = r
+        opts[f"{r['date']} · {r['item']} [{r['size'] or '-'}]{_uom_tag(r)} · {float(r['qty']):g} · {r['supplier'] or '-'} · Challan {r['challan'] or '-'}"] = r
     if not opts:
         st.info("এই সময়ে ওয়ারেন্টি-ছাড়া কোনো Supplier Receipt নেই।")
         return
@@ -23006,7 +23040,7 @@ def _scrap_entry(fac):
         g1, g2 = st.columns(2)
         term = g1.text_input("🔗 কোন Issue-করা আইটেম থেকে এই স্ক্র্যাপ? (ঐচ্ছিক, নাম/code লিখুন)", key="sc_link_term").strip()
         cands = search_items(fac, term)[:30] if len(term) >= 2 else []
-        labs = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']}": int(r["sl_no"]) for r in cands}
+        labs = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']}": int(r["sl_no"]) for r in cands}
         lp = g2.selectbox("আইটেম লিংক", ["— লিংক নেই —"] + list(labs), key="sc_link_pick")
         sl = labs.get(lp)
     notes = st.text_input("নোট", key="sc_notes").strip()
@@ -25380,7 +25414,7 @@ def tab_item_journey():
     if not items:
         st.warning("এই নামে কোনো item পাওয়া যায়নি।")
         return
-    labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id'] or '-'} · {short_fac(r['factory_name'])} · SL {r['sl_no']}": r for r in items}
+    labels = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id'] or '-'} · {short_fac(r['factory_name'])} · SL {r['sl_no']}": r for r in items}
     item = labels[st.selectbox(f"{len(items)}টি item পাওয়া গেছে — একটি বাছুন", list(labels), key="ij_pick")]
     fac, sl, unit = item["factory_name"], int(item["sl_no"]), item["unit"]
     d1, d2, plabel = report_period("ij", label="📅 সময়কাল (মাস / তারিখ)")
