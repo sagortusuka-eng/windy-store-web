@@ -22614,6 +22614,84 @@ def ia_pack_revert(cid, fac, sl):
     return True
 
 
+# ============================================================
+#  ITEM AUDIT - UNIT LABEL CHANGE (NEW, ADDITIVE). The item's Unit label is wrong (e.g. YDS) while every Receipt / Issue / Opening qty was
+#  really entered in another unit (e.g. KG). Only the label changes - no qty is multiplied or divided - in this unit and, optionally,
+#  in the matching item of the other unit. Optionally the stock can be set right afterwards (recorded as a Stock Adjustment).
+# ============================================================
+@tx
+def ia_unit_relabel(rows, new_unit, reason):
+    """rows = [(factory, sl_no)]. Label only: inventory.unit_name (+ the unit text of still-pending SR lines)."""
+    new_unit = _pk_ensure_uom(new_unit)
+    has_pend = _ia_has_table("ri_pending_issues")
+    for f_, s_ in rows:
+        old = q("SELECT COALESCE(unit_name,'') AS u, item_name, prod_id FROM inventory WHERE factory_name=%s AND sl_no=%s FOR UPDATE", (f_, int(s_)))
+        if not old:
+            continue
+        old = old[0]
+        run("UPDATE inventory SET unit_name=%s WHERE factory_name=%s AND sl_no=%s", (new_unit, f_, int(s_)))
+        if has_pend:
+            run("UPDATE ri_pending_issues SET unit=%s WHERE factory_name=%s AND sl_no=%s", (new_unit, f_, int(s_)))
+        audit("ITEM_UNIT_RELABEL", f"{f_}: {old['prod_id']} ({old['item_name']}) SL {int(s_)}: Unit {old['u'] or '-'} -> {new_unit} "
+                                   f"(label only, no qty changed). Reason: {reason}")
+    return True
+
+
+def _ia_unit_panel(item, an, trf, gen):
+    fac, sl = item["factory_name"], int(item["sl_no"])
+    stock, unit = float(item["stock"]), item["unit"]
+    with st.expander(f"🔤 Unit change (label only) — {unit} → KG, duita unit-e", expanded=False):
+        st.caption("Jodi ei item-er sob Receipt / Issue / Opening qty already onno unit-e (jemon KG) likha thake, kintu item-er **Unit label** bhul (jemon YDS) thake, "
+                   "ekhane label ta thik korun. **Kono qty gun / bhag hoy na** — shudhu Unit-er nam bodlay (ager SR slip-er qty jemon ache temon thakbe). "
+                   "Qty-ke ek unit theke onno unit-e convert korte hole 'Pack → Pcs setup' bebohar korun.")
+        ulist = list(get_uoms())
+        nunit = st.selectbox("Notun Unit", ulist, index=ulist.index("Kg") if "Kg" in ulist else 0, key=f"ia_un_u_{sl}_{gen}")
+        ofac = other_factory(fac)
+        other = None
+        try:
+            other = find_same_in_other(item["prod_id"], item["item_name"], ofac, item["size"])
+        except Exception:
+            other = None
+        both = False
+        if other:
+            ounit = _unit_of(ofac, other["sl_no"])
+            both = st.checkbox(f"🏭 {short_fac(ofac)}-er matching item-eo Unit '{nunit}' korun — {other['item_name']} [{other['size'] or '-'}] · {other['prod_id']} "
+                               f"· ekhon unit {ounit} · stock {float(other['stock'] or 0):g} (stock qty bodlabe na)", value=True, key=f"ia_un_b_{sl}_{gen}")
+        else:
+            st.caption(f"{short_fac(ofac)}-e matching item paoa jayni — shudhu ei unit-er item-er Unit bodlabe.")
+        st.markdown(f'<div class="ia-note info">Ei unit: Unit <b>{_ia_e(unit)}</b> → <b>{_ia_e(nunit)}</b> · stock {_ia_g(stock)} (label chhara kichu bodlabe na)'
+                    + (f' · {_ia_e(short_fac(ofac))}: Unit <b>{_ia_e(_unit_of(ofac, other["sl_no"]))}</b> → <b>{_ia_e(nunit)}</b>' if both else "") + '</div>',
+                    unsafe_allow_html=True)
+        base_q = max(float(an["open_q"]) + float(an["rec"]) - float(an["iss"]), 0.0)
+        setq = st.checkbox(f"⚖️ Ei unit-er stock-o ekhon {nunit}-te set korun (Stock Adjustment hishebe lekha thakbe — ager entry mochha hobe na)", key=f"ia_un_s_{sl}_{gen}")
+        want = stock
+        if setq:
+            st.caption(f"Transaction hishab: Opening {_ia_g(an['open_q'])} + Receipt {_ia_g(an['rec'])} − Issue {_ia_g(an['iss'])} = {_ia_g(base_q)} · "
+                       f"Transfer IN {_ia_g(an['t_in'])} / OUT {_ia_g(an['t_out'])} (Transfers tab-e dekhun). Shelf-e ja pawa jay seta likhun.")
+            want = st.number_input(f"Physical stock ({nunit})", min_value=0.0, value=float(base_q), step=0.1, format="%g", key=f"ia_un_q_{sl}_{gen}")
+        reason = st.text_input("Karon (badhyotamulok)", key=f"ia_un_r_{sl}_{gen}", placeholder="jemon: item KG-te receive / issue hoy, label bhul YDS chhilo")
+        pw_ok = mgr_check(f"ia_un_pw_{sl}_{gen}")
+        conf = confirm_box(f"ia_un_cf_{sl}_{gen}", f"⚠️ Ami nishchit — ei item-er ager sob qty already {nunit} hishabei lekha (convert korar dorkar nei).")
+        if st.button("🔤 Unit change korun", type="primary", key=f"ia_un_go_{sl}_{gen}"):
+            if str(nunit).strip().lower() == str(unit).strip().lower() and not both and not (setq and abs(want - stock) > 1e-9):
+                st.warning("Unit ager-i ei; kichu bodlanor nei.")
+            elif not reason.strip():
+                st.error("Karon likhun.")
+            elif not pw_ok:
+                st.error("Manager password thik nei.")
+            elif not conf:
+                st.error("Confirm tick din.")
+            elif guard():
+                rows_ = [(fac, sl)] + ([(ofac, int(other["sl_no"]))] if both and other else [])
+                if ia_unit_relabel(rows_, nunit, reason.strip()):
+                    msg = f"✅ Unit {unit} → {nunit} hoyeche" + (f" ({short_fac(fac)} + {short_fac(ofac)})" if len(rows_) > 1 else "") + "; kono qty bodlayni."
+                    if setq and abs(want - stock) > 1e-9:
+                        if pc_adjust_to_count(fac, sl, float(want), "ItemAudit", f"Unit change to {nunit}: {reason.strip()}"):
+                            msg += f" Stock {_ia_g(stock)} → {_ia_g(want)} {nunit} (Stock Adjustment)."
+                    st.session_state["ia_gen"] = gen + 1
+                    done(msg)
+
+
 def _ia_pack_panel(item, an, trf, gen):
     fac, sl = item["factory_name"], int(item["sl_no"])
     stock, unit = float(item["stock"]), item["unit"]
@@ -22856,6 +22934,7 @@ def tab_item_audit():
 
     _ia_fix_panel(item, an, diff_ok, gen)
     _ia_pack_panel(item, an, trf, gen)
+    _ia_unit_panel(item, an, trf, gen)
     sec = lazy_tab_select(["🧾 Transactions", "📑 SR / Requisition", "🔁 Transfers", "🕵️ Audit trail"], "lz_ia")
     if sec == 0:
         if txa.empty:
