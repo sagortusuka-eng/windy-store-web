@@ -16262,12 +16262,71 @@ def _ri_quick_form():
                             disabled=["Item", "Size", "ERP Code", "UOM", "Stock"],
                             column_config={"Issue Qty": st.column_config.NumberColumn("Issue Qty ✍️", min_value=0.0, step=1.0, format="%g"),
                                            "Stock": st.column_config.NumberColumn("Stock", format="%g")})
+    # ---- regular list-e nei emon (uncommon) item: ei-i slip-e jog korun, alada SR lagbe na
+    extras = st.session_state.setdefault("qi_extra", [])
+    ex, effx = {}, {}
+    with st.expander(f"➕ Regular list-e nei emon item ei slip-e jog korun ({len(extras)} ti jog hoyeche)", expanded=bool(extras)):
+        _have = {int(r["sl_no"]) for r in reg} | {int(x) for x in extras}
+        e1, e2, e3, e4 = st.columns([1.5, 3, 0.9, 0.9])
+        xterm = e1.text_input("🔍 Nam / code / size", key=f"qi_xt_{gen}").strip()
+        xc = [r for r in (search_items(fac, xterm)[:30] if len(xterm) >= 2 else []) if int(r["sl_no"]) not in _have]
+        xl = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · stock {float(r['stock']):g}": int(r["sl_no"]) for r in xc}
+        e2.selectbox(f"Item ({len(xl)} ti)" if xl else "Item", list(xl) if xl else ["— age nam likhe khujun —"], key=f"qi_xp_{gen}")
+        e3.number_input("Qty", min_value=0.0, step=1.0, format="%g", key=f"qi_xq0_{gen}")
+
+        def _add_x():
+            pk = st.session_state.get(f"qi_xp_{gen}")
+            qv_ = float(st.session_state.get(f"qi_xq0_{gen}") or 0)
+            if pk in xl and qv_ > 0:
+                sl_ = xl[pk]
+                st.session_state["qi_extra"] = list(st.session_state.get("qi_extra", [])) + [sl_]
+                st.session_state[f"qi_xq_{gen}_{sl_}"] = qv_
+                st.session_state[f"qi_xt_{gen}"] = ""
+                st.session_state[f"qi_xq0_{gen}"] = 0.0
+            else:
+                st.session_state["qi_xmsg"] = "Item bachun ar qty 0-r beshi din."
+        e4.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
+        e4.button("➕ Jog", key=f"qi_xadd_{gen}", on_click=_add_x, use_container_width=True)
+        _xm = st.session_state.pop("qi_xmsg", None)
+        if _xm:
+            st.error(_xm)
+        if extras:
+            ex = {int(r["sl_no"]): r for r in q("""SELECT sl_no, COALESCE(prod_id,'') AS prod_id, COALESCE(item_name,'') AS item_name, COALESCE(size,'') AS size,
+                                                        COALESCE(current_stock,0) AS stock, COALESCE(NULLIF(TRIM(unit_name),''),'Pcs') AS unit,
+                                                        COALESCE(unit_price,0) AS price
+                                                 FROM inventory WHERE factory_name=%s AND sl_no = ANY(%s)""", (fac, [int(x) for x in extras]))}
+            effx = {}
+            if tx_date < local_now().date():
+                try:
+                    effx = stock_asof_many(fac, [int(x) for x in extras], tx_date, cached=True)
+                except Exception:
+                    effx = {}
+            for sl_ in list(extras):
+                r = ex.get(int(sl_))
+                if not r:
+                    continue
+                x1, x2, x3, x4 = st.columns([3.4, 1.2, 1.2, 0.6])
+                x1.write(f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']}")
+                x2.write(f"stock {float(effx.get(int(sl_), r['stock'])):g}")
+                x3.number_input("q", min_value=0.0, step=1.0, format="%g", key=f"qi_xq_{gen}_{sl_}", label_visibility="collapsed")
+                if x4.button("✖", key=f"qi_xrm_{gen}_{sl_}", help="Ei item bad din"):
+                    extras.remove(sl_)
+                    st.session_state["qi_extra"] = extras
+                    try:
+                        st.rerun(scope="fragment")
+                    except TypeError:
+                        st.rerun()
     sel = []
     for r, (_, row) in zip(reg, ed.iterrows()):
         qv = row["Issue Qty"]
         qv = 0.0 if qv is None or qv != qv else float(qv)
         if qv > 0:
             sel.append((r, qv, float(eff.get(int(r["sl_no"]), r["stock"]))))
+    for sl_ in extras:
+        r = ex.get(int(sl_))
+        qv = float(st.session_state.get(f"qi_xq_{gen}_{sl_}") or 0)
+        if r and qv > 0:
+            sel.append((r, qv, float(effx.get(int(sl_), r["stock"])) if tx_date < local_now().date() else float(r["stock"])))
     # ---- stock kom hole: onno unit theke auto-transfer (same rule as the 📤 Issue tab); tick must stay ON for the line to save
     short, xfer = [], {}
     xcache = st.session_state.setdefault("ri_other_cache", {})
@@ -16347,6 +16406,7 @@ def _ri_quick_form():
                 st.session_state["ri_saved"] = {"user": _who, "sr": sr_no, "n": int(n), "qty": float(sum(qv for _, qv, _ in sel)),
                                                 "section": section, "time": local_now().strftime("%d-%b-%Y %I:%M %p"), "kind": "save"}
                 st.session_state["qi_gen"] = gen + 1
+                st.session_state["qi_extra"] = []
                 done(f"✅ {_who}, apnar data sofolbhabe save hoyeche - SR {sr_no}: {n}টি আইটেম ইস্যু হয়েছে"
                      + (f" · Section: {section}" if section else "") + ", স্টক কমেছে।"
                      + (f" 🔁 Auto-transfer (apni tick diyechilen): {st.session_state.pop('_ri_xfer_note')}." if st.session_state.get("_ri_xfer_note") else ""))
