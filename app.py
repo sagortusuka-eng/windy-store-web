@@ -14991,6 +14991,35 @@ def _ri_sr_center():
         _ri_item_trail_ui(fac, _pairs, key="srt")
 
 
+@tx
+def rename_item_name_only(fac, sl, new_name, reason):
+    """Changes ONLY the item NAME (inventory + the name shown on its transactions / requisition / pending rows).
+    Stock, qty, rate, ERP code, size, unit - nothing else is touched, no stock is moved."""
+    new_name = (new_name or "").strip()
+    rows = q("SELECT item_name, COALESCE(size,'') AS size, prod_id FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE", (sl, fac))
+    if not rows:
+        raise ValueError("Inventory item paoa jay nai.")
+    old_name, size, code = rows[0]["item_name"], rows[0]["size"], rows[0]["prod_id"]
+    if not new_name:
+        raise ValueError("Notun nam khali rakha jabe na.")
+    if new_name == old_name:
+        return True
+    dups = [r for r in q("SELECT item_name, COALESCE(size,'') AS size FROM inventory WHERE factory_name=%s AND sl_no<>%s", (fac, sl))
+            if norm_name(r["item_name"]) == norm_name(new_name) and norm_size(r["size"]) == norm_size(size)]
+    if dups:
+        raise ValueError(f"'{new_name}' [{size or 'no size'}] {fac}-e ager-i onno item hishebe ache - ekoi nam duibar rakha jabe na.")
+    who = st.session_state.get("user", "")
+    run("UPDATE inventory SET item_name=%s WHERE sl_no=%s AND factory_name=%s", (new_name, sl, fac))
+    run("UPDATE transactions SET item_name=%s WHERE sl_no=%s AND factory_name=%s", (new_name, sl, fac))
+    run("UPDATE requisition_tracking SET item_name=%s WHERE factory_name=%s AND prod_id=%s", (new_name, fac, code))
+    try:
+        run("UPDATE ri_pending_issues SET item_name=%s WHERE factory_name=%s AND sl_no=%s", (new_name, fac, sl))
+    except Exception:
+        pass
+    audit("RENAME_ITEM_NAME_ONLY", f"{fac} SL {sl} [{code}]: name '{old_name}' -> '{new_name}' by {who} (name only, no stock change) - {reason}")
+    return True
+
+
 @_frag   # typing / picking inside the Challan Center re-runs ONLY this block
 def _ri_challan_center():
     """Challan Center (like SR Center, for Supplier Receipts): find a received challan, see what was received, add the item(s)
@@ -15048,8 +15077,8 @@ def _ri_challan_center():
                                 "Rate": float(r["rate"] or 0) or None, "Date": r["date"], "Received by": r["officer_name"],
                                 "Pore add": "➕ Yes" if "Added later" in r["notes"] else ""} for r in lines]),
                  hide_index=True, use_container_width=True, height=min(80 + 36 * len(lines), 340))
-    t = lazy_tab_select(["➕ Baki item receive korun", "✏️ Received line thik korun", "📝 Challan header (No / Supplier / Date)",
-                         "🔎 Item details (stock trail)"], "lz_cc")
+    t = lazy_tab_select(["➕ Baki item receive korun", "✏️ Received line thik korun", "🏷️ Item nam thik korun (shudhu nam)",
+                         "📝 Challan header (No / Supplier / Date)", "🔎 Item details (stock trail)"], "lz_cc")
     on_challan = {int(r["sl_no"]) for r in lines}
 
     if t == 0:
@@ -15143,7 +15172,7 @@ def _ri_challan_center():
                     for ln in dels:
                         stk = q("SELECT COALESCE(current_stock,0) AS s FROM inventory WHERE sl_no=%s AND factory_name=%s", (ln["sl_no"], fac))
                         if stk and float(stk[0]["s"]) < float(ln["qty"] or 0) - 1e-9:
-                            raise ValueError(f"{ln['item_name']}: line bad dile stock negative hoye jabe (mal ager-i issue hoyeche)")
+                            raise ValueError(f"{ln['item_name']}: line bad dile stock negative hoye jabe (mal ager-i issue hoyeche). Shudhu nam vul hole '🏷️ Item nam thik korun' tab use korun")
                         if not delete_transaction(int(ln["id"])):
                             raise ValueError("ekta line delete hoyni (upore error dekhun)")
                         n_del += 1
@@ -15158,6 +15187,59 @@ def _ri_challan_center():
                 done(f"✅ {who}, {label}: {n_edit} qty bodlano, {n_del} line bad.")
 
     elif t == 2:
+        st.caption("Vul nam-e item receive hoyeche (ar issue-o hoye geche, tai bad deya jacche na)? Ekhane shudhu **NAM** bodlay - "
+                   "stock, qty, rate, ERP code, transaction kichu bodlay na.")
+        by_sl = {}
+        for r in lines:
+            by_sl.setdefault(int(r["sl_no"]), r)
+        lbl = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']}": sl_ for sl_, r in by_sl.items()}
+        pick_ln = st.selectbox("Kon item-er nam thik korben?", list(lbl), key="cc_rn_line")
+        rn_sl = lbl[pick_ln]
+        cur_name = by_sl[rn_sl]["item_name"]
+        oth = other_factory(fac)
+        src = st.radio("Notun nam kothay theke?", [f"📋 {oth}-er item nam theke bachun", "✍️ Nijer hate likhun"], horizontal=True, key="cc_rn_src")
+        new_name = ""
+        if src.startswith("📋"):
+            ftxt = st.text_input(f"{oth}-er nam khujun (filter)", key="cc_rn_filter").strip()
+            nm = [r["item_name"] for r in q("""SELECT DISTINCT item_name FROM inventory WHERE factory_name=%s AND COALESCE(item_name,'')<>''
+                                              AND (%s='' OR item_name ILIKE %s) ORDER BY item_name LIMIT 150""", (oth, ftxt, f"%{ftxt}%"))]
+            if nm:
+                new_name = st.selectbox(f"{oth}-er nam ({len(nm)}ti)", nm, key="cc_rn_pick")
+            else:
+                st.info(f"{oth}-e ei filter-e kono nam nei.")
+        else:
+            new_name = st.text_input("Notun nam", key="cc_rn_manual").strip()
+        if new_name:
+            st.markdown(f"**{cur_name}** ➜ **{new_name}**")
+        why = st.text_input("Karon likhun *", key="cc_rn_why", placeholder="jemon: vul nam-e entry hoyechilo").strip()
+        pw_ok = mgr_check("cc_rn_pw")
+        conf = confirm_box("cc_rn_conf", "⚠️ Ami confirm korchi - shudhu nam bodlabe, stock ba onno kichu bodlabe na.")
+        if st.button("🏷️ Nam save korun", type="primary", key="cc_rn_btn", disabled=not can_write):
+            if not new_name:
+                st.error("Notun nam bachun ba likhun.")
+            elif new_name == cur_name:
+                st.info("Kono poriborton nei - nam ager-i ekoi.")
+            elif len(why) < 3:
+                st.error("Karon likhun (kom-pokkhe 3 akkhor).")
+            elif not pw_ok:
+                st.error("Store Manager password din.")
+            elif not conf:
+                st.error("Confirm tick din.")
+            elif guard():
+                try:
+                    ok = rename_item_name_only(fac, rn_sl, new_name, why)
+                except ValueError as ex:
+                    st.error(str(ex))
+                    ok = False
+                if ok:
+                    who = st.session_state.get("user", "")
+                    st.session_state["ri_saved"] = {"user": who, "sr": label, "kind": "fix", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
+                                                    "detail": f"nam bodlano: {cur_name} ➜ {new_name}"}
+                    for k_ in ("cc_rn_pw", "cc_rn_conf", "cc_rn_why"):
+                        st.session_state.pop(k_, None)
+                    done(f"✅ {who}, nam bodlano hoyeche: {cur_name} ➜ {new_name} (stock / transaction ager moto-i).")
+
+    elif t == 3:
         if len(dates) > 1:
             st.caption("📅 Ei challan-er line-gulor tarikh alada (" + ", ".join(str(d) for d in dates) + "). Header save korle sob line-er tarikh ekoi hoye jabe.")
         _tx_header_edit("rec", fac, [ln["id"] for ln in lines], ch, sup, lines[0]["date"], "cch_" + re.sub(r"\W+", "_", f"{ch}|{sup}"))
