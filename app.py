@@ -26106,6 +26106,9 @@ if _pg in ("count", "physical", "physical-count") and not st.session_state.get("
 NAV_ITEM_JOURNEY = "🧭 Item Journey (A–Z)"
 if NAV_ITEM_JOURNEY not in TAB_NAMES:   # must be registered BEFORE the guard below, else a click on it is reset to Dashboard
     TAB_NAMES.append(NAV_ITEM_JOURNEY)
+NAV_EDIT_CENTER = "🛠️ Edit Center (A–Z)"
+if NAV_EDIT_CENTER not in TAB_NAMES:    # registered right after Item Journey -> its renderer is appended right after tab_item_journey
+    TAB_NAMES.append(NAV_EDIT_CENTER)
 if st.session_state.get(NAV_KEY) not in TAB_NAMES:
     st.session_state[NAV_KEY] = TAB_NAMES[0]  # Dashboard is the first page for new sessions.
 
@@ -26396,12 +26399,646 @@ def tab_item_journey():
         export_buttons(df, f"item_journey_timeline_{sl}")
 
 
+# =====================================================================================================================
+#  EDIT CENTER (A-Z)  -  ONE place to correct anything about an item and its transactions: name, size, ERP code, UOM, category,
+#  department, unit price, serial  +  per transaction line: rate, qty, date, remarks, challan, supplier, SR no, section, delete.
+#  ADDITIVE ONLY: reuses update_item / pc_edit_tx / update_tx_fields / delete_transaction (all stock-safe + audited).
+#  Every change needs the Store Manager password and a reason.
+# =====================================================================================================================
+@tx
+def update_tx_rate(tid, new_rate, reason):
+    """Changes ONLY the rate (price at transaction) of one line. No stock / qty effect."""
+    rows = q("SELECT * FROM transactions WHERE id=%s FOR UPDATE", (int(tid),))
+    if not rows:
+        raise ValueError("Transaction paoa jay nai.")
+    t = rows[0]
+    old = t.get("unit_price_at_tx")
+    new = float(new_rate)
+    who = st.session_state.get("user", "")
+    note = f"{(t['notes'] or '').strip()} [Rate {float(old or 0):g} -> {new:g} by {who}: {reason}]".strip()
+    run("UPDATE transactions SET unit_price_at_tx=%s, notes=%s WHERE id=%s", (new, note, int(tid)))
+    audit("EDIT_TX_RATE", f"{t['factory_name']} tx {tid} {t['trans_type']} {t['prod_id']} ({t['item_name']}): rate {float(old or 0):g} -> {new:g} by {who} - {reason}")
+    return True
+
+
+@tx
+def update_tx_rates_bulk(ids, new_rate, reason):
+    """Same rate on many lines of one item (e.g. a wrong price was used for months). Rate only - no stock / qty effect."""
+    who = st.session_state.get("user", "")
+    n, first = 0, None
+    for tid in ids:
+        rows = q("SELECT * FROM transactions WHERE id=%s FOR UPDATE", (int(tid),))
+        if not rows:
+            continue
+        t = rows[0]
+        old = t.get("unit_price_at_tx")
+        note = f"{(t['notes'] or '').strip()} [Rate {float(old or 0):g} -> {float(new_rate):g} by {who}: {reason}]".strip()
+        run("UPDATE transactions SET unit_price_at_tx=%s, notes=%s WHERE id=%s", (float(new_rate), note, int(tid)))
+        first = first or t
+        n += 1
+    if first:
+        audit("EDIT_TX_RATE_BULK", f"{first['factory_name']} {first['prod_id']} ({first['item_name']}): rate set to {float(new_rate):g} on {n} line(s) by {who} - {reason}")
+    return n
+
+
+def _ec_items():
+    fac = FAC
+    can_write = can_write_ri()
+    who = st.session_state.get("user", "")
+    gen = st.session_state.get("ec_gen", 0)
+
+    term = st.text_input("🔍 Item khujun (nam / ERP code / size / serial)", key="ec_term", placeholder="kom-pokkhe 2 akkhor").strip()
+    cands = search_items(fac, term)[:40] if len(term) >= 2 else []
+    if not cands:
+        st.info("Item khujun - tarpor ekhane sob edit korte parben.")
+        return
+    lab = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']} · stock {float(r['stock']):g}": int(r["sl_no"]) for r in cands}
+    sl = lab[st.selectbox(f"Item ({len(lab)}ti)", list(lab), key="ec_pick")]
+    inv = q("SELECT * FROM inventory WHERE sl_no=%s AND factory_name=%s", (sl, fac))
+    if not inv:
+        st.warning("Item paoa jayni (ager-i delete hoye thakte pare).")
+        return
+    it = inv[0]
+    e = html_lib.escape
+    st.markdown(f'<div class="rq-hero"><div><div class="rq-eyebrow">ITEM</div><div class="rq-title">{e(str(it["item_name"]))}</div>'
+                f'<div class="rq-meta"><span>🔖 {e(str(it["prod_id"]))}</span><span>📐 {e(str(it.get("size") or "-"))}</span>'
+                f'<span>📦 stock {float(it.get("current_stock") or 0):g} {e(str(it.get("unit_name") or ""))}</span>'
+                f'<span>💰 ৳{float(it.get("unit_price") or 0):g}</span></div></div></div>', unsafe_allow_html=True)
+    t = lazy_tab_select(["📦 Item details (nam · size · price ...)", "🧾 Transaction line (rate · qty · date · challan ...)"], "lz_ec")
+
+    # ------------------------------------------------------------------ item details
+    if t == 0:
+        st.caption("Stock (Physical / ERP) ekhane bodlay na - stock thik korte Physical Count / Stock Adjustment use korun. "
+                   "Nam / ERP code bodlale oi item-er sob transaction-e notun nam dekhabe.")
+        uoms = get_uoms()
+        cur_u = it.get("unit_name") or ""
+        a1, a2, a3 = st.columns(3)
+        n_name = a1.text_input("Item Name", value=it["item_name"], key=f"ec_name_{sl}_{gen}").strip()
+        n_size = a2.text_input("Size", value=it.get("size") or "", key=f"ec_size_{sl}_{gen}").strip()
+        n_code = a3.text_input("ERP Code", value=it["prod_id"], key=f"ec_code_{sl}_{gen}").strip()
+        b1, b2, b3 = st.columns(3)
+        n_price = b1.number_input("Unit Price (৳)", min_value=0.0, step=1.0, format="%g", value=float(it.get("unit_price") or 0), key=f"ec_price_{sl}_{gen}")
+        n_unit = b2.selectbox("UOM", uoms if cur_u in uoms else uoms + [cur_u], index=(uoms.index(cur_u) if cur_u in uoms else len(uoms)), key=f"ec_unit_{sl}_{gen}")
+        n_serial = b3.text_input("Serial No", value=it.get("serial_no") or "", key=f"ec_serial_{sl}_{gen}").strip()
+        c1, c2 = st.columns(2)
+        n_cat = c1.text_input("Category", value=it.get("category") or "", key=f"ec_cat_{sl}_{gen}").strip()
+        n_dept = c2.text_input("Department", value=it.get("department") or "", key=f"ec_dept_{sl}_{gen}").strip()
+        why = st.text_input("Karon likhun *", key=f"ec_why0_{gen}", placeholder="jemon: price vul chilo / size likha hoyni").strip()
+        pw_ok = mgr_check(f"ec_pw0_{gen}")
+        conf = confirm_box(f"ec_cf0_{gen}", "⚠️ Ami confirm korchi - ei item-er details bodlabe (stock bodlabe na).")
+        if st.button("💾 Item save korun", type="primary", key=f"ec_save0_{gen}", disabled=not can_write):
+            changed = (n_name != it["item_name"] or n_size != (it.get("size") or "") or n_code != it["prod_id"] or abs(n_price - float(it.get("unit_price") or 0)) > 1e-9
+                       or n_unit != cur_u or n_serial != (it.get("serial_no") or "") or n_cat != (it.get("category") or "") or n_dept != (it.get("department") or ""))
+            if not n_name:
+                st.error("Item Name khali rakha jabe na.")
+            elif not changed:
+                st.info("Kono poriborton nei.")
+            elif len(why) < 3:
+                st.error("Karon likhun (kom-pokkhe 3 akkhor).")
+            elif not pw_ok:
+                st.error("Store Manager password din.")
+            elif not conf:
+                st.error("Confirm tick din.")
+            elif guard():
+                if update_item(fac, sl, it["prod_id"], it["item_name"], n_code or it["prod_id"], n_name, n_size, n_dept, n_cat,
+                               float(it.get("erp_stock") or 0), float(it.get("current_stock") or 0), float(n_price), n_unit, n_serial):
+                    audit("EDIT_ITEM_EDIT_CENTER", f"{fac} SL {sl}: edited by {who} (Edit Center) - {why}")
+                    for k_ in (f"ec_pw0_{gen}", f"ec_cf0_{gen}", f"ec_why0_{gen}"):
+                        st.session_state.pop(k_, None)
+                    st.session_state["ec_gen"] = gen + 1
+                    done(f"✅ {who}, {n_name} [{n_size or '-'}] save hoyeche (price ৳{n_price:g}).")
+
+    # ------------------------------------------------------------------ transaction lines
+    else:
+        txs = q("""SELECT id, date, time, trans_type, qty, COALESCE(unit_price_at_tx,0) AS rate, COALESCE(challan_no,'') AS challan_no,
+                          COALESCE(supplier_name,'') AS supplier_name, COALESCE(req_no,'') AS req_no, COALESCE(section,'') AS section,
+                          COALESCE(notes,'') AS notes, officer_name
+                   FROM transactions WHERE factory_name=%s AND sl_no=%s ORDER BY id DESC LIMIT 300""", (fac, sl))
+        if not txs:
+            st.info("Ei item-e kono transaction nei.")
+            return
+        st.dataframe(pd.DataFrame([{"ID": r["id"], "Date": r["date"], "Type": TRANS_LABELS.get(r["trans_type"], r["trans_type"]), "Qty": float(r["qty"] or 0),
+                                    "Rate": float(r["rate"] or 0) or None, "Challan": r["challan_no"], "Supplier": r["supplier_name"], "SR": r["req_no"],
+                                    "Section": r["section"], "By": r["officer_name"]} for r in txs]),
+                     hide_index=True, use_container_width=True, height=min(80 + 36 * len(txs), 320))
+        by_id = {int(r["id"]): r for r in txs}
+        tid = st.selectbox("Kon line thik korben?", list(by_id), key="ec_tid",
+                           format_func=lambda i: f"ID {i} · {TRANS_LABELS.get(by_id[i]['trans_type'], by_id[i]['trans_type'])} · qty {float(by_id[i]['qty'] or 0):g} · {by_id[i]['date']}")
+        r0 = by_id[int(tid)]
+        tt = r0["trans_type"]
+        od = parse_date(r0["date"])
+        k = f"{tid}_{gen}"
+        a1, a2, a3 = st.columns(3)
+        n_qty = a1.number_input("Qty", min_value=0.0, step=1.0, format="%g", value=float(r0["qty"] or 0), key=f"ec_q_{k}")
+        n_rate = a2.number_input("Rate / Price (৳)", min_value=0.0, step=1.0, format="%g", value=float(r0["rate"] or 0), key=f"ec_r_{k}")
+        n_date = a3.date_input("Date", value=od.date() if od else date.today(), key=f"ec_d_{k}")
+        n_ch = n_sup = n_sr = n_sec = None
+        b1, b2 = st.columns(2)
+        if tt == "Supplier. Rec":
+            n_ch = b1.text_input("Challan No", value=r0["challan_no"], key=f"ec_ch_{k}").strip()
+            n_sup = b2.text_input("Supplier", value=r0["supplier_name"], key=f"ec_sup_{k}").strip()
+        elif tt in ISSUE_TYPES:
+            n_sr = b1.text_input("SR No", value=r0["req_no"], key=f"ec_sr_{k}").strip()
+            n_sec = b2.text_input("Section", value=r0["section"], key=f"ec_sec_{k}").strip()
+        n_notes = st.text_input("Remarks", value=r0["notes"], key=f"ec_n_{k}")
+        st.caption("Qty bodlale stock ar requisition Received qty oi onujayi thik hoy (stock negative hole bodlano jabe na). Rate bodlale stock bodlay na - "
+                   "shudhu oi line-er price / cost report-e bodlay.")
+        why = st.text_input("Karon likhun *", key=f"ec_why1_{gen}", placeholder="jemon: rate vul chilo").strip()
+        pw_ok = mgr_check(f"ec_pw1_{gen}")
+        conf = confirm_box(f"ec_cf1_{gen}", "⚠️ Ami confirm korchi - ei line-er change gulo save hobe.")
+        if st.button("💾 Line save korun", type="primary", key=f"ec_save1_{gen}", disabled=not can_write):
+            d_s = n_date.strftime(DATE_FMT)
+            q_chg = abs(n_qty - float(r0["qty"] or 0)) > 1e-9
+            r_chg = abs(n_rate - float(r0["rate"] or 0)) > 1e-9
+            f_chg = (d_s != (r0["date"] or "") or n_notes != r0["notes"] or (n_ch is not None and n_ch != r0["challan_no"])
+                     or (n_sup is not None and n_sup != r0["supplier_name"]) or (n_sr is not None and n_sr != r0["req_no"])
+                     or (n_sec is not None and n_sec != r0["section"]))
+            if not (q_chg or r_chg or f_chg):
+                st.info("Kono poriborton nei.")
+            elif q_chg and n_qty <= 0:
+                st.error("Qty 0 kora jabe na - line bad dite hole niche 'Delete' use korun.")
+            elif len(why) < 3:
+                st.error("Karon likhun (kom-pokkhe 3 akkhor).")
+            elif not pw_ok:
+                st.error("Store Manager password din.")
+            elif not conf:
+                st.error("Confirm tick din.")
+            elif guard():
+                done_ = []
+                try:
+                    if q_chg:
+                        if not pc_edit_tx(int(tid), n_qty, r0["date"], f"{r0['notes'].strip()} [Qty {float(r0['qty'] or 0):g} -> {n_qty:g} by {who}: {why}]".strip()):
+                            raise ValueError("Qty change hoyni")
+                        done_.append("qty")
+                    if r_chg:
+                        if not update_tx_rate(int(tid), n_rate, why):
+                            raise ValueError("Rate change hoyni")
+                        done_.append("rate")
+                    if f_chg:
+                        fresh = q("SELECT notes FROM transactions WHERE id=%s", (int(tid),))
+                        keep_notes = n_notes if n_notes != r0["notes"] else (fresh[0]["notes"] if fresh else n_notes)
+                        if not update_tx_fields(int(tid), d_s, keep_notes, challan=n_ch, supplier=n_sup, sr_no=n_sr, section=n_sec):
+                            raise ValueError("Details change hoyni")
+                        done_.append("details")
+                except ValueError as ex:
+                    st.error(f"{ex}  (ei porjonto save hoyeche: {', '.join(done_) or 'kichu na'})")
+                    if done_:
+                        st.rerun()
+                    return
+                audit("EDIT_TX_EDIT_CENTER", f"{fac} tx {tid} ({r0['trans_type']}, SL {sl}): {', '.join(done_)} by {who} (Edit Center) - {why}")
+                for k_ in (f"ec_pw1_{gen}", f"ec_cf1_{gen}", f"ec_why1_{gen}"):
+                    st.session_state.pop(k_, None)
+                st.session_state["ec_gen"] = gen + 1
+                done(f"✅ {who}, line #{tid} save hoyeche ({', '.join(done_)}).")
+
+        with st.expander("🗑 Ei line delete korun (stock revert hobe)"):
+            dconf = confirm_box(f"ec_dcf_{k}", "⚠️ Ami confirm korchi - line delete hobe ar stock oi onujayi thik hobe.")
+            if st.button("🗑 Delete", key=f"ec_del_{k}", disabled=not can_write):
+                if len(why) < 3:
+                    st.error("Upore 'Karon' likhun (kom-pokkhe 3 akkhor).")
+                elif not pw_ok:
+                    st.error("Upore Store Manager password din.")
+                elif not dconf:
+                    st.error("Confirm tick din.")
+                elif guard():
+                    try:
+                        ok = delete_transaction(int(tid))
+                    except ValueError as ex:
+                        st.error(str(ex))
+                        ok = False
+                    if ok:
+                        audit("DELETE_TX_EDIT_CENTER", f"{fac} tx {tid} ({r0['trans_type']}, SL {sl}) deleted by {who} (Edit Center) - {why}")
+                        st.session_state["ec_gen"] = gen + 1
+                        done(f"✅ {who}, line #{tid} delete hoyeche, stock thik kora hoyeche.")
+
+        with st.expander("💰 Ei item-er SOB line-e ekoi rate boshan (shudhu rate, stock bodlabe na)"):
+            rate_rows = [r for r in txs if r["trans_type"] in ("Supplier. Rec",) + tuple(ISSUE_TYPES)]
+            st.caption(f"Ei item-er {len(rate_rows)}ti Receipt / Issue line ache. Rate bodlale budget / cost report-e oi line-er mullo bodlay.")
+            bulk_rate = st.number_input("Notun rate (৳)", min_value=0.0, step=1.0, format="%g", key=f"ec_brate_{gen}")
+            bw = st.text_input("Karon likhun *", key=f"ec_bwhy_{gen}").strip()
+            bpw = mgr_check(f"ec_bpw_{gen}")
+            bcf = confirm_box(f"ec_bcf_{gen}", f"⚠️ Ami confirm korchi - {len(rate_rows)}ti line-er rate ৳{bulk_rate:g} hobe.")
+            if st.button("💰 Sob line-e rate boshan", key=f"ec_bbtn_{gen}", disabled=not can_write):
+                if bulk_rate <= 0:
+                    st.error("Rate 0-r beshi din.")
+                elif len(bw) < 3:
+                    st.error("Karon likhun (kom-pokkhe 3 akkhor).")
+                elif not bpw:
+                    st.error("Store Manager password din.")
+                elif not bcf:
+                    st.error("Confirm tick din.")
+                elif not rate_rows:
+                    st.info("Rate boshanor moto line nei.")
+                elif guard():
+                    n_ = update_tx_rates_bulk([int(r["id"]) for r in rate_rows], bulk_rate, bw)
+                    if n_:
+                        st.session_state["ec_gen"] = gen + 1
+                        done(f"✅ {who}, {n_}ti line-er rate ৳{bulk_rate:g} kora hoyeche.")
+
+
+# ---------------------------------------------------------------- Edit Center: shared helpers
+def _ec_auth(k, what):
+    """Karon + Store Manager password + confirm tick. Returns (why, pw_ok, confirmed)."""
+    why = st.text_input("Karon likhun *", key=f"{k}_why").strip()
+    pw = mgr_check(f"{k}_pw")
+    cf = confirm_box(f"{k}_cf", f"⚠️ Ami confirm korchi - {what}")
+    return why, pw, cf
+
+
+def _ec_auth_ok(why, pw, cf):
+    if len(why) < 3:
+        st.error("Karon likhun (kom-pokkhe 3 akkhor).")
+    elif not pw:
+        st.error("Store Manager password din.")
+    elif not cf:
+        st.error("Confirm tick din.")
+    else:
+        return True
+    return False
+
+
+def _ec_date_txt(label, cur, key):
+    """Date as text (keeps the stored format when untouched). Returns (value_or_None, ok)."""
+    v = st.text_input(label, value=cur or "", key=key, placeholder=local_now().strftime(DATE_FMT)).strip()
+    if v == (cur or ""):
+        return (cur or None), True
+    if not v:
+        return None, True
+    d = parse_date(v)
+    if not d:
+        st.error(f"{label}: tarikh thik nei (jemon {local_now().strftime(DATE_FMT)}).")
+        return None, False
+    return d.strftime(DATE_FMT), True
+
+
+def _ec_pick_item(prefix):
+    term = st.text_input("🔍 Item khujun (nam / ERP code / size / serial)", key=f"{prefix}_term", placeholder="kom-pokkhe 2 akkhor").strip()
+    cands = search_items(FAC, term)[:40] if len(term) >= 2 else []
+    if not cands:
+        st.info("Item khujun.")
+        return None
+    lab = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']} · stock {float(r['stock']):g}": int(r["sl_no"]) for r in cands}
+    sl = lab[st.selectbox(f"Item ({len(lab)}ti)", list(lab), key=f"{prefix}_pick")]
+    rows = q("SELECT * FROM inventory WHERE sl_no=%s AND factory_name=%s", (sl, FAC))
+    return rows[0] if rows else None
+
+
+# ---------------------------------------------------------------- Physical / ERP stock (direct)
+@tx
+def ec_set_stock(fac, sl, new_phys, new_erp, as_adjustment, reason):
+    rows = q("""SELECT prod_id, item_name, COALESCE(current_stock,0) AS stock, COALESCE(erp_stock,0) AS erp
+                FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE""", (sl, fac))
+    if not rows:
+        raise ValueError("Inventory item paoa jay nai.")
+    r = rows[0]
+    old_p, old_e = float(r["stock"]), float(r["erp"])
+    who = st.session_state.get("user", "")
+    parts = []
+    if abs(new_phys - old_p) > 1e-9:
+        run("UPDATE inventory SET current_stock=%s WHERE sl_no=%s AND factory_name=%s", (float(new_phys), sl, fac))
+        if as_adjustment:
+            delta = float(new_phys) - old_p
+            now = local_now()
+            insert_tx(fac, who, sl, r["prod_id"], r["item_name"], abs(delta), "Stock Adjustment (+)" if delta > 0 else ADJ_OUT, now.day,
+                      f"[Edit Center: physical {old_p:g} -> {new_phys:g} by {who}: {reason}]", now.strftime(DATE_FMT), now.strftime("%I:%M %p"),
+                      "Physically Verified")
+        parts.append(f"physical {old_p:g}->{new_phys:g}" + (" (adjustment tx)" if as_adjustment else " (direct, no tx)"))
+    if abs(new_erp - old_e) > 1e-9:
+        run("UPDATE inventory SET erp_stock=%s WHERE sl_no=%s AND factory_name=%s", (float(new_erp), sl, fac))
+        parts.append(f"ERP {old_e:g}->{new_erp:g}")
+    if parts:
+        audit("EDIT_STOCK_EDIT_CENTER", f"{fac} {r['prod_id']} ({r['item_name']}) SL {sl}: {', '.join(parts)} by {who} - {reason}")
+    return bool(parts)
+
+
+def _ec_stock():
+    fac, gen = FAC, st.session_state.get("ec_gen", 0)
+    it = _ec_pick_item("ec2")
+    if not it:
+        return
+    sl = int(it["sl_no"])
+    cur_p, cur_e = float(it.get("current_stock") or 0), float(it.get("erp_stock") or 0)
+    st.caption("Software-er Physical Stock ar ERP Stock sorasori thik korun. Physical stock-er jonno 'Stock Adjustment' transaction likhe rakha ta better - "
+               "tahole stock-er hishab (ledger / timeline) mile thake.")
+    a1, a2 = st.columns(2)
+    n_p = a1.number_input("Physical Stock QTY", min_value=0.0, step=1.0, format="%g", value=cur_p, key=f"ec2_p_{sl}_{gen}")
+    n_e = a2.number_input("ERP Stock QTY", min_value=0.0, step=1.0, format="%g", value=cur_e, key=f"ec2_e_{sl}_{gen}")
+    mode = st.radio("Physical stock kivabe bodlabe?", ["📒 Stock Adjustment transaction likhe (recommended)", "⚡ Shudhu stock number bodlan (transaction toiri hobe na)"],
+                    key=f"ec2_mode_{gen}")
+    why, pw, cf = _ec_auth(f"ec2_{gen}", "stock bodlabe.")
+    if st.button("💾 Stock save korun", type="primary", key=f"ec2_save_{gen}", disabled=not can_write_ri()):
+        if abs(n_p - cur_p) < 1e-9 and abs(n_e - cur_e) < 1e-9:
+            st.info("Kono poriborton nei.")
+        elif _ec_auth_ok(why, pw, cf) and guard():
+            try:
+                ok = ec_set_stock(fac, sl, float(n_p), float(n_e), mode.startswith("📒"), why)
+            except ValueError as ex:
+                st.error(str(ex))
+                ok = False
+            if ok:
+                st.session_state["ec_gen"] = gen + 1
+                done(f"✅ {st.session_state.get('user', '')}, {it['item_name']}: Physical {cur_p:g} ➜ {n_p:g}, ERP {cur_e:g} ➜ {n_e:g}.")
+
+
+# ---------------------------------------------------------------- Requisition
+@tx
+def ec_set_req_status(rid, status, reason):
+    rows = q("SELECT req_no, item_name, status FROM requisition_tracking WHERE id=%s FOR UPDATE", (int(rid),))
+    if not rows:
+        raise ValueError("Requisition line paoa jay nai.")
+    run("UPDATE requisition_tracking SET status=%s WHERE id=%s", (status, int(rid)))
+    audit("EDIT_REQ_STATUS", f"Req {rows[0]['req_no']} / {rows[0]['item_name']}: status '{rows[0]['status']}' -> '{status}' by {st.session_state.get('user', '')} - {reason}")
+    return True
+
+
+def _ec_requisition():
+    fac, gen = FAC, st.session_state.get("ec_gen", 0)
+    term = st.text_input("🔍 Requisition No / Item / ERP code", key="ecr_term").strip()
+    like = f"%{term}%"
+    rows = q("""SELECT id, COALESCE(req_no,'') AS req_no, COALESCE(department,'') AS department, COALESCE(req_date,'') AS req_date,
+                       COALESCE(item_name,'') AS item_name, COALESCE(prod_id,'') AS prod_id, COALESCE(req_qty,0) AS req_qty,
+                       COALESCE(audit_approved_qty,0) AS appr, COALESCE(actual_received_qty,0) AS rcv, COALESCE(po_date,'') AS po_date,
+                       COALESCE(received_date,'') AS received_date, COALESCE(status,'') AS status
+                FROM requisition_tracking WHERE factory_name=%s AND (%s='' OR req_no ILIKE %s OR item_name ILIKE %s OR prod_id ILIKE %s)
+                ORDER BY id DESC LIMIT 200""", (fac, term, like, like, like))
+    if not rows:
+        st.info("Kono requisition line paoa jayni.")
+        return
+    st.dataframe(pd.DataFrame([{"ID": r["id"], "Req No": r["req_no"], "Dept": r["department"], "Date": r["req_date"], "Item": r["item_name"],
+                                "ERP": r["prod_id"], "Req Qty": float(r["req_qty"]), "Approved": float(r["appr"]), "Received": float(r["rcv"]),
+                                "PO Date": r["po_date"], "Received Date": r["received_date"], "Status": r["status"]} for r in rows]),
+                 hide_index=True, use_container_width=True, height=min(80 + 36 * len(rows), 300))
+    by = {int(r["id"]): r for r in rows}
+    rid = st.selectbox("Kon line thik korben?", list(by), key="ecr_id",
+                       format_func=lambda i: f"ID {i} · Req {by[i]['req_no']} · {by[i]['item_name']} · qty {float(by[i]['req_qty']):g}")
+    r0 = by[int(rid)]
+    k = f"{rid}_{gen}"
+    a1, a2, a3 = st.columns(3)
+    n_no = a1.text_input("Requisition No", value=r0["req_no"], key=f"ecr_no_{k}").strip()
+    n_dept = a2.text_input("Department", value=r0["department"], key=f"ecr_dept_{k}").strip()
+    with a3:
+        n_rd, ok1 = _ec_date_txt("Req Date", r0["req_date"], f"ecr_rd_{k}")
+    b1, b2, b3 = st.columns(3)
+    n_item = b1.text_input("Item Name (requisition-e)", value=r0["item_name"], key=f"ecr_item_{k}").strip()
+    n_rq = b2.number_input("Req Qty", min_value=0.0, step=1.0, format="%g", value=float(r0["req_qty"]), key=f"ecr_rq_{k}")
+    n_ap = b3.number_input("Audit Approved Qty", min_value=0.0, step=1.0, format="%g", value=float(r0["appr"]), key=f"ecr_ap_{k}")
+    c1, c2, c3 = st.columns(3)
+    n_rc = c1.number_input("Received Qty", min_value=0.0, step=1.0, format="%g", value=float(r0["rcv"]), key=f"ecr_rc_{k}")
+    with c2:
+        n_po, ok2 = _ec_date_txt("PO Date", r0["po_date"], f"ecr_po_{k}")
+    with c3:
+        n_rcd, ok3 = _ec_date_txt("Received Date", r0["received_date"], f"ecr_rcd_{k}")
+    sts = [x["status"] for x in q("SELECT DISTINCT status FROM requisition_tracking WHERE factory_name=%s AND COALESCE(status,'')<>''", (fac,))]
+    if r0["status"] and r0["status"] not in sts:
+        sts.append(r0["status"])
+    sts = sorted(sts) or ["Req Created"]
+    n_st = st.selectbox("Status", sts, index=sts.index(r0["status"]) if r0["status"] in sts else 0, key=f"ecr_st_{k}")
+    st.caption("ERP Code ekhane bodlay na (item-er ERP code bodlate 'Item & Transaction' section use korun). Received Qty sorasori bodlale receipt-er sathe link bodlay na.")
+    why, pw, cf = _ec_auth(f"ecr_{gen}", "requisition line bodlabe.")
+    if st.button("💾 Requisition save korun", type="primary", key=f"ecr_save_{gen}", disabled=not can_write_ri()):
+        chg_main = (n_no != r0["req_no"] or n_dept != r0["department"] or n_rd != (r0["req_date"] or None) or n_item != r0["item_name"]
+                    or abs(n_rq - float(r0["req_qty"])) > 1e-9)
+        chg_ap = abs(n_ap - float(r0["appr"])) > 1e-9
+        chg_rc = abs(n_rc - float(r0["rcv"])) > 1e-9 or n_po != (r0["po_date"] or None) or n_rcd != (r0["received_date"] or None)
+        chg_st = n_st != r0["status"]
+        if not (ok1 and ok2 and ok3):
+            pass
+        elif not n_no or not n_item:
+            st.error("Requisition No ar Item Name khali rakha jabe na.")
+        elif not (chg_main or chg_ap or chg_rc or chg_st):
+            st.info("Kono poriborton nei.")
+        elif _ec_auth_ok(why, pw, cf) and guard():
+            did = []
+            try:
+                if chg_main:
+                    if not edit_requisition(int(rid), n_no, n_dept, n_rd or r0["req_date"], float(n_rq), n_item, r0["prod_id"], r0["prod_id"]):
+                        raise ValueError("Requisition details change hoyni")
+                    did.append("details")
+                if chg_ap:
+                    set_audit_qty(int(rid), float(n_ap), float(r0["appr"]), n_item, n_no)
+                    did.append("approved qty")
+                if chg_rc:
+                    set_po_receiving(int(rid), n_po, float(n_rc), n_rcd, n_no, n_item)
+                    did.append("received / PO")
+                if chg_st:
+                    ec_set_req_status(int(rid), n_st, why)
+                    did.append("status")
+            except ValueError as ex:
+                st.error(f"{ex}  (ei porjonto save hoyeche: {', '.join(did) or 'kichu na'})")
+                if did:
+                    st.rerun()
+                return
+            audit("EDIT_REQ_EDIT_CENTER", f"{fac} requisition line #{rid} (Req {n_no}): {', '.join(did)} by {st.session_state.get('user', '')} (Edit Center) - {why}")
+            st.session_state["ec_gen"] = gen + 1
+            done(f"✅ Requisition {n_no} / {n_item} save hoyeche ({', '.join(did)}).")
+    with st.expander("🗑 Ei requisition line delete korun"):
+        dwhy, dpw, dcf = _ec_auth(f"ecrd_{k}", "requisition line delete hobe.")
+        if st.button("🗑 Delete", key=f"ecr_del_{k}", disabled=not can_write_ri()):
+            if _ec_auth_ok(dwhy, dpw, dcf) and guard() and delete_requisition(int(rid), r0["req_no"], r0["item_name"]):
+                audit("DELETE_REQ_EDIT_CENTER", f"{fac} requisition line #{rid} (Req {r0['req_no']}) deleted by {st.session_state.get('user', '')} - {dwhy}")
+                st.session_state["ec_gen"] = gen + 1
+                done("✅ Requisition line delete hoyeche.")
+
+
+# ---------------------------------------------------------------- Gate Pass
+def _ec_gate_pass():
+    fac, gen = FAC, st.session_state.get("ec_gen", 0)
+    try:
+        run_once_per_process("gate_pass_table", ensure_gate_pass_table)
+    except Exception:
+        pass
+    term = st.text_input("🔍 Gate Pass No / Source / Item", key="ecg_term").strip()
+    like = f"%{term}%"
+    rows = q("""SELECT id, factory_name, gate_pass_no, source_place, rec_date, sl_no, prod_id, item_name, COALESCE(size,'') AS size,
+                       COALESCE(qty,0) AS qty, COALESCE(remarks,'') AS remarks
+                FROM gate_pass_receipts WHERE factory_name=%s AND (%s='' OR gate_pass_no ILIKE %s OR source_place ILIKE %s OR item_name ILIKE %s)
+                ORDER BY id DESC LIMIT 600""", (fac, term, like, like, like))
+    if not rows:
+        st.info("Kono Gate Pass paoa jayni.")
+        return
+    keys, seen = {}, set()
+    for r in rows:
+        kk = (r["gate_pass_no"], r["source_place"], r["rec_date"])
+        if kk not in seen and len(seen) < 150:
+            seen.add(kk)
+            keys[f"{r['gate_pass_no']} · {r['source_place']} · {r['rec_date']}"] = kk
+    n_, s_, d_ = keys[st.selectbox("Gate Pass bachun", list(keys), key="ecg_sel")]
+    lots = sorted([r for r in rows if (r["gate_pass_no"], r["source_place"], r["rec_date"]) == (n_, s_, d_)], key=lambda r: int(r["id"]))
+    st.dataframe(pd.DataFrame([{"Item": r["item_name"], "Size": r["size"], "ERP": r["prod_id"], "Qty": float(r["qty"])} for r in lots]),
+                 hide_index=True, use_container_width=True)
+    k = f"{lots[0]['id']}_{gen}"
+    e1, e2, e3 = st.columns([1.1, 1.4, 1])
+    new_no = e1.text_input("Gate Pass No.", value=n_, key=f"ecg_no_{k}").strip()
+    new_src = e2.text_input("Kotha theke esechhe", value=s_, key=f"ecg_src_{k}").strip()
+    with e3:
+        new_d, okd = _ec_date_txt("Tarikh", d_, f"ecg_dt_{k}")
+    new_rem = st.text_input("Remarks", value=lots[0]["remarks"], key=f"ecg_rem_{k}").strip()
+    new_qty = {int(r["id"]): st.number_input(f"{r['item_name']} [{r['size'] or '-'}] — qty", min_value=0.0, step=1.0, format="%g",
+                                              value=float(r["qty"]), key=f"ecg_q_{r['id']}_{gen}") for r in lots}
+    st.caption("Qty bodlale stock oi onujayi thik hoy (stock negative hole bodlano jabe na). Notun item jog korte 'Gate Pass In' page-e ekoi Gate Pass No diye item add korun.")
+    why, pw, cf = _ec_auth(f"ecg_{gen}", "Gate Pass bodlabe (stock oi onujayi thik hobe).")
+    if st.button("💾 Gate Pass save korun", type="primary", key=f"ecg_save_{gen}", disabled=not can_write_ri()):
+        if not okd or not new_d:
+            st.error("Tarikh din.")
+        elif not new_no or not new_src:
+            st.error("Gate Pass No ar source khali rakha jabe na.")
+        elif any(v <= 0 for v in new_qty.values()):
+            st.error("Qty 0-r beshi hote hobe (line bad dite niche Delete use korun).")
+        elif _ec_auth_ok(why, pw, cf) and guard() and update_gate_pass(fac, lots, new_no, new_src, new_d, new_rem, new_qty):
+            audit("EDIT_GP_EDIT_CENTER", f"{fac} Gate Pass {n_} -> {new_no} edited by {st.session_state.get('user', '')} (Edit Center) - {why}")
+            st.session_state["ec_gen"] = gen + 1
+            done("✅ Gate Pass update hoyeche.")
+    with st.expander("🗑 Delete (stock ferot jabe)"):
+        lab = {f"{r['item_name']} [{r['size'] or '-'}] · {float(r['qty']):g}": r for r in lots}
+        pick = st.multiselect("Kon line muchben? (faka rakhle pura Gate Pass)", list(lab), key=f"ecg_dp_{k}")
+        tgt = [lab[x] for x in pick] or lots
+        st.warning(f"{len(tgt)}ti line muche jabe, {sum(float(r['qty']) for r in tgt):g} (qty) stock theke komabe. Mal issue hoye gele muchha jabe na.")
+        dwhy, dpw, dcf = _ec_auth(f"ecgd_{k}", "Gate Pass line delete hobe, stock ferot jabe.")
+        if st.button("🗑 Delete & stock ferot", key=f"ecg_del_{k}", disabled=not can_write_ri()):
+            if _ec_auth_ok(dwhy, dpw, dcf) and guard() and delete_gate_pass_lots(fac, tgt):
+                audit("DELETE_GP_EDIT_CENTER", f"{fac} Gate Pass {n_}: {len(tgt)} line(s) deleted by {st.session_state.get('user', '')} (Edit Center) - {dwhy}")
+                st.session_state["ec_gen"] = gen + 1
+                done("✅ Gate Pass line muche stock ferot neya hoyeche.")
+
+
+# ---------------------------------------------------------------- Hold Bill
+def _ec_hold_bill():
+    fac, gen = FAC, st.session_state.get("ec_gen", 0)
+    try:
+        run_once_per_process("hold_bill_table", ensure_hold_bill_table)
+    except Exception:
+        pass
+    term = st.text_input("🔍 Challan / Invoice / Supplier / Item", key="ech_term").strip()
+    like = f"%{term}%"
+    rows = q("""SELECT id, COALESCE(received_date,'') AS received_date, COALESCE(challan_no,'') AS challan_no, COALESCE(invoice_no,'') AS invoice_no,
+                       COALESCE(supplier_name,'') AS supplier_name, COALESCE(item_name,'') AS item_name, COALESCE(qty,0) AS qty, COALESCE(rate,0) AS rate,
+                       COALESCE(total_value,0) AS total_value, COALESCE(problem_type,'') AS problem_type, COALESCE(dept_to,'') AS dept_to,
+                       COALESCE(remarks,'') AS remarks, COALESCE(status,'Open') AS status, COALESCE(resolved_date,'') AS resolved_date,
+                       COALESCE(resolved_note,'') AS resolved_note, COALESCE(responsible,'') AS responsible
+                FROM hold_bills WHERE factory_name=%s AND (%s='' OR challan_no ILIKE %s OR invoice_no ILIKE %s OR supplier_name ILIKE %s OR item_name ILIKE %s)
+                ORDER BY id DESC LIMIT 200""", (fac, term, like, like, like, like))
+    if not rows:
+        st.info("Kono Hold Bill paoa jayni.")
+        return
+    st.dataframe(pd.DataFrame([{"ID": r["id"], "Date": r["received_date"], "Challan": r["challan_no"], "Invoice": r["invoice_no"], "Supplier": r["supplier_name"],
+                                "Item": r["item_name"], "Qty": float(r["qty"]), "Rate": float(r["rate"]), "Total": float(r["total_value"]),
+                                "Problem": r["problem_type"], "Status": r["status"]} for r in rows]),
+                 hide_index=True, use_container_width=True, height=min(80 + 36 * len(rows), 300))
+    by = {int(r["id"]): r for r in rows}
+    bid = st.selectbox("Kon bill thik korben?", list(by), key="ech_id",
+                       format_func=lambda i: f"#{i} · {by[i]['challan_no'] or '-'} · {by[i]['supplier_name'] or '-'} · {by[i]['item_name']} · {by[i]['status']}")
+    b = by[int(bid)]
+    k = f"{bid}_{gen}"
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        n_date, ok1 = _ec_date_txt("Received Date", b["received_date"], f"ech_dt_{k}")
+    n_ch = a2.text_input("Challan No", value=b["challan_no"], key=f"ech_ch_{k}").strip()
+    n_inv = a3.text_input("Invoice No", value=b["invoice_no"], key=f"ech_inv_{k}").strip()
+    c1, c2 = st.columns(2)
+    n_sup = c1.text_input("Supplier", value=b["supplier_name"], key=f"ech_sup_{k}").strip()
+    n_item = c2.text_input("Item", value=b["item_name"], key=f"ech_item_{k}").strip()
+    d1, d2, d3 = st.columns(3)
+    n_qty = d1.number_input("Qty", min_value=0.0, step=1.0, format="%g", value=float(b["qty"]), key=f"ech_q_{k}")
+    n_rate = d2.number_input("Rate (৳)", min_value=0.0, step=1.0, format="%g", value=float(b["rate"]), key=f"ech_r_{k}")
+    n_tot = d3.number_input("Total value (৳)", min_value=0.0, step=1.0, format="%g", value=float(b["total_value"]) or float(b["qty"]) * float(b["rate"]), key=f"ech_t_{k}",
+                            help="Qty × Rate holei ta likhe din; ekhane jeta likhben seta-i save hobe.")
+    e1, e2, e3 = st.columns(3)
+    probs = HB_PROBLEMS + ([b["problem_type"]] if b["problem_type"] and b["problem_type"] not in HB_PROBLEMS else [])
+    depts = HB_DEPTS + ([b["dept_to"]] if b["dept_to"] and b["dept_to"] not in HB_DEPTS else [])
+    n_prob = e1.selectbox("Problem", probs, index=probs.index(b["problem_type"]) if b["problem_type"] in probs else 0, key=f"ech_pr_{k}")
+    n_dept = e2.selectbox("Department (kar kache)", depts, index=depts.index(b["dept_to"]) if b["dept_to"] in depts else 0, key=f"ech_dp_{k}")
+    n_resp = e3.text_input("Responsible", value=b["responsible"], key=f"ech_rs_{k}").strip()
+    n_rem = st.text_input("Remarks", value=b["remarks"], key=f"ech_rm_{k}").strip()
+    why, pw, cf = _ec_auth(f"ech_{gen}", "Hold Bill bodlabe.")
+    if st.button("💾 Hold Bill save korun", type="primary", key=f"ech_save_{gen}", disabled=not can_write_ri()):
+        if not ok1:
+            pass
+        elif _ec_auth_ok(why, pw, cf) and guard():
+            if update_hold_bill(int(bid), {"date": n_date or "", "challan": n_ch, "invoice": n_inv, "supplier": n_sup, "item": n_item, "qty": float(n_qty),
+                                           "rate": float(n_rate), "total": float(n_tot), "problem": n_prob, "dept": n_dept, "remarks": n_rem, "responsible": n_resp}):
+                audit("EDIT_HB_EDIT_CENTER", f"{fac} hold bill #{bid} edited by {st.session_state.get('user', '')} (Edit Center) - {why}")
+                st.session_state["ec_gen"] = gen + 1
+                done(f"✅ Hold Bill #{bid} save hoyeche.")
+
+    with st.expander("✅ Status (Resolved / Reopen)"):
+        if b["status"] == "Resolved":
+            st.caption(f"Resolved: {b['resolved_date'] or '-'} · {b['resolved_note'] or '-'}")
+        r_date = st.text_input("Resolved date", value=b["resolved_date"] or local_now().strftime(DATE_FMT), key=f"ech_rsd_{k}").strip()
+        r_note = st.text_input("Note", value=b["resolved_note"], key=f"ech_rsn_{k}").strip()
+        swhy, spw, scf = _ec_auth(f"echs_{k}", "Hold Bill-er status bodlabe.")
+        s1, s2 = st.columns(2)
+        if s1.button("✅ Resolved korun", key=f"ech_res_{k}", disabled=not can_write_ri() or b["status"] == "Resolved"):
+            if not parse_date(r_date):
+                st.error("Resolved date thik nei.")
+            elif _ec_auth_ok(swhy, spw, scf) and guard() and set_hold_bill_status(int(bid), True, parse_date(r_date).strftime(DATE_FMT), r_note):
+                st.session_state["ec_gen"] = gen + 1
+                done(f"✅ Hold Bill #{bid} Resolved.")
+        if s2.button("↩️ Abar Open korun", key=f"ech_reo_{k}", disabled=not can_write_ri() or b["status"] != "Resolved"):
+            if _ec_auth_ok(swhy, spw, scf) and guard() and set_hold_bill_status(int(bid), False):
+                st.session_state["ec_gen"] = gen + 1
+                done(f"✅ Hold Bill #{bid} abar Open.")
+
+    with st.expander("📤 Ei bill-er Issue record (date / SR / dept / qty)"):
+        iss = q("""SELECT id, COALESCE(issue_date,'') AS issue_date, COALESCE(req_no,'') AS req_no, COALESCE(department,'') AS department,
+                          COALESCE(qty,0) AS qty, COALESCE(remarks,'') AS remarks FROM hold_bill_issues WHERE bill_id=%s ORDER BY id""", (int(bid),))
+        if not iss:
+            st.caption("Ei bill-e kono issue record nei.")
+        else:
+            ib = {int(r["id"]): r for r in iss}
+            iid = st.selectbox("Kon issue record?", list(ib), key=f"ech_iid_{k}",
+                               format_func=lambda i: f"#{i} · {ib[i]['issue_date']} · SR {ib[i]['req_no']} · {ib[i]['department']} · {float(ib[i]['qty']):g}")
+            ir = ib[int(iid)]
+            ik = f"{iid}_{gen}"
+            i1, i2, i3 = st.columns(3)
+            with i1:
+                i_date, iok = _ec_date_txt("Issue date", ir["issue_date"], f"ech_id_{ik}")
+            i_req = i2.text_input("SR / Req No", value=ir["req_no"], key=f"ech_ir_{ik}").strip()
+            i_dept = i3.text_input("Department", value=ir["department"], key=f"ech_idp_{ik}").strip()
+            j1, j2 = st.columns([1, 2])
+            i_qty = j1.number_input("Qty", min_value=0.0, step=1.0, format="%g", value=float(ir["qty"]), key=f"ech_iq_{ik}")
+            i_rem = j2.text_input("Remarks", value=ir["remarks"], key=f"ech_irm_{ik}").strip()
+            iwhy, ipw, icf = _ec_auth(f"echi_{ik}", "issue record bodlabe / delete hobe.")
+            u1, u2 = st.columns(2)
+            if u1.button("💾 Issue save korun", key=f"ech_isave_{ik}", disabled=not can_write_ri()):
+                if not iok or not i_date:
+                    st.error("Issue date din.")
+                elif _ec_auth_ok(iwhy, ipw, icf) and guard() and update_hold_issue(int(iid), {"date": i_date, "req": i_req, "dept": i_dept, "qty": float(i_qty), "remarks": i_rem}):
+                    st.session_state["ec_gen"] = gen + 1
+                    done(f"✅ Issue record #{iid} save hoyeche.")
+            if u2.button("🗑 Issue delete korun", key=f"ech_idel_{ik}", disabled=not can_write_ri()):
+                if _ec_auth_ok(iwhy, ipw, icf) and guard() and delete_hold_issue(int(iid)):
+                    st.session_state["ec_gen"] = gen + 1
+                    done(f"✅ Issue record #{iid} delete hoyeche.")
+
+    with st.expander("🗑 Pura Hold Bill delete korun"):
+        dwhy, dpw, dcf = _ec_auth(f"echd_{k}", "Hold Bill (ar tar sob issue record) delete hobe.")
+        if st.button("🗑 Delete Bill", key=f"ech_del_{k}", disabled=not can_write_ri()):
+            if _ec_auth_ok(dwhy, dpw, dcf) and guard() and delete_hold_bill(int(bid), f"{b['challan_no']} / {b['supplier_name']} / {b['item_name']}"):
+                st.session_state["ec_gen"] = gen + 1
+                done(f"✅ Hold Bill #{bid} delete hoyeche.")
+
+
+# ---------------------------------------------------------------- the page: one section picker, only the chosen section runs
+@_frag   # every click re-runs ONLY this page block
+def tab_edit_center():
+    st.title("🛠️ Edit Center (A–Z)")
+    st.caption("Item, transaction, stock, requisition, gate pass, hold bill - kono kichu vul hole ekhane thik korun. "
+               "Prottek change-e Store Manager password + karon lagbe, ar audit log-e thake.")
+    if is_cons_view:
+        st.info("ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ edit করা যায় না)।")
+        return
+    sec = lazy_tab_select(["📦 Item & Transaction", "📊 Physical / ERP Stock", "📑 Requisition", "🚪 Gate Pass", "🗂 Hold Bill"], "lz_ec_top")
+    st.markdown("---")
+    (_ec_items, _ec_stock, _ec_requisition, _ec_gate_pass, _ec_hold_bill)[sec]()
+
+
 # ---- Sidebar navigation: expandable grouped links (active group shows its pages). UI only: every choice writes the same NAV_KEY route
 #      value the old buttons wrote, so all route strings, shortcuts (e.g. ERP Audit card) and RENDERERS are unchanged.
 NAV_GROUPS = [
     ("Store Operations", [
         ("Dashboard", TAB_NAMES[0]),
         ("Daily Issue Slip & Receipt Entry", NAV_REQ_ISSUE),   # visible label only - route is the existing NAV_REQ_ISSUE page
+        ("Edit Center (A–Z)", NAV_EDIT_CENTER),
         ("Requisition", "📑 Requisition"),
         ("Physical Count", NAV_PHYSICAL),
         ("Issued Items Stock Check", NAV_ISC),
@@ -26610,7 +27247,7 @@ RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, t
              tab_monthly_stock_check, tab_machine_cost, tab_shift_handover, tab_section_budget,
              tab_warranty, tab_scrap, tab_old_materials, tab_price_history, tab_item_audit,
              tab_unit_compare, tab_exec_summary, tab_mgmt_pack, tab_consumption_trend, tab_issued_stock_check,
-             tab_item_journey]
+             tab_item_journey, tab_edit_center]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
 # --- tab switch: no stacked blank space at the top + always start at the top of the new page (CSS/JS only, no extra DB work) ---
 st.markdown("""<style>
