@@ -16226,10 +16226,10 @@ def _qi_confirm_body(p):
     unit_txt = (" " + next(iter(units))) if len(units) == 1 else ""
     st.markdown(f"#### 📋 {len(rows)} ti item · mot **{tot:g}{unit_txt}** issue hocche")
     st.caption(f"SR {p['sr_no']} · 📅 {p['tx_date']:%d-%b-%Y} · 🏭 {p['fac']}" + (f" · 🏷 {p['section']}" if p["section"] else ""))
-    st.dataframe(pd.DataFrame([{"#": i + 1, "Item": r["item"], "Size": r["size"], "Qty": r["qty"], "UOM": r["uom"], "Transfer": r["xfer"]}
+    st.dataframe(pd.DataFrame([{"Serial": (r.get("ser") or "-"), "Item": r["item"], "Size": r["size"], "Qty": r["qty"], "UOM": r["uom"], "Transfer": r["xfer"]}
                                for i, r in enumerate(rows)]),
                  hide_index=True, use_container_width=True, height=min(80 + 36 * len(rows), 420))
-    st.caption("Upore-r list thik thakle OK chapun. Vul thakle Cancel kore qty thik korun.")
+    st.caption("Requisition-er Serial onujayi sajano - kagoj-er sathe line-by-line milan. Thik thakle OK chapun, vul thakle Cancel kore thik korun.")
     b1, b2 = st.columns(2)
     if b1.button("✅ OK - Issue korun", type="primary", key="qi_ok", use_container_width=True):
         if guard():
@@ -16298,11 +16298,13 @@ def _ri_quick_form():
     with _ri_card("qi_items"):
         _ri_step(2, "Qty din", f"{len(reg)} ti regular item - je item issue hobe shudhu tar 'Issue Qty' likhun, baki khali rakhun")
         df = pd.DataFrame([{"Item": r["item_name"], "Size": r["size"], "ERP Code": r["prod_id"], "UOM": r["unit"],
-                            "Stock": float(eff.get(int(r["sl_no"]), r["stock"])), "Issue Qty": 0.0} for r in reg])
+                            "Stock": float(eff.get(int(r["sl_no"]), r["stock"])), "Serial": float("nan"), "Issue Qty": 0.0} for r in reg])
         ed = st.data_editor(df, key=f"qi_grid_{gen}", hide_index=True, use_container_width=True,
                             height=min(80 + 36 * len(df), 620),
                             disabled=["Item", "Size", "ERP Code", "UOM", "Stock"],
                             column_config={"Issue Qty": st.column_config.NumberColumn("Issue Qty ✍️", min_value=0.0, step=1.0, format="%g"),
+                                           "Serial": st.column_config.NumberColumn("Req. Serial ✍️", min_value=1, step=1, format="%d",
+                                                                                   help="Requisition kagoje item-ta koto number line-e ache - confirm window-e ei serial-er kromei dekhabe."),
                                            "Stock": st.column_config.NumberColumn("Stock", format="%g")})
     # ---- regular list-e nei emon (uncommon) item: ei-i slip-e jog korun, alada SR lagbe na
     extras = st.session_state.setdefault("qi_extra", [])
@@ -16347,9 +16349,11 @@ def _ri_quick_form():
                 r = ex.get(int(sl_))
                 if not r:
                     continue
-                x1, x2, x3, x4 = st.columns([3.4, 1.2, 1.2, 0.6])
+                x1, x2, xs, x3, x4 = st.columns([3.0, 1.1, 1.0, 1.2, 0.6])
                 x1.write(f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']}")
                 x2.write(f"stock {float(effx.get(int(sl_), r['stock'])):g}")
+                xs.number_input("serial", min_value=0, step=1, format="%d", key=f"qi_xs_{gen}_{sl_}", label_visibility="collapsed",
+                                help="Requisition kagoje ei item-er serial (0 = serial nei)")
                 x3.number_input("q", min_value=0.0, step=1.0, format="%g", key=f"qi_xq_{gen}_{sl_}", label_visibility="collapsed")
                 if x4.button("✖", key=f"qi_xrm_{gen}_{sl_}", help="Ei item bad din"):
                     extras.remove(sl_)
@@ -16358,17 +16362,27 @@ def _ri_quick_form():
                         st.rerun(scope="fragment")
                     except TypeError:
                         st.rerun()
-    sel = []
+    sel, ser = [], {}
     for r, (_, row) in zip(reg, ed.iterrows()):
         qv = row["Issue Qty"]
         qv = 0.0 if qv is None or qv != qv else float(qv)
         if qv > 0:
             sel.append((r, qv, float(eff.get(int(r["sl_no"]), r["stock"]))))
+            sv = row["Serial"]
+            ser[int(r["sl_no"])] = None if sv is None or sv != sv or int(sv) <= 0 else int(sv)
     for sl_ in extras:
         r = ex.get(int(sl_))
         qv = float(st.session_state.get(f"qi_xq_{gen}_{sl_}") or 0)
         if r and qv > 0:
             sel.append((r, qv, float(effx.get(int(sl_), r["stock"])) if tx_date < local_now().date() else float(r["stock"])))
+            _xs = int(st.session_state.get(f"qi_xs_{gen}_{sl_}") or 0)
+            ser[int(sl_)] = _xs if _xs > 0 else None
+    # requisition-er serial onujayi sajano (serial nei = shobar shesh-e, list-er kromei) - confirm window ar transaction-o ei kromei
+    sel.sort(key=lambda t: (ser.get(int(t[0]["sl_no"])) is None, ser.get(int(t[0]["sl_no"])) or 0))
+    _sv = [v for v in (ser.get(int(r["sl_no"])) for r, _, _ in sel) if v]
+    dup_ser = sorted({v for v in _sv if _sv.count(v) > 1})
+    if dup_ser:
+        st.error("⛔ Ekoi Serial ekadhik item-e deya hoyeche: " + ", ".join(str(v) for v in dup_ser) + " — Serial thik korun.")
     # ---- stock kom hole: onno unit theke auto-transfer (same rule as the 📤 Issue tab); tick must stay ON for the line to save
     short, xfer = [], {}
     xcache = st.session_state.setdefault("ri_other_cache", {})
@@ -16432,7 +16446,7 @@ def _ri_quick_form():
             st.error("এই সপ্তাহের compulsory Physical Count শেষ হয়নি — আগে 📱 Physical Count → 🎯 তালিকার আইটেম গুনুন, তারপর Issue save হবে।")
         elif ttype == "Issued" and not section:
             st.error("Section বাছুন (কোন section-এ গেল) — report / audit-এর জন্য এটা দরকার।")
-        elif short or no_rate or len(sel) > RI_MAX_LINES:
+        elif short or no_rate or dup_ser or len(sel) > RI_MAX_LINES:
             st.error("তালিকায় সমস্যা আছে (stock kom / transfer / Rate nei) — upore lal message dekhe thik korun.")
         elif need_names and not verified:
             st.error("Physical verification লাগবে — ghune dekhe tick din.")
@@ -16442,7 +16456,7 @@ def _ri_quick_form():
             _rows = []
             for r, qv, _stk in sel:
                 _x = xfer.get(int(r["sl_no"]), (False, 0.0))
-                _rows.append({"item": r["item_name"], "size": r["size"] or "-", "qty": qv, "uom": r["unit"],
+                _rows.append({"ser": ser.get(int(r["sl_no"])), "item": r["item_name"], "size": r["size"] or "-", "qty": qv, "uom": r["unit"],
                               "xfer": (f"🔁 {_x[1]:g} {other_factory(fac)} theke" if _x[0] and _x[1] > 0 else "")})
             _p = {"fac": fac, "gen": gen, "sr_no": sr_no, "tx_date": tx_date, "ttype": ttype, "section": section, "verified": verified,
                   "rows": _rows,
