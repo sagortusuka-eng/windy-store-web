@@ -3013,8 +3013,15 @@ _DBP_CSS = """<style>
 .st-key-dbp_root div[data-baseweb="select"]>div,.st-key-dbp_root div[data-baseweb="input"]{background:#fff!important;border:1.5px solid #7C93BD!important;border-radius:10px!important}
 .st-key-dbp_root div[data-baseweb="base-input"]{border:0!important;background:transparent!important}
 .st-key-dbp_root div[data-baseweb="select"]>div:focus-within,.st-key-dbp_root div[data-baseweb="input"]:focus-within{border-color:#0A1F4D!important;box-shadow:0 0 0 3px rgba(201,162,75,.38)!important}
-.st-key-dbp_root .stButton>button{background:linear-gradient(135deg,#07142F,#13367F)!important;border:1px solid #C9A24B!important;border-radius:10px!important}
-.st-key-dbp_root .stButton>button p{color:#F4E3B2!important;font-weight:700!important}
+.st-key-dbp_root .stButton>button[kind="primary"],.st-key-dbp_root .stButton>button[data-testid="stBaseButton-primary"]{background:linear-gradient(135deg,#07142F,#13367F)!important;border:1px solid #C9A24B!important;border-radius:10px!important}
+.st-key-dbp_root .stButton>button[kind="primary"] p,.st-key-dbp_root .stButton>button[data-testid="stBaseButton-primary"] p{color:#F4E3B2!important;font-weight:700!important}
+.st-key-dbp_root .stButton>button[kind="secondary"],.st-key-dbp_root .stButton>button[data-testid="stBaseButton-secondary"]{background:#fff!important;border:1.5px solid #C9A24B!important;border-radius:10px!important}
+.st-key-dbp_root .stButton>button[kind="secondary"] p,.st-key-dbp_root .stButton>button[data-testid="stBaseButton-secondary"] p{color:#0A1F4D!important;font-weight:700!important}
+.st-key-dbp_root .section-title{display:flex;align-items:center;gap:12px;border-left:0!important;padding:0!important;margin:26px 0 8px!important;font-size:1.04rem!important;font-weight:800!important;color:#0A1F4D!important;letter-spacing:.2px}
+.st-key-dbp_root .section-title::after{content:"";flex:1;height:2px;border-radius:2px;background:linear-gradient(90deg,#C9A24B,rgba(201,162,75,0))}
+.st-key-dbp_root div[data-testid="stVerticalBlockBorderWrapper"]{border:1px solid #DCE3EF!important;border-top:4px solid #C9A24B!important;border-radius:16px!important;background:linear-gradient(180deg,#fff,#F7F9FD)!important;box-shadow:0 8px 24px rgba(10,31,77,.09)!important}
+.st-key-dbp_root div[data-testid="stAlert"]{box-shadow:0 4px 14px rgba(10,31,77,.07)}
+.st-key-dbp_root div[data-testid="stCaptionContainer"]{color:#64748B}
 @media (prefers-reduced-motion:reduce){.dbp-hero,.st-key-dbp_root .dbx-card,.st-key-dbp_root .dbx-bar>div,.dbp-live i{animation:none!important}}
 @media (max-width:700px){.dbp-hero{padding:20px 18px}.dbp-title{font-size:23px}.st-key-dbp_root .dbx-val{font-size:1.65rem}}
 </style>"""
@@ -3034,6 +3041,34 @@ def _dbp_hero(viewer, factory, role):
             f"<div class='dbp-chips'>{chips}</div></div>")
 
 
+def _dbp_addons_top():
+    """First block of the dashboard: আজকের কাজ (+ the requisition request notice). Returns the data stamp the lower blocks need."""
+    stamp = None
+    try:
+        stamp = render_today_work_card()
+    except Exception as e:
+        st.caption(f"আজকের কাজ কার্ড লোড হয়নি: {e}")
+    try:
+        render_ri_request_notice()
+    except Exception:
+        pass
+    return stamp
+
+
+def _dbp_addons_bottom(stamp):
+    """Lower blocks, in this order: বাজেট আগাম সতর্কতা, নোট বোর্ড, ট্রান্সফার প্রস্তাব, অস্বাভাবিক Issue, সকালের সারাংশ.
+    Each block is isolated exactly as in render_dashboard_addons(): if one fails the others still load."""
+    for fn, label, needs_stamp in ((render_budget_runout_hint, "বাজেট আগাম সতর্কতা", True), (render_dash_note_board, "নোট বোর্ড", False),
+                                   (render_dash_transfer_hint, "ট্রান্সফার প্রস্তাব", True), (render_issue_anomaly_card, "অস্বাভাবিক Issue তালিকা", True),
+                                   (render_daily_summary_share, "সকালের সারাংশ", True)):
+        try:
+            if needs_stamp and fn is render_dash_transfer_hint and stamp is None:
+                continue
+            fn(stamp) if needs_stamp else fn()
+        except Exception as e:
+            st.caption(f"{label} লোড হয়নি: {e}")
+
+
 def tab_dashboard():
     """Management dashboard (premium look). The page itself is unchanged: _tab_dashboard_body() below runs exactly as before,
     inside a styled container, so every number, query and cache stays as it was."""
@@ -3045,7 +3080,7 @@ def tab_dashboard():
 def _tab_dashboard_body():
     """Management dashboard: purchase, issue, inventory and budget using live database records."""
     st.markdown(_dbp_hero(st.session_state.get("user") or "Store team", FAC, st.session_state.get("role")), unsafe_allow_html=True)
-    render_dashboard_addons()   # NEW: আজকের কাজ card, note board, transfer suggestions (isolated; cannot break the dashboard)
+    stamp = _dbp_addons_top()   # আজকের কাজ first; the other blocks follow the numbers below (see _dbp_addons_bottom)
 
     transaction_rows = qdf_c(f"""SELECT t.factory_name, t.date, t.time, t.trans_type, t.qty, t.item_name,
                        t.officer_name, COALESCE(t.supplier_name,'') AS supplier_name,
@@ -3165,6 +3200,8 @@ def _tab_dashboard_body():
     if sh_n or xs_n:
         st.caption(f"Net (Physical − ERP): {_dbx_tk(xs_v - sh_v)} · Short = Physical is less than ERP, Excess = Physical is more than ERP. "
                    "Correction task numbers are all-time (closing date is not stored); Corrected to ERP follows the selected period.")
+
+    _dbp_addons_bottom(stamp)   # বাজেট আগাম সতর্কতা, নোট বোর্ড, ট্রান্সফার, অস্বাভাবিক Issue
 
     d_low, d_erp, d_hold, d_gate, d_trend, d_recent = st.tabs(
         ["🔻 Low stock · buy list", "⚖️ ERP vs Physical", "🗂 Hold bills", "🚪 Gate pass", "📈 Trend & budget", "🧾 Recent activity"])
