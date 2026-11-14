@@ -16218,6 +16218,48 @@ def _ri_quick_manage(fac, reg, can_write):
                         done(f"✅ {n} ti item regular list-e jog hoyeche.")
 
 
+def _qi_confirm_body(p):
+    """Summary of what is about to be issued - the officer checks it once more and presses OK (or Cancel)."""
+    rows = p["rows"]
+    tot = sum(r["qty"] for r in rows)
+    units = {str(r["uom"]) for r in rows}
+    unit_txt = (" " + next(iter(units))) if len(units) == 1 else ""
+    st.markdown(f"#### 📋 {len(rows)} ti item · mot **{tot:g}{unit_txt}** issue hocche")
+    st.caption(f"SR {p['sr_no']} · 📅 {p['tx_date']:%d-%b-%Y} · 🏭 {p['fac']}" + (f" · 🏷 {p['section']}" if p["section"] else ""))
+    st.dataframe(pd.DataFrame([{"#": i + 1, "Item": r["item"], "Size": r["size"], "Qty": r["qty"], "UOM": r["uom"], "Transfer": r["xfer"]}
+                               for i, r in enumerate(rows)]),
+                 hide_index=True, use_container_width=True, height=min(80 + 36 * len(rows), 420))
+    st.caption("Upore-r list thik thakle OK chapun. Vul thakle Cancel kore qty thik korun.")
+    b1, b2 = st.columns(2)
+    if b1.button("✅ OK - Issue korun", type="primary", key="qi_ok", use_container_width=True):
+        if guard():
+            n = save_requisition_issue(p["fac"], p["lines"], p["tx_date"], p["sr_no"], p["ttype"], "[Quick Issue]", p["verified"], False,
+                                       p["section"], machine=None, asof=True)
+            if n:
+                _who = st.session_state.get("user", "")
+                st.session_state["last_req_no"] = p["sr_no"]
+                st.session_state["ri_saved"] = {"user": _who, "sr": p["sr_no"], "n": int(n), "qty": float(tot), "section": p["section"],
+                                                "time": local_now().strftime("%d-%b-%Y %I:%M %p"), "kind": "save"}
+                st.session_state["qi_gen"] = p["gen"] + 1
+                st.session_state["qi_extra"] = []
+                st.session_state.pop("qi_confirm", None)
+                done(f"✅ {_who}, apnar data sofolbhabe save hoyeche - SR {p['sr_no']}: {n}টি আইটেম ইস্যু হয়েছে"
+                     + (f" · Section: {p['section']}" if p["section"] else "") + ", স্টক কমেছে।"
+                     + (f" 🔁 Auto-transfer (apni tick diyechilen): {st.session_state.pop('_ri_xfer_note')}." if st.session_state.get("_ri_xfer_note") else ""))
+    if b2.button("✖ Cancel", key="qi_cancel", use_container_width=True):
+        st.session_state.pop("qi_confirm", None)
+        st.rerun()
+
+
+_st_dialog = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
+if _st_dialog:
+    @_st_dialog("✅ Issue-er ager-e ekbar dekhe nin")
+    def _qi_confirm_dialog(p):
+        _qi_confirm_body(p)
+else:
+    _qi_confirm_dialog = None
+
+
 @_frag
 def _ri_quick_form():
     """⚡ Quick Issue: the unit's regular items are already on screen - the officer types only the qty of what he issues."""
@@ -16397,19 +16439,22 @@ def _ri_quick_form():
         elif not confirm_existing:
             st.error("এই SR আগে ব্যবহার হয়েছে — নিশ্চিত করার টিক দিন।")
         elif guard():
-            n = save_requisition_issue(fac, [(int(r["sl_no"]), qv, xfer.get(int(r["sl_no"]), (False, 0.0))[0], float(r["price"] or 0),
-                                        xfer.get(int(r["sl_no"]), (False, 0.0))[1]) for r, qv, _ in sel],
-                                       tx_date, sr_no, ttype, "[Quick Issue]", verified, False, section, machine=None, asof=True)
-            if n:
-                _who = st.session_state.get("user", "")
-                st.session_state["last_req_no"] = sr_no
-                st.session_state["ri_saved"] = {"user": _who, "sr": sr_no, "n": int(n), "qty": float(sum(qv for _, qv, _ in sel)),
-                                                "section": section, "time": local_now().strftime("%d-%b-%Y %I:%M %p"), "kind": "save"}
-                st.session_state["qi_gen"] = gen + 1
-                st.session_state["qi_extra"] = []
-                done(f"✅ {_who}, apnar data sofolbhabe save hoyeche - SR {sr_no}: {n}টি আইটেম ইস্যু হয়েছে"
-                     + (f" · Section: {section}" if section else "") + ", স্টক কমেছে।"
-                     + (f" 🔁 Auto-transfer (apni tick diyechilen): {st.session_state.pop('_ri_xfer_note')}." if st.session_state.get("_ri_xfer_note") else ""))
+            _rows = []
+            for r, qv, _stk in sel:
+                _x = xfer.get(int(r["sl_no"]), (False, 0.0))
+                _rows.append({"item": r["item_name"], "size": r["size"] or "-", "qty": qv, "uom": r["unit"],
+                              "xfer": (f"🔁 {_x[1]:g} {other_factory(fac)} theke" if _x[0] and _x[1] > 0 else "")})
+            _p = {"fac": fac, "gen": gen, "sr_no": sr_no, "tx_date": tx_date, "ttype": ttype, "section": section, "verified": verified,
+                  "rows": _rows,
+                  "lines": [(int(r["sl_no"]), qv, xfer.get(int(r["sl_no"]), (False, 0.0))[0], float(r["price"] or 0),
+                             xfer.get(int(r["sl_no"]), (False, 0.0))[1]) for r, qv, _ in sel]}
+            st.session_state["qi_confirm"] = _p
+            if _qi_confirm_dialog:
+                _qi_confirm_dialog(_p)
+    _pc = st.session_state.get("qi_confirm")
+    if _qi_confirm_dialog is None and _pc and _pc.get("gen") == gen:      # very old Streamlit (no dialog): same summary, inline
+        with st.container(border=True):
+            _qi_confirm_body(_pc)
 
 
 def _ri_form():
