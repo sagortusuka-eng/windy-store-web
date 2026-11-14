@@ -15993,23 +15993,53 @@ def _ri_box(h):
         return st.container()
 
 
-def _tx_date_pick(col, wkey, gen, state_key, what="Issue"):
+def _tx_date_pick(col, wkey, gen, state_key, what="Issue", sticky=False):
     """Forces a DELIBERATE date choice for every slip (no silent default of 'today'), so a 09th slip is never saved on the
-    10th by mistake. Returns (date, ok). ok=False until the officer picks Aaj / Gotokal / Onno tarikh. Resets after each save (gen)."""
+    10th by mistake. Returns (date, ok). ok=False until the officer picks Aaj / Gotokal / Onno tarikh.
+    sticky=False: resets after each save (gen).
+    sticky=True : the chosen date is KEPT after Save (and when the officer visits another page and comes back) until the
+                  officer changes it himself - so the date is chosen once, not for every slip."""
     today = local_now().date()
     yest = today - timedelta(days=1)
-    ph = "-- Tarikh bachai korun --"
-    o_today, o_yest, o_other = f"Aaj - {today:%d-%b-%Y}", f"Gotokal - {yest:%d-%b-%Y}", "Onno tarikh (backdate)"
-    pick = col.selectbox(f"{what}-er tarikh *", [ph, o_today, o_yest, o_other], key=f"{wkey}_mode_{gen}",
-                         help="Slip-e ja tarikh lekha ache sheta bachai korun. Raat-er (gotokal-er) slip hole 'Gotokal' din.")
+    ph, o_today, o_yest, o_other = "pick", "today", "yest", "other"
+    labels = {ph: "-- Tarikh bachai korun --", o_today: f"Aaj - {today:%d-%b-%Y}",
+              o_yest: f"Gotokal - {yest:%d-%b-%Y}", o_other: "Onno tarikh (backdate)"}
+    if sticky:
+        mk, ok_, keep = f"{wkey}_smode", f"{wkey}_sother", f"_dtkeep_{wkey}"
+        kept = st.session_state.get(keep)
+        if kept is not None:
+            if mk not in st.session_state:                       # widget state was dropped (page switch) -> restore the choice
+                st.session_state[mk] = o_today if kept == today else (o_yest if kept == yest else o_other)
+                if st.session_state[mk] == o_other:
+                    st.session_state[ok_] = kept
+            elif st.session_state.get(mk) in (o_today, o_yest):  # midnight passed: keep the SAME date, do not slide to a new day
+                cur = today if st.session_state[mk] == o_today else yest
+                if cur != kept:
+                    st.session_state[mk] = o_other
+                    st.session_state[ok_] = kept
+    else:
+        mk, ok_, keep = f"{wkey}_mode_{gen}", f"{wkey}_other_{gen}", None
+    pick = col.selectbox(f"{what}-er tarikh *", [ph, o_today, o_yest, o_other], key=mk,
+                         format_func=lambda k: labels[k],
+                         help="Slip-e ja tarikh lekha ache sheta bachai korun. Raat-er (gotokal-er) slip hole 'Gotokal' din."
+                              + (" Ekbar bachai korle porer slip-gulote-o ei tarikhi thakbe - bodlate chaile ekhane change korun." if sticky else ""))
     if pick == o_today:
         d = today
     elif pick == o_yest:
         d = yest
     elif pick == o_other:
-        d = col.date_input("Tarikh", value=yest, max_value=today, key=f"{wkey}_other_{gen}")
+        if ok_ in st.session_state:                              # value already held in session state -> no default value
+            d = col.date_input("Tarikh", max_value=today, key=ok_)
+        else:
+            d = col.date_input("Tarikh", value=(st.session_state.get(keep) if keep and st.session_state.get(keep) else yest),
+                               max_value=today, key=ok_)
     else:
         d = None
+    if keep:
+        if d is not None:
+            st.session_state[keep] = d
+        else:
+            st.session_state.pop(keep, None)
     st.session_state[state_key] = d or today     # other code of this page reads this key
     return (d or today), d is not None
 
@@ -16036,7 +16066,7 @@ def _ri_form():
         _ri_step(1, "Slip details", "Requisition no., date, type and section")
         c1, c2, c3, c4 = st.columns([1, 1, 1.1, 1.3])
         sr_no = c1.text_input("Requisition No. (SR No.) *", key=f"ri_sr_{gen}", placeholder="e.g. 1745").strip()
-        tx_date, date_ok = _tx_date_pick(c2, "ri_dt", gen, "ri_date", "Issue")
+        tx_date, date_ok = _tx_date_pick(c2, "ri_dt", gen, "ri_date", "Issue", sticky=True)
         ttype = c3.selectbox("ধরন", list(ISSUE_TYPES), format_func=lambda c: TRANS_LABELS.get(c, c), key="ri_type")
         with c4:
             section = _ri_section_pick(f"ri_sec_{gen}", fac)
@@ -16379,7 +16409,7 @@ def _rr_form():
         pick_sup = c1.selectbox("Supplier *", [NEW_SUP] + [r["s"] for r in recent], key=f"rr_sup_pick_{gen}")
         supplier = c1.text_input("Supplier-er nam", key=f"rr_sup_new_{gen}").strip() if pick_sup == NEW_SUP else pick_sup
         challan = c2.text_input("Challan No. *", key=f"rr_challan_{gen}", placeholder="Supplier challan number").strip()
-        tx_date, date_ok = _tx_date_pick(c3, "rr_dt", gen, "rr_date", "Receive")
+        tx_date, date_ok = _tx_date_pick(c3, "rr_dt", gen, "rr_date", "Receive", sticky=True)
         _tx_date_banner(tx_date, date_ok, "Receive")
         notes = st.text_input("Remarks (ঐচ্ছিক — যেমন PO No., গাড়ির নম্বর)", key=f"rr_notes_{gen}")
 
