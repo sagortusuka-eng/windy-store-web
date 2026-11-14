@@ -17933,8 +17933,120 @@ def _gp_manage():
                     done("✅ Gate Pass লাইন মুছে স্টক ফেরত নেওয়া হয়েছে।")
 
 
+# ============================================================
+#  PREMIUM LOOK for "Gate Pass In" and "Hold Bill in Store"  (DISPLAY ONLY - no data, transaction or query logic is changed)
+#  Same navy + gold style as Repair & Returns. The two top-card strips below are one small cached read each
+#  (same cache as every other page: it is dropped only when something is saved), so page speed stays as it was.
+# ============================================================
+_PX_EXTRA = """<style>
+.px-band{display:flex;align-items:center;gap:12px;padding:11px 18px;border-radius:13px;margin:4px 0 12px;color:#F4E3B2;
+ background:linear-gradient(100deg,#07142F,#0A1F4D 55%,#13367F);border-bottom:3px solid #C9A24B;box-shadow:0 6px 18px rgba(10,31,77,.22)}
+.px-band b{font-size:15.5px;font-weight:800;letter-spacing:.2px}.px-band span{font-size:12.5px;color:#C9D5EE}
+.@R@ div[data-testid="stMetric"]{background:#fff;border:1px solid #D9DEE8;border-left:5px solid #13367F;border-radius:14px;padding:12px 16px;box-shadow:0 4px 16px rgba(10,31,77,.07)}
+.@R@ div[data-testid="stMetricLabel"] p{color:#51638A!important;font-weight:700!important}
+.@R@ div[data-testid="stMetricValue"]{color:#0A1F4D!important;font-weight:800!important}
+.@R@ div[data-testid="stDataFrame"],.@R@ div[data-testid="stDataEditor"]{border:1px solid #D9DEE8;border-radius:14px;box-shadow:0 4px 16px rgba(10,31,77,.07);overflow:hidden}
+.@R@ div[data-baseweb="textarea"]{background:#fff!important;border:1.5px solid #7C93BD!important;border-radius:10px!important}
+.@R@ div[data-baseweb="textarea"]:focus-within{border-color:#0A1F4D!important;box-shadow:0 0 0 3px rgba(201,162,75,.38)!important}
+.@R@ div[data-testid="stDownloadButton"] button{background:linear-gradient(135deg,#07142F,#13367F)!important;border:1px solid #C9A24B!important;border-radius:10px!important}
+.@R@ div[data-testid="stDownloadButton"] button p{color:#F4E3B2!important;font-weight:700!important}
+.@R@ div[class*='st-key-lz_'] label[data-baseweb='radio']{border-color:#D9DEE8!important;border-radius:11px!important}
+.@R@ div[class*='st-key-lz_'] label[data-baseweb='radio']:hover{border-color:#C9A24B!important}
+.@R@ div[class*='st-key-lz_'] label[data-baseweb='radio']:has(input:checked){background:linear-gradient(135deg,#07142F,#13367F)!important;border-color:#C9A24B!important}
+.@R@ div[class*='st-key-lz_'] label[data-baseweb='radio']:has(input:checked) p{color:#F4E3B2!important}
+.@E@{background:#fff;border:1px solid #D9DEE8;border-top:4px solid #C9A24B;border-radius:16px;padding:16px 18px 10px;box-shadow:0 6px 24px rgba(10,31,77,.09);margin:0 0 10px}
+</style>"""
+
+
+def _px_css(pfx):
+    """Premium CSS scoped to the page container keyed '<pfx>_root' (+ '<pfx>_entry' for the entry card). Other pages are not affected."""
+    return (_RPX_CSS.replace("st-key-rpx_root", f"st-key-{pfx}_root")
+            + _PX_EXTRA.replace("@R@", f"st-key-{pfx}_root").replace("@E@", f"st-key-{pfx}_entry"))
+
+
+def _px_hero(icon, title, sub):
+    e = html_lib.escape
+    return (f"<div class='rpx-hero'><div class='rpx-ic'>{icon}</div><div><div class='rpx-t'>{e(title)}</div>"
+            f"<div class='rpx-s'>{e(sub)}</div></div></div>")
+
+
+def _px_kpis(items):
+    """items = [(label, value, detail, colour)] -> the 5-card summary strip (same look as Repair & Returns)."""
+    e = html_lib.escape
+    return "<div class='rpx-kpis'>" + "".join(
+        f"<div class='rpx-k' style='--c:{c}'><div class='l'>{e(str(l))}</div><div class='v'>{e(str(v))}</div>"
+        + (f"<div class='d'>{e(str(d))}</div>" if d else "") + "</div>" for l, v, d, c in items) + "</div>"
+
+
+def _px_band(title, sub=""):
+    e = html_lib.escape
+    return f"<div class='px-band'><b>{e(title)}</b>" + (f"<span>{e(sub)}</span>" if sub else "") + "</div>"
+
+
+def _px_q(x):
+    return f"{x:,.0f}" if abs(x - round(x)) < 1e-9 else f"{x:,.2f}"
+
+
+def _gp_top_cards():
+    """Top summary strip of Gate Pass In (read-only, cached)."""
+    try:
+        fsql, fp = fw(FAC)
+        rows = q_c(f"""SELECT factory_name, LOWER(gate_pass_no) AS gp, MIN(gate_pass_no) AS gpn, rec_date,
+                              COUNT(*) AS n, COALESCE(SUM(qty),0) AS q
+                       FROM gate_pass_receipts WHERE 1=1{fsql}
+                       GROUP BY factory_name, LOWER(gate_pass_no), rec_date""", fp)
+    except Exception:
+        return
+    now = local_now()
+    gps, mon, lines, qty, last = set(), set(), 0, 0.0, None
+    for r in rows:
+        key = (r["factory_name"], r["gp"])
+        gps.add(key)
+        lines += int(r["n"] or 0)
+        qty += _hb_num(r["q"])
+        d = parse_date(r["rec_date"])
+        if d:
+            if d.year == now.year and d.month == now.month:
+                mon.add(key)
+            if last is None or d > last[0]:
+                last = (d, r["gpn"], r["rec_date"])
+    ago = age_days(last[2]) if last else None
+    st.markdown(_px_kpis([
+        ("মোট Gate Pass", f"{len(gps):,}", "গ্রহণ করা হয়েছে", "#13367F"),
+        ("আইটেম লাইন", f"{lines:,}", f"মোট Qty {_px_q(qty)}", "#0F766E"),
+        ("এই মাসে", f"{len(mon):,}", now.strftime("%B %Y"), "#D99A06"),
+        ("সর্বশেষ গ্রহণ", last[0].strftime(DATE_FMT) if last else "—", f"Gate Pass {last[1]}" if last else "", "#16A34A"),
+        ("শেষ গ্রহণের পর", f"{ago} দিন" if ago is not None else "—", "এখন পর্যন্ত", "#64748B")]), unsafe_allow_html=True)
+
+
+def _hb_top_cards():
+    """Top summary strip of Hold Bill in Store (read-only, cached): Open bills only."""
+    try:
+        fsql, fp = fw(FAC, "h.")
+        rows = q_c(f"""SELECT h.received_date, COALESCE(h.qty,0) AS qty, COALESCE(h.total_value,0) AS tv,
+                              COALESCE(h.erp_grn,'Pending') AS erp_grn, COALESCE(x.iq,0) AS iq
+                       FROM hold_bills h
+                       LEFT JOIN (SELECT bill_id, SUM(qty) AS iq FROM hold_bill_issues GROUP BY bill_id) x ON x.bill_id=h.id
+                       WHERE COALESCE(h.status,'Open')='Open'{fsql}""", fp)
+    except Exception:
+        return
+    val = sum(_hb_num(r["tv"]) for r in rows)
+    qty = sum(_hb_num(r["qty"]) for r in rows)
+    nil = [r for r in rows if _hb_phys(r["qty"], r["iq"]) == "NIL - issued"]
+    pend = sum(1 for r in rows if str(r["erp_grn"]) != "Done")
+    ages = [a for a in (age_days(r["received_date"]) for r in rows) if a is not None]
+    st.markdown(_px_kpis([
+        ("Open Hold Bill", f"{len(rows):,}", "লাইন — এখনো সমাধান হয়নি", "#13367F"),
+        ("আটকে থাকা মোট মূল্য", f"৳{val:,.0f}", f"মোট Qty {_px_q(qty)}", "#D99A06"),
+        ("🔴 Physically NIL", f"{len(nil):,}", f"৳{sum(_hb_num(r['tv']) for r in nil):,.0f} — Issue হয়ে গেছে", "#DC2626"),
+        ("ERP GRN Pending", f"{pend:,}", "ERP-তে GRN বাকি", "#0F766E"),
+        ("সবচেয়ে পুরোনো", f"{max(ages)} দিন" if ages else "—", "Open Bill-এর মধ্যে", "#64748B")]), unsafe_allow_html=True)
+
+
+
 def tab_gate_pass():
-    st.title("🚪 Gate Pass In")
+    st.markdown(_px_css("gpx"), unsafe_allow_html=True)
+    st.markdown(_px_hero("🚪", "Gate Pass In", "অন্য জায়গা (যেমন Garments Factory) থেকে Gate Pass-এ আসা মাল গ্রহণ ও ট্র্যাক — কতটুকু ইস্যু হলো, কতটুকু বাকি"), unsafe_allow_html=True)
     st.caption("Supplier নয় — অন্য জায়গা (যেমন Garments Factory) থেকে Gate Pass দিয়ে আসা মাল এখানে গ্রহণ করুন। "
                "পরে সেই মাল Transactions / Requisition Issue থেকে ইস্যু হলে এখানে দেখা যাবে কতটুকু ইস্যু হলো ও কতটুকু বাকি।")
     try:
@@ -17944,18 +18056,22 @@ def tab_gate_pass():
     except Exception as e:
         st.error(f"Gate Pass table setup failed: {e}")
         return
-    sec = lazy_tab_select(["📥 Gate Pass গ্রহণ", "📊 Gate Pass সারাংশ", "📦 আইটেম-ভিত্তিক", "🔎 ইস্যুর বিস্তারিত", "🛠 Edit / Delete / Print", "🏁 Opening Day Set"], "lz_gp")
-    if sec == 0:
-        if is_cons_view:
-            st.info("ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ গ্রহণ করা যায় না)।")
+    with st.container(key="gpx_root"):
+        _gp_top_cards()
+        sec = lazy_tab_select(["📥 Gate Pass গ্রহণ", "📊 Gate Pass সারাংশ", "📦 আইটেম-ভিত্তিক", "🔎 ইস্যুর বিস্তারিত", "🛠 Edit / Delete / Print", "🏁 Opening Day Set"], "lz_gp")
+        if sec == 0:
+            st.markdown(_px_band("📥 Gate Pass গ্রহণ (Store In)", "Gate Pass No → কোথা থেকে → আইটেম ও Qty → সংরক্ষণ"), unsafe_allow_html=True)
+            if is_cons_view:
+                st.info("ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ গ্রহণ করা যায় না)।")
+            else:
+                with st.container(key="gpx_entry"):
+                    _gp_receive_form()
+        elif sec == 4:
+            _gp_manage()
+        elif sec == 5:
+            _gp_opening_setup()
         else:
-            _gp_receive_form()
-    elif sec == 4:
-        _gp_manage()
-    elif sec == 5:
-        _gp_opening_setup()
-    else:
-        _gp_tracking(sec)
+            _gp_tracking(sec)
 
 
 # ============================================================
@@ -18782,7 +18898,8 @@ def _hb_report():
 
 
 def tab_hold_bills():
-    st.title("🗂 Hold Bill in Store")
+    st.markdown(_px_css("hbx"), unsafe_allow_html=True)
+    st.markdown(_px_hero("🗂", "Hold Bill in Store", "স্টোরে আটকে থাকা Bill / Challan — কেন আটকে, কতদিন ধরে, কার কাছে পেন্ডিং, আর মাল ফ্যাক্টরিতে Issue হয়ে গেছে কিনা"), unsafe_allow_html=True)
     st.caption("যেসব Bill / Challan স্টোরে পড়ে আছে — Requisition নেই, PO নেই বা গাড়ি ভাড়ার সমস্যা — সেগুলো Remarks সহ এখানে লিখে রাখুন, "
                "কতদিন ধরে পড়ে আছে ট্র্যাক করুন এবং PDF রিপোর্ট করে Sourcing / Maintenance বিভাগকে মেইল করুন। "
                "মাল আগেই ফ্যাক্টরিতে Issue হয়ে থাকলে তার তারিখ / Requisition / Department রেকর্ড করুন। এই পেজ মূল Inventory-র স্টক বদলায় না।")
@@ -18793,18 +18910,22 @@ def tab_hold_bills():
     except Exception as e:
         st.error(f"Hold Bill table setup failed: {e}")
         return
-    sec = lazy_tab_select(["➕ নতুন Hold Bill", "📋 তালিকা / Edit / Resolve", "🔻 Issue রেকর্ড", "📤 ERP-র জন্য Data",
-                           "📊 সারাংশ ও PDF Report"], "lz_hb")
-    if sec == 0:
-        _hb_entry_form()
-    elif sec == 1:
-        _hb_list()
-    elif sec == 2:
-        _hb_issues()
-    elif sec == 3:
-        _hb_erp()
-    else:
-        _hb_report()
+    with st.container(key="hbx_root"):
+        _hb_top_cards()
+        sec = lazy_tab_select(["➕ নতুন Hold Bill", "📋 তালিকা / Edit / Resolve", "🔻 Issue রেকর্ড", "📤 ERP-র জন্য Data",
+                               "📊 সারাংশ ও PDF Report"], "lz_hb")
+        if sec == 0:
+            st.markdown(_px_band("➕ নতুন Hold Bill এন্ট্রি", "Challan / Invoice → Supplier → Item, Qty, Rate → Problem ও দায়িত্বে কে → সংরক্ষণ"), unsafe_allow_html=True)
+            with st.container(key="hbx_entry"):
+                _hb_entry_form()
+        elif sec == 1:
+            _hb_list()
+        elif sec == 2:
+            _hb_issues()
+        elif sec == 3:
+            _hb_erp()
+        else:
+            _hb_report()
 
 
 # ============================================================
