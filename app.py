@@ -2964,20 +2964,87 @@ def _dash_extras(period):
     return out
 
 
+_DBP_CSS = """<style>
+@keyframes dbpUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+@keyframes dbpBar{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@keyframes dbpPulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,.65)}70%{box-shadow:0 0 0 9px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}
+.dbp-hero{position:relative;overflow:hidden;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;padding:26px 30px;border-radius:22px;margin:0 0 18px;
+ color:#fff;border:1px solid rgba(201,162,75,.55);box-shadow:0 18px 44px rgba(7,20,47,.38),inset 0 -4px 0 #C9A24B;
+ background:radial-gradient(700px 260px at 100% 0%,rgba(201,162,75,.38),rgba(201,162,75,0) 62%),radial-gradient(520px 240px at 0% 100%,rgba(70,120,230,.30),rgba(70,120,230,0) 70%),linear-gradient(120deg,#050E22,#0A1F4D 55%,#13367F);animation:dbpUp .5s ease both}
+.dbp-hero::after{content:"";position:absolute;right:-60px;top:-60px;width:240px;height:240px;border-radius:50%;border:1.5px solid rgba(201,162,75,.30);box-shadow:0 0 0 26px rgba(201,162,75,.06),0 0 0 54px rgba(201,162,75,.04);pointer-events:none}
+.dbp-l{display:flex;align-items:center;gap:18px;position:relative;z-index:1}
+.dbp-logo{width:66px;height:66px;border-radius:20px;display:flex;align-items:center;justify-content:center;font-size:32px;color:#F4E3B2;flex:none;
+ background:linear-gradient(135deg,#07142F,#13367F);box-shadow:0 10px 24px rgba(0,0,0,.45),inset 0 0 0 2px #C9A24B}
+.dbp-kick{font-size:11.5px;font-weight:800;letter-spacing:.22em;color:#E4C677;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.dbp-live{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;letter-spacing:.14em;color:#BBF7D0;background:rgba(34,197,94,.14);border:1px solid rgba(34,197,94,.45);padding:2px 10px;border-radius:99px}
+.dbp-live i{width:8px;height:8px;border-radius:50%;background:#22C55E;animation:dbpPulse 1.8s infinite}
+.dbp-title{font-size:30px;font-weight:800;line-height:1.15;margin-top:6px;letter-spacing:.2px;color:#fff}
+.dbp-lead{font-size:14px;color:#C9D5EE;margin-top:6px;max-width:640px;line-height:1.5}
+.dbp-chips{display:flex;flex-wrap:wrap;gap:10px;position:relative;z-index:1}
+.dbp-chip{display:inline-flex;align-items:center;gap:7px;padding:8px 15px;border-radius:12px;font-size:13px;font-weight:700;color:#F4E3B2;background:rgba(255,255,255,.08);border:1px solid rgba(201,162,75,.45);backdrop-filter:blur(4px)}
+.st-key-dbp_root .dbx-grid{gap:16px;margin:8px 0 18px}
+.st-key-dbp_root .dbx-card{position:relative;overflow:hidden;background:linear-gradient(180deg,#fff,#F7F9FD);border:1px solid #DCE3EF;border-left:1px solid #DCE3EF;border-radius:18px;
+ padding:20px 22px 17px;box-shadow:0 8px 26px rgba(10,31,77,.09);transition:transform .22s ease,box-shadow .22s ease;animation:dbpUp .55s ease both}
+.st-key-dbp_root .dbx-card::before{content:"";position:absolute;left:0;right:0;top:0;height:5px;background:linear-gradient(90deg,var(--c),#C9A24B)}
+.st-key-dbp_root .dbx-card::after{content:"";position:absolute;right:-34px;top:-34px;width:120px;height:120px;border-radius:50%;background:radial-gradient(circle,var(--c),transparent 70%);opacity:.11;pointer-events:none}
+.st-key-dbp_root .dbx-card:hover{transform:translateY(-4px);box-shadow:0 16px 36px rgba(10,31,77,.17)}
+.st-key-dbp_root .dbx-card:nth-child(2){animation-delay:.07s}.st-key-dbp_root .dbx-card:nth-child(3){animation-delay:.14s}
+.st-key-dbp_root .dbx-card:nth-child(4){animation-delay:.21s}.st-key-dbp_root .dbx-card:nth-child(5){animation-delay:.28s}
+.st-key-dbp_root .dbx-top{color:#51638A;font-size:11.5px;letter-spacing:.09em;gap:11px}
+.st-key-dbp_root .dbx-ico{width:36px;height:36px;display:inline-flex;align-items:center;justify-content:center;font-size:17px;border-radius:12px;flex:none;
+ background:linear-gradient(135deg,#07142F,#13367F);box-shadow:0 5px 12px rgba(10,31,77,.30),inset 0 0 0 1.5px #C9A24B}
+.st-key-dbp_root .dbx-val{font-size:2rem;font-weight:800;color:#0A1F4D;margin-top:12px;letter-spacing:-.4px;font-variant-numeric:tabular-nums}
+.st-key-dbp_root .dbx-sub{color:#64748B;font-size:.83rem;margin-top:5px}
+.st-key-dbp_root .dbx-sec{display:flex;align-items:center;gap:12px;border-left:0;padding:0;margin:24px 0 6px;font-size:1.04rem;font-weight:800;color:#0A1F4D;letter-spacing:.2px}
+.st-key-dbp_root .dbx-sec::after{content:"";flex:1;height:2px;border-radius:2px;background:linear-gradient(90deg,#C9A24B,rgba(201,162,75,0))}
+.st-key-dbp_root .dbx-bud{border-radius:18px;border:1px solid #DCE3EF;padding:20px 24px;box-shadow:0 8px 26px rgba(10,31,77,.09);background:linear-gradient(180deg,#fff,#F7F9FD)}
+.st-key-dbp_root .dbx-bud-head{font-size:.96rem;color:#0A1F4D}
+.st-key-dbp_root .dbx-bar{height:20px;background:#E6EBF3;box-shadow:inset 0 1px 3px rgba(10,31,77,.20);margin:12px 0 9px}
+.st-key-dbp_root .dbx-bar>div{background-image:linear-gradient(180deg,rgba(255,255,255,.38),rgba(255,255,255,0) 55%,rgba(0,0,0,.10))!important;transform-origin:left;animation:dbpBar .9s ease both}
+.st-key-dbp_root div[data-baseweb="tab-list"]{gap:6px;border-bottom:2px solid #E2E8F0}
+.st-key-dbp_root button[data-baseweb="tab"]{border-radius:12px 12px 0 0;padding:11px 18px}
+.st-key-dbp_root button[data-baseweb="tab"] p{font-weight:700!important;color:#51638A!important}
+.st-key-dbp_root button[data-baseweb="tab"][aria-selected="true"]{background:linear-gradient(180deg,#fff,#F3F0E6)}
+.st-key-dbp_root button[data-baseweb="tab"][aria-selected="true"] p{color:#0A1F4D!important}
+.st-key-dbp_root div[data-baseweb="tab-highlight"]{background:#C9A24B!important;height:3px!important}
+.st-key-dbp_root div[data-testid="stDataFrame"]{border:1px solid #D9DEE8;border-radius:14px;box-shadow:0 6px 20px rgba(10,31,77,.08);overflow:hidden}
+.st-key-dbp_root div[data-testid="stAlert"]{border-radius:14px}
+.st-key-dbp_root div[data-testid="stExpander"]{border:1px solid #D9DEE8!important;border-radius:14px!important;box-shadow:0 4px 16px rgba(10,31,77,.07)}
+.st-key-dbp_root div[data-baseweb="select"]>div,.st-key-dbp_root div[data-baseweb="input"]{background:#fff!important;border:1.5px solid #7C93BD!important;border-radius:10px!important}
+.st-key-dbp_root div[data-baseweb="base-input"]{border:0!important;background:transparent!important}
+.st-key-dbp_root div[data-baseweb="select"]>div:focus-within,.st-key-dbp_root div[data-baseweb="input"]:focus-within{border-color:#0A1F4D!important;box-shadow:0 0 0 3px rgba(201,162,75,.38)!important}
+.st-key-dbp_root .stButton>button{background:linear-gradient(135deg,#07142F,#13367F)!important;border:1px solid #C9A24B!important;border-radius:10px!important}
+.st-key-dbp_root .stButton>button p{color:#F4E3B2!important;font-weight:700!important}
+@media (prefers-reduced-motion:reduce){.dbp-hero,.st-key-dbp_root .dbx-card,.st-key-dbp_root .dbx-bar>div,.dbp-live i{animation:none!important}}
+@media (max-width:700px){.dbp-hero{padding:20px 18px}.dbp-title{font-size:23px}.st-key-dbp_root .dbx-val{font-size:1.65rem}}
+</style>"""
+
+
+def _dbp_hero(viewer, factory, role):
+    """Premium welcome banner of the Management Dashboard (display only - no database access)."""
+    e = html_lib.escape
+    chips = f"<span class='dbp-chip'>🏭 {e(str(factory))}</span><span class='dbp-chip'>📅 {e(local_now().strftime('%A, %d %B %Y'))}</span>"
+    if role:
+        chips += f"<span class='dbp-chip'>👤 {e(str(role))}</span>"
+    return ("<div class='dbp-hero'><div class='dbp-l'><div class='dbp-logo'>📊</div><div>"
+            "<div class='dbp-kick'>OPERATIONS AT A GLANCE <span class='dbp-live'><i></i>LIVE</span></div>"
+            "<div class='dbp-title'>Management Dashboard</div>"
+            f"<div class='dbp-lead'>Welcome, {e(str(viewer))}. Keep stock, purchasing and budget health in view. "
+            f"Live overview for {e(str(factory))} - choose a reporting period below to review activity.</div></div></div>"
+            f"<div class='dbp-chips'>{chips}</div></div>")
+
+
 def tab_dashboard():
+    """Management dashboard (premium look). The page itself is unchanged: _tab_dashboard_body() below runs exactly as before,
+    inside a styled container, so every number, query and cache stays as it was."""
+    st.markdown(_DBP_CSS, unsafe_allow_html=True)
+    with st.container(key="dbp_root"):
+        _tab_dashboard_body()
+
+
+def _tab_dashboard_body():
     """Management dashboard: purchase, issue, inventory and budget using live database records."""
-    st.title("Management Dashboard")
-    st.caption("Purchases, stock issues and budget performance for the selected factory.")
-    viewer_name = html_lib.escape(str(st.session_state.get("user") or "Store team"))
-    factory_name = html_lib.escape(str(FAC))
-    st.markdown(
-        f'<div class="dashboard-welcome">'
-        f'<div class="dashboard-kicker">OPERATIONS AT A GLANCE</div>'
-        f'<div class="dashboard-lead">Welcome, {viewer_name}. Keep stock, purchasing and budget health in view.</div>'
-        f'<div class="dashboard-note">Live overview for {factory_name}. Choose a reporting period to review activity.</div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown(_dbp_hero(st.session_state.get("user") or "Store team", FAC, st.session_state.get("role")), unsafe_allow_html=True)
     render_dashboard_addons()   # NEW: আজকের কাজ card, note board, transfer suggestions (isolated; cannot break the dashboard)
 
     transaction_rows = qdf_c(f"""SELECT t.factory_name, t.date, t.time, t.trans_type, t.qty, t.item_name,
