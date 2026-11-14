@@ -15605,6 +15605,9 @@ _RI_PREM_CSS = """<style>
 .st-key-pv_root [class*="st-key-ri_tab_"] button{width:100%!important;min-height:56px!important;border-radius:14px!important;border:1px solid var(--tcl)!important;border-top:5px solid var(--tc)!important;background:linear-gradient(180deg,#FFFFFF 0%,var(--tcbg) 100%)!important;box-shadow:0 4px 10px rgba(7,20,47,.08)!important;transition:all .18s ease!important}
 .st-key-pv_root [class*="st-key-ri_tab_"] button p{font-size:16px!important;font-weight:800!important;color:var(--tc2)!important;white-space:nowrap!important}
 .st-key-pv_root [class*="st-key-ri_tab_"] button:hover{background:var(--tcbg)!important;transform:translateY(-2px);box-shadow:0 10px 20px rgba(7,20,47,.16)!important}
+.st-key-pv_root .st-key-ri_tab_7{--tc:#E2B100;--tc2:#8A6A00;--tcbg:#FFF8DB;--tcl:#F3E1A0}
+.st-key-pv_root .st-key-ri_tab_7 button[kind="primary"],.st-key-pv_root .st-key-ri_tab_7 button[data-testid="stBaseButton-primary"]{background:linear-gradient(135deg,#8A6A00 0%,#E2B100 100%)!important;border-color:#8A6A00!important;border-top-color:#8A6A00!important;transform:translateY(-1px);box-shadow:0 12px 24px #E2B10066,inset 0 -4px 0 rgba(255,255,255,.38)!important}
+.st-key-pv_root .st-key-ri_tab_7 button[kind="primary"] p,.st-key-pv_root .st-key-ri_tab_7 button[data-testid="stBaseButton-primary"] p{color:#FFFFFF!important;text-shadow:0 1px 2px rgba(0,0,0,.30)}
 .st-key-pv_root .st-key-ri_tab_1{--tc:#1F63D6;--tc2:#0B3D91;--tcbg:#EAF2FD;--tcl:#C7DBF7}
 .st-key-pv_root .st-key-ri_tab_1 button[kind="primary"],.st-key-pv_root .st-key-ri_tab_1 button[data-testid="stBaseButton-primary"]{background:linear-gradient(135deg,#0B3D91 0%,#1F63D6 100%)!important;border-color:#0B3D91!important;border-top-color:#0B3D91!important;transform:translateY(-1px);box-shadow:0 12px 24px #1F63D666,inset 0 -4px 0 rgba(255,255,255,.38)!important}
 .st-key-pv_root .st-key-ri_tab_1 button[kind="primary"] p,.st-key-pv_root .st-key-ri_tab_1 button[data-testid="stBaseButton-primary"] p{color:#FFFFFF!important;text-shadow:0 1px 2px rgba(0,0,0,.30)}
@@ -15911,7 +15914,7 @@ def _ri_mode_bar(modes):
         box = st.container()
     with box:
         cols = st.columns(len(modes))
-        _fixed = {"📤": 1, "📥": 2, "⏳": 3, "🧰": 4, "🧾": 5, "🕵️": 6}      # fixed colour slot per tab (a hidden tab does not shift the others)
+        _fixed = {"📤": 1, "📥": 2, "⏳": 3, "🧰": 4, "🧾": 5, "🕵️": 6, "⚡": 7}      # fixed colour slot per tab (a hidden tab does not shift the others)
         for i, (c, m) in enumerate(zip(cols, modes), 1):
             n = next((v for kx, v in _fixed.items() if m.startswith(kx)), i)
             c.button(m, key=f"ri_tab_{n}", type="primary" if m == cur else "secondary", use_container_width=True,
@@ -15937,6 +15940,9 @@ def tab_req_issue():
         if not st.session_state.get("_ri_pending_table_ready_v2"):
             run_once_per_process("ri_pending_table_v2", ensure_ri_pending_table)
             st.session_state["_ri_pending_table_ready_v2"] = True
+        if not st.session_state.get("_ri_regular_table_ready"):
+            run_once_per_process("ri_regular_table", ensure_ri_regular_table)
+            st.session_state["_ri_regular_table_ready"] = True
     except Exception as e:
         st.error(f"req_no column setup failed: {e}")
         return
@@ -15955,7 +15961,7 @@ def _tab_req_issue_body():
     st.session_state["_ri_tabbed"] = False
     _ri_page_header()
     is_mgr = st.session_state.get("role") == "Store Manager"
-    _modes = ["📤 Issue (SR slip)", "📥 Supplier Receipt (Challan)", "⏳ Pending Issue (stock nei)", "🧰 SR Center (edit / fix)"]
+    _modes = ["📤 Issue (SR slip)", "⚡ Quick Issue (regular items)", "📥 Supplier Receipt (Challan)", "⏳ Pending Issue (stock nei)", "🧰 SR Center (edit / fix)"]
     if is_mgr:      # Challan Center (edit / fix everything about a received challan): Store Manager only
         _modes.append("🧾 Challan Center (edit / fix)")
     if st.session_state.get("role") in IW_VIEW_ROLES:
@@ -15975,6 +15981,16 @@ def _tab_req_issue_body():
             _iw_view()
         except Exception as e:
             st.error(f"Skip Watch load kora jayni: {e}")
+        return
+    if mode.startswith("⚡"):
+        try:
+            _ri_quick_form()
+        except Exception as e:
+            st.error(f"Quick Issue load kora jayni: {e}")
+        try:
+            _ri_recent_tx_panel()
+        except Exception as e:
+            st.caption(f"Recent transactions load kora jayni: {e}")
         return
     if mode.startswith("🧰"):
         try:
@@ -16106,6 +16122,236 @@ def _tx_date_banner(d, ok, what="Issue", wkey=None):
 
 
 @_frag   # typing / adding rows re-runs ONLY this block - the rest of the app is not touched
+def ensure_ri_regular_table():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS ri_regular_items (
+                id SERIAL PRIMARY KEY, factory_name TEXT, sl_no INTEGER, sort_no INTEGER DEFAULT 0, added_by TEXT, added_at TEXT,
+                UNIQUE (factory_name, sl_no))""")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def ri_reg_list(fac):
+    """The unit's regular / common items (with live stock) for the Quick Issue tab."""
+    return q("""SELECT r.sl_no, COALESCE(i.prod_id,'') AS prod_id, COALESCE(i.item_name,'') AS item_name, COALESCE(i.size,'') AS size,
+                       COALESCE(i.current_stock,0) AS stock, COALESCE(NULLIF(TRIM(i.unit_name),''),'Pcs') AS unit,
+                       COALESCE(i.unit_price,0) AS price
+                FROM ri_regular_items r JOIN inventory i ON i.factory_name=r.factory_name AND i.sl_no=r.sl_no
+                WHERE r.factory_name=%s ORDER BY r.sort_no, i.item_name, i.size""", (fac,))
+
+
+@tx
+def ri_reg_add(fac, sls):
+    who = st.session_state.get("user", "")
+    n = 0
+    for sl in sls:
+        r = run("""INSERT INTO ri_regular_items (factory_name, sl_no, sort_no, added_by, added_at) VALUES (%s,%s,0,%s,%s)
+                   ON CONFLICT (factory_name, sl_no) DO NOTHING RETURNING id""",
+                (fac, int(sl), who, local_now().strftime("%Y-%m-%d %H:%M:%S")))
+        n += 1 if r else 0
+    audit("RI_REGULAR_ADD", f"{fac}: {n} item(s) added to the Quick Issue regular list by {who} (SL {', '.join(str(int(x)) for x in sls)})")
+    return n
+
+
+@tx
+def ri_reg_remove(fac, sls):
+    who = st.session_state.get("user", "")
+    run("DELETE FROM ri_regular_items WHERE factory_name=%s AND sl_no = ANY(%s)", (fac, [int(x) for x in sls]))
+    audit("RI_REGULAR_REMOVE", f"{fac}: {len(sls)} item(s) removed from the Quick Issue regular list by {who} (SL {', '.join(str(int(x)) for x in sls)})")
+    return len(sls)
+
+
+def ri_reg_suggest(fac, limit=40):
+    """Items issued on the most different slips lately (last ~4000 issue lines), not yet on the regular list."""
+    rows = q("""SELECT t.sl_no, COUNT(DISTINCT COALESCE(NULLIF(t.req_no,''), t.id::text)) AS n
+                FROM (SELECT id, sl_no, req_no FROM transactions WHERE factory_name=%s AND trans_type = ANY(%s)
+                      ORDER BY id DESC LIMIT 4000) t
+                WHERE t.sl_no NOT IN (SELECT sl_no FROM ri_regular_items WHERE factory_name=%s)
+                GROUP BY t.sl_no ORDER BY n DESC LIMIT %s""", (fac, list(ISSUE_TYPES), fac, int(limit)))
+    if not rows:
+        return []
+    cnt = {int(r["sl_no"]): int(r["n"]) for r in rows}
+    inv = q(f"SELECT {INV_COLS} FROM inventory WHERE factory_name=%s AND sl_no = ANY(%s)", (fac, list(cnt)))
+    inv = sorted(inv, key=lambda r: -cnt.get(int(r["sl_no"]), 0))
+    return [(r, cnt[int(r["sl_no"])]) for r in inv]
+
+
+def _ri_quick_manage(fac, reg, can_write):
+    """Add / remove regular items, or let the app suggest them from the issue history."""
+    with st.expander(f"⚙️ Regular item list bodlan ({len(reg)} item)"):
+        have = {int(r["sl_no"]) for r in reg}
+        m1, m2 = st.columns(2)
+        with m1:
+            st.markdown("**➕ Notun regular item jog korun**")
+            term = st.text_input("🔍 Nam / code / size", key="qi_add_term").strip()
+            cands = [r for r in (search_items(fac, term)[:30] if len(term) >= 2 else []) if int(r["sl_no"]) not in have]
+            lab = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · stock {float(r['stock']):g}": int(r["sl_no"]) for r in cands}
+            pk = st.multiselect("Item bachun", list(lab), key="qi_add_pick")
+            if st.button("➕ List-e jog korun", key="qi_add_btn", disabled=not (can_write and pk)) and guard():
+                n = ri_reg_add(fac, [lab[x] for x in pk])
+                if n is not None:
+                    done(f"✅ {n} ti item regular list-e jog hoyeche.")
+        with m2:
+            st.markdown("**🗑 List theke bad din**")
+            rl = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']}": int(r["sl_no"]) for r in reg}
+            rk = st.multiselect("Bad dewar item", list(rl), key="qi_rm_pick")
+            if st.button("🗑 List theke bad din", key="qi_rm_btn", disabled=not (can_write and rk)) and guard():
+                n = ri_reg_remove(fac, [rl[x] for x in rk])
+                if n is not None:
+                    done(f"✅ {n} ti item regular list theke bad gelo.")
+        st.divider()
+        if st.checkbox("🪄 Auto-suggest: shesh-e beshi issue hoyechhe emon item dekhan", key="qi_sug_on"):
+            sug = ri_reg_suggest(fac)
+            if not sug:
+                st.caption("Notun kono suggestion nei.")
+            else:
+                sl = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · {n}-ti slip-e issue": int(r["sl_no"]) for r, n in sug}
+                sp = st.multiselect("Regular list-e jog korte chaile bachun", list(sl), default=list(sl)[:15], key="qi_sug_pick")
+                if st.button("➕ Bachai kora gulo jog korun", key="qi_sug_btn", disabled=not (can_write and sp)) and guard():
+                    n = ri_reg_add(fac, [sl[x] for x in sp])
+                    if n is not None:
+                        st.session_state.pop("qi_sug_on", None)
+                        done(f"✅ {n} ti item regular list-e jog hoyeche.")
+
+
+@_frag
+def _ri_quick_form():
+    """⚡ Quick Issue: the unit's regular items are already on screen - the officer types only the qty of what he issues."""
+    fac = FAC
+    gen = st.session_state.get("qi_gen", 0)
+    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
+    reg = ri_reg_list(fac)
+    _ri_chips([("⚡", "Quick Issue - regular item auto", "teal"), ("📍", fac, ""), ("✍️", "Shudhu qty likhun", ""),
+               ("🔁", "Stock kom hole onno unit theke auto-transfer", "")])
+    with _ri_card("qi_hdr"):
+        _ri_step(1, "Slip details", "Requisition no., tarikh, dhoron ar section")
+        c1, c2, c3, c4 = st.columns([1, 1, 1.1, 1.3])
+        sr_no = c1.text_input("Requisition No. (SR No.) *", key=f"qi_sr_{gen}", placeholder="e.g. 1745").strip()
+        tx_date, date_ok = _tx_date_pick(c2, "qi_dt", gen, "qi_date", "Issue", sticky=True)
+        ttype = c3.selectbox("ধরন", list(ISSUE_TYPES), format_func=lambda c: TRANS_LABELS.get(c, c), key="qi_type")
+        with c4:
+            section = _ri_section_pick(f"qi_sec_{gen}", fac)
+        _tx_date_banner(tx_date, date_ok, "Issue", wkey="qi_dt")
+        confirm_existing = True
+        if sr_no:
+            used = q("SELECT COUNT(*) AS n FROM transactions WHERE factory_name=%s AND req_no=%s", (fac, sr_no))
+            n_used = int(used[0]["n"]) if used else 0
+            if n_used:
+                st.warning(f"⚠️ SR {sr_no} এই Unit-এ আগেই ব্যবহার হয়েছে ({n_used}টি লাইন)। একই স্লিপে আরও আইটেম যোগ করছেন তো?")
+                confirm_existing = st.checkbox(f"হ্যাঁ, SR {sr_no}-তে আরও আইটেম যোগ করছি", key=f"qi_conf_{gen}")
+    _ri_quick_manage(fac, reg, can_write)
+    if not reg:
+        _ri_empty("⚡", "Regular item list khali", "Upore '⚙️ Regular item list bodlan' theke item jog korun, ba Auto-suggest chalan.")
+        return
+    eff = {}
+    if tx_date < local_now().date():          # back-dated slip: judge stock as it stood on that day
+        try:
+            eff = stock_asof_many(fac, [int(r["sl_no"]) for r in reg], tx_date, cached=True)
+        except Exception:
+            eff = {}
+    with _ri_card("qi_items"):
+        _ri_step(2, "Qty din", f"{len(reg)} ti regular item - je item issue hobe shudhu tar 'Issue Qty' likhun, baki khali rakhun")
+        df = pd.DataFrame([{"Item": r["item_name"], "Size": r["size"], "ERP Code": r["prod_id"], "UOM": r["unit"],
+                            "Stock": float(eff.get(int(r["sl_no"]), r["stock"])), "Issue Qty": 0.0} for r in reg])
+        ed = st.data_editor(df, key=f"qi_grid_{gen}", hide_index=True, use_container_width=True,
+                            height=min(80 + 36 * len(df), 620),
+                            disabled=["Item", "Size", "ERP Code", "UOM", "Stock"],
+                            column_config={"Issue Qty": st.column_config.NumberColumn("Issue Qty ✍️", min_value=0.0, step=1.0, format="%g"),
+                                           "Stock": st.column_config.NumberColumn("Stock", format="%g")})
+    sel = []
+    for r, (_, row) in zip(reg, ed.iterrows()):
+        qv = row["Issue Qty"]
+        qv = 0.0 if qv is None or qv != qv else float(qv)
+        if qv > 0:
+            sel.append((r, qv, float(eff.get(int(r["sl_no"]), r["stock"]))))
+    # ---- stock kom hole: onno unit theke auto-transfer (same rule as the 📤 Issue tab); tick must stay ON for the line to save
+    short, xfer = [], {}
+    xcache = st.session_state.setdefault("ri_other_cache", {})
+    for r, qv, stk in sel:
+        if qv <= stk + 1e-9:
+            continue
+        sl_ = int(r["sl_no"])
+        shortage = qv - stk
+        ck = (gen, sl_, round(shortage, 6))
+        if ck not in xcache:
+            try:
+                xcache[ck] = find_same_in_other(r["prod_id"], r["item_name"], other_factory(fac), r["size"], need=shortage)
+            except Exception:
+                xcache[ck] = None
+        other = xcache[ck]
+        nm_ = f"{r['item_name']} [{r['size'] or '-'}]"
+        if other and float(other["stock"] or 0) >= shortage - 1e-9:
+            ok_x = st.checkbox(f"🔁 {nm_}: stock {stk:g}, issue {qv:g} — {shortage:g} {r['unit']} {other['factory_name']} theke auto-transfer hobe "
+                               f"({other['item_name']} [{other['prod_id']}], oi unit-e stock {float(other['stock']):g})",
+                               value=True, key=f"qi_x_{gen}_{sl_}_{shortage:g}")
+            if other.get("level") == "fuzzy":
+                st.caption(f"⚠️ {nm_}: nam hubohu ek noy - duto ek-i item kina dekhe nishchit hon.")
+            xfer[sl_] = (bool(ok_x), round(float(shortage), 6))
+            if not ok_x:
+                short.append(f"{nm_} (transfer tick bondho - tick din ba qty komiye {stk:g} korun)")
+        else:
+            short.append(f"{nm_} (stock {stk:g}, issue {qv:g}; {other_factory(fac)}-e-o {shortage:g} {r['unit']} stock nei)")
+    no_rate = [f"{r['item_name']} [{r['size'] or '-'}]" for r, qv, _ in sel if float(r["price"] or 0) <= 0]
+    if short:
+        st.error("⛔ Stock kom: " + "; ".join(short) + " — qty komiye din, ba 📤 Issue tab-e Pending diye korun.")
+    if no_rate:
+        st.error("⛔ Rate nei: " + "; ".join(no_rate) + " — ei item-gulo 📤 Issue tab-e Rate diye issue korun.")
+    if len(sel) > RI_MAX_LINES:
+        st.error(f"Ekta slip-e sorbocho {RI_MAX_LINES} ti item - apni {len(sel)} ti diyechen.")
+    verified = False
+    if sel:
+        try:
+            vm = _ri_verif_many(fac, [int(r["sl_no"]) for r, _, _ in sel], tx_date)
+        except Exception:
+            vm = {}
+        need_names = [r["item_name"] for r, _, _ in sel if vm.get(int(r["sl_no"]), (False, 0))[0]]
+        if need_names:
+            verified = st.checkbox("Physically verified — এই আইটেমগুলো ফিজিক্যালি গুনে দেখা হয়েছে: " + ", ".join(need_names), key=f"qi_ver_{gen}")
+        try:
+            _sb_issue_warn(fac, section, tx_date, sum(qv * float(r["price"] or 0) for r, qv, _ in sel), ttype)
+        except Exception:
+            pass
+    else:
+        need_names = []
+    f1, f2 = st.columns([2.4, 2.2])
+    _ri_chips([("📋", f"{len(sel)} item", ""), ("🔢", f"Qty {sum(qv for _, qv, _ in sel):g}", "")]
+              + ([] if can_write else [("🔒", "Login required to save", "red")]), target=f1)
+    if f2.button("💾 Issue save korun", type="primary", key=f"qi_save_{gen}", use_container_width=True, disabled=not can_write):
+        if not date_ok:
+            st.error("Issue-er TARIKH bachai korun (Aaj / Gotokal / Onno tarikh) - tarpor Save korun.")
+        elif not sr_no:
+            st.error("Requisition No. (SR No.) লিখুন — এটা বাধ্যতামূলক।")
+        elif not sel:
+            st.error("Kono item-er Issue Qty deya hoy ni.")
+        elif (count_gate_status(fac) or {}).get("blocked"):
+            st.error("এই সপ্তাহের compulsory Physical Count শেষ হয়নি — আগে 📱 Physical Count → 🎯 তালিকার আইটেম গুনুন, তারপর Issue save হবে।")
+        elif ttype == "Issued" and not section:
+            st.error("Section বাছুন (কোন section-এ গেল) — report / audit-এর জন্য এটা দরকার।")
+        elif short or no_rate or len(sel) > RI_MAX_LINES:
+            st.error("তালিকায় সমস্যা আছে (stock kom / transfer / Rate nei) — upore lal message dekhe thik korun.")
+        elif need_names and not verified:
+            st.error("Physical verification লাগবে — ghune dekhe tick din.")
+        elif not confirm_existing:
+            st.error("এই SR আগে ব্যবহার হয়েছে — নিশ্চিত করার টিক দিন।")
+        elif guard():
+            n = save_requisition_issue(fac, [(int(r["sl_no"]), qv, xfer.get(int(r["sl_no"]), (False, 0.0))[0], float(r["price"] or 0),
+                                        xfer.get(int(r["sl_no"]), (False, 0.0))[1]) for r, qv, _ in sel],
+                                       tx_date, sr_no, ttype, "[Quick Issue]", verified, False, section, machine=None, asof=True)
+            if n:
+                _who = st.session_state.get("user", "")
+                st.session_state["last_req_no"] = sr_no
+                st.session_state["ri_saved"] = {"user": _who, "sr": sr_no, "n": int(n), "qty": float(sum(qv for _, qv, _ in sel)),
+                                                "section": section, "time": local_now().strftime("%d-%b-%Y %I:%M %p"), "kind": "save"}
+                st.session_state["qi_gen"] = gen + 1
+                done(f"✅ {_who}, apnar data sofolbhabe save hoyeche - SR {sr_no}: {n}টি আইটেম ইস্যু হয়েছে"
+                     + (f" · Section: {section}" if section else "") + ", স্টক কমেছে।"
+                     + (f" 🔁 Auto-transfer (apni tick diyechilen): {st.session_state.pop('_ri_xfer_note')}." if st.session_state.get("_ri_xfer_note") else ""))
+
+
 def _ri_form():
     fac = FAC
     gen = st.session_state.get("ri_gen", 0)
