@@ -16006,17 +16006,19 @@ def _tx_date_pick(col, wkey, gen, state_key, what="Issue", sticky=False):
               o_yest: f"Gotokal - {yest:%d-%b-%Y}", o_other: "Onno tarikh (backdate)"}
     if sticky:
         mk, ok_, keep = f"{wkey}_smode", f"{wkey}_sother", f"_dtkeep_{wkey}"
-        kept = st.session_state.get(keep)
-        if kept is not None:
-            if mk not in st.session_state:                       # widget state was dropped (page switch) -> restore the choice
-                st.session_state[mk] = o_today if kept == today else (o_yest if kept == yest else o_other)
-                if st.session_state[mk] == o_other:
-                    st.session_state[ok_] = kept
-            elif st.session_state.get(mk) in (o_today, o_yest):  # midnight passed: keep the SAME date, do not slide to a new day
-                cur = today if st.session_state[mk] == o_today else yest
-                if cur != kept:
-                    st.session_state[mk] = o_other
-                    st.session_state[ok_] = kept
+        meta_k, warn_k = f"_dtmeta_{wkey}", f"_dtwarn_{wkey}"
+        kept, meta = st.session_state.get(keep), st.session_state.get(meta_k)
+        if kept is not None and meta:
+            _why = "unit" if meta[0] != FAC else ("midnight" if meta[1] != today else None)
+            if _why:                                             # unit changed / day changed -> date must be set again
+                for _k in (keep, meta_k, mk, ok_):
+                    st.session_state.pop(_k, None)
+                st.session_state[warn_k] = _why
+                kept = None
+        if kept is not None and mk not in st.session_state:      # widget state was dropped (page switch) -> restore the choice
+            st.session_state[mk] = o_today if kept == today else (o_yest if kept == yest else o_other)
+            if st.session_state[mk] == o_other:
+                st.session_state[ok_] = kept
     else:
         mk, ok_, keep = f"{wkey}_mode_{gen}", f"{wkey}_other_{gen}", None
     pick = col.selectbox(f"{what}-er tarikh *", [ph, o_today, o_yest, o_other], key=mk,
@@ -16038,17 +16040,40 @@ def _tx_date_pick(col, wkey, gen, state_key, what="Issue", sticky=False):
     if keep:
         if d is not None:
             st.session_state[keep] = d
+            if not st.session_state.get(meta_k):
+                st.session_state[meta_k] = (FAC, today)
+            st.session_state.pop(warn_k, None)
+            st.session_state.pop(f"_dttoast_{wkey}", None)
         else:
             st.session_state.pop(keep, None)
+            st.session_state.pop(meta_k, None)
+            _why = st.session_state.get(warn_k) or "start"
+            if st.session_state.get(f"_dttoast_{wkey}") != _why:    # one pop-up notification per event, not on every click
+                st.session_state[f"_dttoast_{wkey}"] = _why
+                _msg = {"midnight": "Rat 12-ta par hoye geche! Notun din-er tarikh set kore nin.",
+                        "unit": "Unit change hoyeche! Ei unit-er jonno tarikh abar set kore nin."}.get(
+                            _why, f"Kaj shuru korar age {what}-er tarikh fixed korun.")
+                try:
+                    st.toast(_msg, icon="\u26a0\ufe0f")
+                except Exception:
+                    pass
     st.session_state[state_key] = d or today     # other code of this page reads this key
     return (d or today), d is not None
 
 
-def _tx_date_banner(d, ok, what="Issue"):
+def _tx_date_banner(d, ok, what="Issue", wkey=None):
     """Big, clear line showing exactly which date the slip will be saved on."""
     today = local_now().date()
     if not ok:
-        st.warning(f"\u26a0\ufe0f {what}-er TARIKH bachai korun - tarikh na bachai korle Save hobe na.")
+        why = st.session_state.get(f"_dtwarn_{wkey}") if wkey else None
+        if why == "midnight":
+            st.error(f"\U0001F319 **Rat 12-ta par hoye geche - apni ekhon notun din-e kaj korchen.** {what}-er TARIKH abar set kore nin, "
+                     "na hole Save hobe na.")
+        elif why == "unit":
+            st.error(f"\U0001F3ED **Unit change hoyeche.** Ei unit-er jonno {what}-er TARIKH abar set kore nin, na hole Save hobe na.")
+        else:
+            st.warning(f"\u26a0\ufe0f **Kaj shuru korar age {what}-er TARIKH fixed korun.** Ekbar bachai korle porer slip-gulote-o "
+                       "ei tarikhi thakbe. Tarikh na bachai korle Save hobe na.")
     elif d == today:
         st.info(f"\U0001F4C5 Ei slip **AAJKER ({d:%d-%b-%Y})** tarikhe save hobe. Slip-e jodi gotokal-er tarikh thake, upore 'Gotokal' bachai korun.")
     else:
@@ -16070,7 +16095,7 @@ def _ri_form():
         ttype = c3.selectbox("ধরন", list(ISSUE_TYPES), format_func=lambda c: TRANS_LABELS.get(c, c), key="ri_type")
         with c4:
             section = _ri_section_pick(f"ri_sec_{gen}", fac)
-        _tx_date_banner(tx_date, date_ok, "Issue")
+        _tx_date_banner(tx_date, date_ok, "Issue", wkey="ri_dt")
         notes = ""
         confirm_existing = True
         if sr_no:
@@ -16410,7 +16435,7 @@ def _rr_form():
         supplier = c1.text_input("Supplier-er nam", key=f"rr_sup_new_{gen}").strip() if pick_sup == NEW_SUP else pick_sup
         challan = c2.text_input("Challan No. *", key=f"rr_challan_{gen}", placeholder="Supplier challan number").strip()
         tx_date, date_ok = _tx_date_pick(c3, "rr_dt", gen, "rr_date", "Receive", sticky=True)
-        _tx_date_banner(tx_date, date_ok, "Receive")
+        _tx_date_banner(tx_date, date_ok, "Receive", wkey="rr_dt")
         notes = st.text_input("Remarks (ঐচ্ছিক — যেমন PO No., গাড়ির নম্বর)", key=f"rr_notes_{gen}")
 
         done_sl, confirm_existing = set(), True
