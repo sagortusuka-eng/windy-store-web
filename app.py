@@ -17140,15 +17140,16 @@ def ensure_gate_pass_table():
 
 
 @tx
-def save_gate_pass_receipt(fac, lines, tx_dt, gp_no, source, notes):
+def save_gate_pass_receipt(fac, lines, tx_dt, gp_no, source, notes, rate_mode="Latest purchase rate"):
     """lines = [(sl_no, qty)]. All-or-nothing: stock rows are locked, stock goes up, one 'Internal Rec' transaction per
     line is written (gate pass no in challan_no, source in supplier_name) and one gate_pass_receipts row per line."""
     user = st.session_state.get("user", "")
-    sls = [int(a) for a, _ in lines]
-    qtys = [float(b) for _, b in lines]
-    rows = run("""SELECT sl_no, COALESCE(prod_id,''), COALESCE(item_name,''), COALESCE(current_stock,0), COALESCE(size,'')
+    sls = [int(l[0]) for l in lines]
+    qtys = [float(l[1]) for l in lines]
+    rates = [(float(l[2]) if len(l) > 2 and l[2] and float(l[2]) > 0 else None) for l in lines]      # optional purchase rate / price per line
+    rows = run("""SELECT sl_no, COALESCE(prod_id,''), COALESCE(item_name,''), COALESCE(current_stock,0), COALESCE(size,''), COALESCE(unit_price,0)
                   FROM inventory WHERE factory_name=%s AND sl_no = ANY(%s) FOR UPDATE""", (fac, sls))
-    info = {int(r[0]): (str(r[1]), str(r[2]), float(r[3] or 0), str(r[4])) for r in (rows or [])}
+    info = {int(r[0]): (str(r[1]), str(r[2]), float(r[3] or 0), str(r[4]), float(r[5] or 0)) for r in (rows or [])}
     if len(info) != len(set(sls)):
         st.error("কিছু আইটেম আর পাওয়া যাচ্ছে না। পেজ রিফ্রেশ করে আবার চেষ্টা করুন।")
         return False
@@ -17158,14 +17159,30 @@ def save_gate_pass_receipt(fac, lines, tx_dt, gp_no, source, notes):
     run("""UPDATE inventory SET current_stock = current_stock + v.q
            FROM (SELECT unnest(%s::int[]) AS sl, unnest(%s::float8[]) AS q) v
            WHERE inventory.factory_name=%s AND inventory.sl_no=v.sl""", (sls, qtys, fac))
+    n_rated = 0
+    for sl_, q_, r_ in zip(sls, qtys, rates):       # a rate typed on the gate pass becomes the item's Unit Price (same rule as a Supplier Receipt)
+        if not r_:
+            continue
+        pid_, nm_, stock0, _sz, old_p = info[sl_]
+        if rate_mode == "Weighted average" and old_p > 0 and stock0 > 0:
+            new_p = round((stock0 * old_p + q_ * r_) / (stock0 + q_), 4)
+        elif rate_mode == "Keep current price" and old_p > 0:
+            new_p = None
+        else:
+            new_p = r_
+        if new_p is not None and abs(new_p - old_p) > 1e-9:
+            run("UPDATE inventory SET unit_price=%s WHERE sl_no=%s AND factory_name=%s", (new_p, sl_, fac))
+        audit("PURCHASE_RATE", f"{fac}: {pid_} ({nm_}) Gate Pass {gp_no} [rate {r_:g}; unit price {old_p:g}->{(old_p if new_p is None else new_p):g}]")
+        n_rated += 1
     run("""INSERT INTO transactions (factory_name, officer_name, sl_no, prod_id, item_name, qty, trans_type, day, notes, date, time,
                   verification_status, erp_grn_status, supplier_name, challan_no, po_pending_flag, po_pending_date,
                   unit_price_at_tx, req_no)
            SELECT %s, %s, v.sl, v.pid, v.nm, v.q, 'Internal Rec', %s, %s, %s, %s, 'Verified', 'Not Required', %s, %s, '', NULL::text,
-                  NULL::float8, ''
-           FROM (SELECT unnest(%s::int[]) AS sl, unnest(%s::text[]) AS pid, unnest(%s::text[]) AS nm, unnest(%s::float8[]) AS q) v""",
+                  v.rt, ''
+           FROM (SELECT unnest(%s::int[]) AS sl, unnest(%s::text[]) AS pid, unnest(%s::text[]) AS nm, unnest(%s::float8[]) AS q,
+                        unnest(%s::float8[]) AS rt) v""",
         (fac, user, tx_dt.day, note_s, date_s, time_s, source, gp_no,
-         sls, [info[sl][0] for sl in sls], [info[sl][1] for sl in sls], qtys))
+         sls, [info[sl][0] for sl in sls], [info[sl][1] for sl in sls], qtys, rates))
     run("""INSERT INTO gate_pass_receipts (factory_name, gate_pass_no, source_place, rec_date, sl_no, prod_id, item_name, size,
                   qty, stock_before, remarks, officer_name, created_at)
            SELECT %s, %s, %s, %s, v.sl, v.pid, v.nm, v.sz, v.q, v.sb, %s, %s, %s
@@ -17174,7 +17191,8 @@ def save_gate_pass_receipt(fac, lines, tx_dt, gp_no, source, notes):
         (fac, gp_no, source, date_s, notes, user, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
          sls, [info[sl][0] for sl in sls], [info[sl][1] for sl in sls], [info[sl][3] for sl in sls], qtys,
          [info[sl][2] for sl in sls]))
-    audit("GATE_PASS_IN", f"{fac}: Gate Pass {gp_no} from {source} - {len(sls)} item line(s), {sum(qtys):g} qty received")
+    audit("GATE_PASS_IN", f"{fac}: Gate Pass {gp_no} from {source} - {len(sls)} item line(s), {sum(qtys):g} qty received"
+                          + (f", {n_rated} line(s) with rate ({rate_mode})" if n_rated else ""))
     return len(sls)
 
 
@@ -17430,6 +17448,35 @@ def _gp_opening_setup():
 
 
 @_frag
+@tx
+def relabel_item_size(rows, new_size, reason):
+    """rows = [(factory, sl_no)]. Label only: inventory.size (+ the size copy on gate_pass_receipts). No qty / stock / price / unit touched.
+    Refused if another item of that unit already has the same name + size (would become a duplicate)."""
+    new_size = (new_size or "").strip()
+    who = st.session_state.get("user", "")
+    n = 0
+    for f_, s_ in rows:
+        old = q("SELECT COALESCE(size,'') AS size, item_name, prod_id FROM inventory WHERE factory_name=%s AND sl_no=%s FOR UPDATE", (f_, int(s_)))
+        if not old:
+            continue
+        o = old[0]
+        if o["size"] == new_size:
+            continue
+        dups = [r for r in q("SELECT item_name, COALESCE(size,'') AS size FROM inventory WHERE factory_name=%s AND sl_no<>%s", (f_, int(s_)))
+                if norm_name(r["item_name"]) == norm_name(o["item_name"]) and norm_size(r["size"]) == norm_size(new_size)]
+        if dups:
+            raise ValueError(f"{f_}: '{o['item_name']}' [{new_size or 'no size'}] ager-i onno item hishebe ache - ekoi nam + size duibar rakha jabe na.")
+        run("UPDATE inventory SET size=%s WHERE factory_name=%s AND sl_no=%s", (new_size, f_, int(s_)))
+        try:
+            run("UPDATE gate_pass_receipts SET size=%s WHERE factory_name=%s AND sl_no=%s", (new_size, f_, int(s_)))
+        except Exception:
+            pass
+        audit("ITEM_SIZE_RELABEL", f"{f_}: {o['prod_id']} ({o['item_name']}) SL {int(s_)}: size '{o['size'] or '-'}' -> '{new_size or '-'}' by {who} "
+                                   f"(label only, no qty / stock changed). Reason: {reason}")
+        n += 1
+    return True
+
+
 def _gp_receive_form():
     fac = FAC
     gen = st.session_state.get("gp_gen", 0)
@@ -17486,28 +17533,35 @@ def _gp_receive_form():
     if not lines:
         st.info("এখনো কোনো আইটেম যোগ হয়নি।")
         return
-    h = st.columns([0.4, 3.0, 1.1, 1.2, 1.3, 1.5, 0.7])
-    for col, t in zip(h, ["#", "আইটেম", "ERP Code", "বর্তমান স্টক", "গ্রহণ পরিমাণ", "UOM (Unit) — বদলানো যাবে", ""]):
+    _GPW = [0.4, 2.0, 0.9, 1.0, 1.0, 1.1, 1.1, 1.3, 0.7]
+    h = st.columns(_GPW)
+    for col, t in zip(h, ["#", "আইটেম", "ERP Code", "বর্তমান স্টক", "গ্রহণ পরিমাণ", "Rate / Price (৳)", "Size — বদলানো যাবে", "UOM — বদলানো যাবে", ""]):
         col.caption(t)
-    remove, qtys, bad, changed = None, [], False, []
+    remove, qtys, bad, changed, sz_changed, rates = None, [], False, [], [], []
     ulist = list(get_uoms())
     for i, ln in enumerate(lines):
         cu_ = ln.get("unit") or _unit_of(fac, ln["sl"])
         opts_u = ulist if any(u.lower() == str(cu_).lower() for u in ulist) else [cu_] + ulist
-        r = st.columns([0.4, 3.0, 1.1, 1.2, 1.3, 1.5, 0.7])
+        r = st.columns(_GPW)
         r[0].write(i + 1)
-        r[1].write(f"{ln['name']} [{ln['size'] or '-'}]")
+        r[1].write(f"{ln['name']}")
         r[2].write(ln["pid"])
         r[3].write(f"{ln['stock']:g} {cu_}")
         q_ = r[4].number_input("q", min_value=0.0, step=1.0, format="%g", key=f"gp_q_{gen}_{ln['sl']}", label_visibility="collapsed")
-        nu_ = r[5].selectbox("UOM", opts_u, index=next((k for k, u in enumerate(opts_u) if u.lower() == str(cu_).lower()), 0),
+        rt_ = r[5].number_input("Rate", min_value=0.0, step=1.0, format="%g", key=f"gp_r_{gen}_{ln['sl']}", label_visibility="collapsed",
+                                help="Ei item-er price / rate (ঐচ্ছিক). 0 rakhle Unit Price bodlabe na.")
+        rates.append(float(rt_))
+        ns_ = r[6].text_input("Size", value=ln["size"] or "", key=f"gp_s_{gen}_{ln['sl']}", label_visibility="collapsed", placeholder="Size").strip()
+        nu_ = r[7].selectbox("UOM", opts_u, index=next((k for k, u in enumerate(opts_u) if u.lower() == str(cu_).lower()), 0),
                              key=f"gp_u_{gen}_{ln['sl']}", label_visibility="collapsed")
+        if ns_ != (ln["size"] or ""):
+            sz_changed.append((ln, ns_, ln["size"] or ""))
         qtys.append(float(q_))
         if str(nu_).lower() != str(cu_).lower():
             changed.append((ln, nu_, cu_, float(q_)))
         if q_ <= 0:
             bad = True
-        if r[6].button("✖", key=f"gp_rm_{gen}_{ln['sl']}", help="সারি মুছুন"):
+        if r[8].button("✖", key=f"gp_rm_{gen}_{ln['sl']}", help="সারি মুছুন"):
             remove = i
     if remove is not None:
         lines.pop(remove)
@@ -17517,6 +17571,18 @@ def _gp_receive_form():
         except TypeError:
             st.rerun()
     st.caption(f"মোট আইটেম-লাইন: {len(lines)} · মোট পরিমাণ: {sum(qtys):g}")
+    gp_rate_mode = "Latest purchase rate"
+    if any(x > 0 for x in rates):
+        gp_rate_mode = st.selectbox("Unit Price update (যে item-এ Rate দিয়েছেন)", ["Latest purchase rate", "Weighted average", "Keep current price"], key=f"gp_rmode_{gen}",
+                                    help="Latest = ei rate-i item-er notun Unit Price. Weighted average = ager stock + ei qty-r gor. Keep = Unit Price bodlabe na (shudhu transaction-e rate thakbe).")
+    sz_ok = True
+    if sz_changed:
+        st.info("📐 Save-er somoy ei item-er Size bodlabe (label only - qty / stock bodlabe na): "
+                + " · ".join(f"**{x[0]['name']}**: {x[2] or '-'} → **{x[1] or '-'}**" for x in sz_changed))
+        st.warning("⚠️ Size item-er porichoyer ongsho - ei item-er ager sob Receipt / Issue / Gate Pass-eo notun size dekhabe. Sothik hole confirm din.")
+        sz_pw = True if st.session_state.get("role") == "Store Manager" else mgr_check(f"gp_sz_pw_{gen}")
+        sz_cf = confirm_box(f"gp_sz_cf_{gen}", "⚠️ Ami nishchit - ei item-er Size ei notun size-e bodlabe.")
+        sz_ok = bool(sz_pw and sz_cf)
     risky, risk_pw, risk_cf, both_units = [], True, True, False
     if changed:
         st.info("🔤 Save-er somoy ei item-er UOM bodlabe: " + " · ".join(f"**{x[0]['name']}**: {x[2]} → **{x[1]}** (receive {x[3]:g} {x[1]})" for x in changed)
@@ -17549,6 +17615,8 @@ def _gp_receive_form():
             st.error("এই Gate Pass আগে গ্রহণ হয়েছে — নিশ্চিত করার টিক দিন।")
         elif risky and not (risk_pw and risk_cf):
             st.error("Unit bodlale ager stock-er unit-o bodlay — Manager password ar confirm tick din.")
+        elif sz_changed and not sz_ok:
+            st.error("Size bodlale Manager password (Store Manager hole shudhu) ar confirm tick din.")
         elif guard():
             ok_u = True
             for ln_, nu_, cu_, _q in changed:
@@ -17563,7 +17631,12 @@ def _gp_receive_form():
                 if not ia_unit_relabel(rows_u, nu_, f"Gate Pass {gp_no} receive: UOM {cu_} -> {nu_}"):
                     ok_u = False
                     break
-            n = save_gate_pass_receipt(fac, [(ln["sl"], q_) for ln, q_ in zip(lines, qtys)], tx_date, gp_no, source, notes.strip()) if ok_u else None
+            if ok_u:
+                for ln_, ns_, os_ in sz_changed:
+                    if not relabel_item_size([(fac, int(ln_["sl"]))], ns_, f"Gate Pass {gp_no} receive: size {os_ or '-'} -> {ns_ or '-'}"):
+                        ok_u = False
+                        break
+            n = save_gate_pass_receipt(fac, [(ln["sl"], q_, r_) for ln, q_, r_ in zip(lines, qtys, rates)], tx_date, gp_no, source, notes.strip(), gp_rate_mode) if ok_u else None
             if n:
                 st.session_state["gp_lines"] = []
                 st.session_state["gp_gen"] = gen + 1
@@ -26440,6 +26513,17 @@ def tab_item_journey():
 #  Every change needs the Store Manager password and a reason.
 # =====================================================================================================================
 @tx
+def ec_set_item_price(fac, sl, price, reason):
+    rows = q("SELECT prod_id, item_name, COALESCE(unit_price,0) AS p FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE", (int(sl), fac))
+    if not rows:
+        raise ValueError("Inventory item paoa jay nai.")
+    r = rows[0]
+    run("UPDATE inventory SET unit_price=%s WHERE sl_no=%s AND factory_name=%s", (float(price), int(sl), fac))
+    audit("EDIT_ITEM_PRICE_EDIT_CENTER", f"{fac} {r['prod_id']} ({r['item_name']}) SL {sl}: unit price {float(r['p']):g} -> {float(price):g} by {st.session_state.get('user', '')} - {reason}")
+    return True
+
+
+@tx
 def update_tx_rate(tid, new_rate, reason):
     """Changes ONLY the rate (price at transaction) of one line. No stock / qty effect."""
     rows = q("SELECT * FROM transactions WHERE id=%s FOR UPDATE", (int(tid),))
@@ -26901,6 +26985,30 @@ def _ec_requisition():
 
 
 # ---------------------------------------------------------------- Gate Pass
+def _ec_gp_sizes(fac, lots, new_size, why):
+    """Applies the Size edits of a gate pass (label only). True when nothing changed or every change worked."""
+    for r in lots:
+        ns = new_size.get(int(r["id"]), r["size"] or "")
+        if ns != (r["size"] or ""):
+            if not relabel_item_size([(fac, int(r["sl_no"]))], ns, f"Edit Center / Gate Pass {r['gate_pass_no']}: {why}"):
+                return False
+    return True
+
+
+def _ec_gp_rates(fac, lots, tx_ids, cur_rate, new_rate, set_price, why):
+    """Rate edits of a gate pass (rate on the line's transaction; optionally also the item's Unit Price). No stock / qty effect."""
+    for r in lots:
+        lid = int(r["id"])
+        if lid not in tx_ids or lid not in new_rate:
+            continue
+        nr, tid = float(new_rate[lid]), tx_ids[lid]
+        if abs(nr - cur_rate.get(tid, 0.0)) > 1e-9 and not update_tx_rate(tid, nr, why):
+            return False
+        if set_price and nr > 0 and not ec_set_item_price(fac, int(r["sl_no"]), nr, why):
+            return False
+    return True
+
+
 def _ec_gate_pass():
     fac, gen = FAC, st.session_state.get("ec_gen", 0)
     try:
@@ -26933,9 +27041,22 @@ def _ec_gate_pass():
     with e3:
         new_d, okd = _ec_date_txt("Tarikh", d_, f"ecg_dt_{k}")
     new_rem = st.text_input("Remarks", value=lots[0]["remarks"], key=f"ecg_rem_{k}").strip()
-    new_qty = {int(r["id"]): st.number_input(f"{r['item_name']} [{r['size'] or '-'}] — qty", min_value=0.0, step=1.0, format="%g",
-                                              value=float(r["qty"]), key=f"ecg_q_{r['id']}_{gen}") for r in lots}
-    st.caption("Qty bodlale stock oi onujayi thik hoy (stock negative hole bodlano jabe na). Notun item jog korte 'Gate Pass In' page-e ekoi Gate Pass No diye item add korun.")
+    tx_ids = _gp_lot_tx_ids(fac, lots) or {}      # gate-pass line -> its 'Internal Rec' transaction (found BEFORE any edit changes the tags)
+    cur_rate = {}
+    if tx_ids:
+        cur_rate = {int(x["id"]): float(x["rate"] or 0) for x in q("SELECT id, COALESCE(unit_price_at_tx,0) AS rate FROM transactions WHERE id = ANY(%s)", (list(tx_ids.values()),))}
+    new_qty, new_size, new_rate = {}, {}, {}
+    for r in lots:
+        g1, g2, g3 = st.columns([2.0, 1, 1])
+        new_qty[int(r["id"])] = g1.number_input(f"{r['item_name']} — qty", min_value=0.0, step=1.0, format="%g", value=float(r["qty"]), key=f"ecg_q_{r['id']}_{gen}")
+        new_size[int(r["id"])] = g2.text_input("Size", value=r["size"] or "", key=f"ecg_s_{r['id']}_{gen}").strip()
+        if int(r["id"]) in tx_ids:
+            new_rate[int(r["id"])] = g3.number_input("Rate / Price (৳)", min_value=0.0, step=1.0, format="%g", value=cur_rate.get(tx_ids[int(r["id"])], 0.0), key=f"ecg_r_{r['id']}_{gen}")
+        else:
+            g3.caption("Rate: transaction paoa jayni")
+    set_price = st.checkbox("Item-er Unit Price-o ei rate-e set korun (ye line-gulo-te rate > 0)", key=f"ecg_sp_{k}") if new_rate else False
+    st.caption("Qty bodlale stock oi onujayi thik hoy (stock negative hole bodlano jabe na). Size bodlale oi item-er label bodlay (item-er ager sob record-eo notun size dekhabe, qty / stock bodlay na). "
+               "Notun item jog korte 'Gate Pass In' page-e ekoi Gate Pass No diye item add korun.")
     why, pw, cf = _ec_auth(f"ecg_{gen}", "Gate Pass bodlabe (stock oi onujayi thik hobe).")
     if st.button("💾 Gate Pass save korun", type="primary", key=f"ecg_save_{gen}", disabled=not can_write_ri()):
         if not okd or not new_d:
@@ -26944,7 +27065,8 @@ def _ec_gate_pass():
             st.error("Gate Pass No ar source khali rakha jabe na.")
         elif any(v <= 0 for v in new_qty.values()):
             st.error("Qty 0-r beshi hote hobe (line bad dite niche Delete use korun).")
-        elif _ec_auth_ok(why, pw, cf) and guard() and update_gate_pass(fac, lots, new_no, new_src, new_d, new_rem, new_qty):
+        elif _ec_auth_ok(why, pw, cf) and guard() and _ec_gp_sizes(fac, lots, new_size, why) \
+                and update_gate_pass(fac, lots, new_no, new_src, new_d, new_rem, new_qty) and _ec_gp_rates(fac, lots, tx_ids, cur_rate, new_rate, set_price, why):
             audit("EDIT_GP_EDIT_CENTER", f"{fac} Gate Pass {n_} -> {new_no} edited by {st.session_state.get('user', '')} (Edit Center) - {why}")
             st.session_state["ec_gen"] = gen + 1
             done("✅ Gate Pass update hoyeche.")
