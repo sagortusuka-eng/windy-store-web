@@ -17495,12 +17495,14 @@ def _gp_receive_form():
             confirm_existing = st.checkbox(f"হ্যাঁ, Gate Pass {gp_no}-তে আরও আইটেম যোগ করছি", key=f"gp_conf_{gen}")
 
     st.markdown("**➕ আইটেম যোগ করুন**")
-    a1, a2, a3 = st.columns([2.6, 1.6, 1])
+    a1, a2, a3, a4, a5 = st.columns([2.2, 1.7, 0.9, 1.0, 1.0])
     term = a1.text_input("🔍 খুঁজুন (নাম / ERP code / size / serial)", key=f"gp_search_{gen}").strip()
     cands = search_items(fac, term)[:30] if len(term) >= 2 else []
     labels = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']} · স্টক {float(r['stock']):g}": r for r in cands}
     pick = a2.selectbox("আইটেম", list(labels) if labels else ["— আগে খুঁজুন —"], key=f"gp_pick_{gen}")
     a3.number_input("পরিমাণ", min_value=0.0, step=1.0, format="%g", key=f"gp_qty_{gen}")
+    a4.text_input("Size", key=f"gp_asize_{gen}", placeholder="faka = ager size", help="Item-er size bodlate chaile ekhane likhun (faka rakhle ager size thakbe).")
+    a5.number_input("Rate / Price (৳)", min_value=0.0, step=1.0, format="%g", key=f"gp_arate_{gen}", help="ঐচ্ছিক. 0 rakhle Unit Price bodlabe na.")
 
     def _add():
         pick_v = st.session_state.get(f"gp_pick_{gen}")
@@ -17520,6 +17522,10 @@ def _gp_receive_form():
             cur.append({"sl": int(r["sl_no"]), "pid": r["prod_id"], "name": r["item_name"], "size": r["size"],
                         "stock": float(r["stock"]), "unit": _unit_of(fac, int(r["sl_no"]))})
             st.session_state[f"gp_q_{gen}_{int(r['sl_no'])}"] = qty_v
+            st.session_state[f"gp_s_{gen}_{int(r['sl_no'])}"] = (st.session_state.get(f"gp_asize_{gen}") or "").strip() or (r["size"] or "")
+            st.session_state[f"gp_r_{gen}_{int(r['sl_no'])}"] = float(st.session_state.get(f"gp_arate_{gen}") or 0)
+            st.session_state[f"gp_asize_{gen}"] = ""
+            st.session_state[f"gp_arate_{gen}"] = 0.0
             st.session_state["gp_lines"] = cur
             st.session_state[f"gp_search_{gen}"] = ""
             st.session_state[f"gp_qty_{gen}"] = 0.0
@@ -17876,10 +17882,23 @@ def _gp_manage():
             cur_d = parse_date(d_)
             new_dt = e3.date_input("তারিখ", value=cur_d.date() if cur_d else date.today(), max_value=date.today(), key=f"gp_e_dt_{k}")
             new_rem = st.text_input("Remarks", value=lots[0]["remarks"], key=f"gp_e_rem_{k}")
-            new_qty = {}
+            tx_ids_ = _gp_lot_tx_ids(f_, lots) or {}      # gate-pass line -> its transaction (found BEFORE the edit changes the tags)
+            cur_rate_ = {}
+            if tx_ids_:
+                cur_rate_ = {int(x["id"]): float(x["rate"] or 0) for x in q("SELECT id, COALESCE(unit_price_at_tx,0) AS rate FROM transactions WHERE id = ANY(%s)", (list(tx_ids_.values()),))}
+            new_qty, new_size_, new_rate_ = {}, {}, {}
             for r in lots:
-                new_qty[int(r["id"])] = st.number_input(f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} — পরিমাণ", min_value=0.0, step=1.0,
-                                                        format="%g", value=float(r["qty"]), key=f"gp_e_q_{r['id']}")
+                g1_, g2_, g3_ = st.columns([2.0, 1, 1])
+                new_qty[int(r["id"])] = g1_.number_input(f"{r['item_name']}{_uom_tag(r)} — পরিমাণ", min_value=0.0, step=1.0,
+                                                         format="%g", value=float(r["qty"]), key=f"gp_e_q_{r['id']}")
+                new_size_[int(r["id"])] = g2_.text_input("Size", value=r["size"] or "", key=f"gp_e_s_{r['id']}").strip()
+                if int(r["id"]) in tx_ids_:
+                    new_rate_[int(r["id"])] = g3_.number_input("Rate / Price (৳)", min_value=0.0, step=1.0, format="%g",
+                                                               value=cur_rate_.get(tx_ids_[int(r["id"])], 0.0), key=f"gp_e_r_{r['id']}")
+                else:
+                    g3_.caption("Rate: transaction paoa jayni")
+            set_price_ = st.checkbox("Item-er Unit Price-o ei rate-e set korun (ye line-gulo-te rate > 0)", key=f"gp_e_sp_{k}") if new_rate_ else False
+            st.caption("Size bodlale oi item-er label bodlay (item-er ager sob record-eo notun size dekhabe, qty / stock bodlay na). Rate bodlale stock bodlay na.")
             st.caption("নতুন আইটেম যোগ করতে: '📥 Gate Pass গ্রহণ'-এ একই Gate Pass No দিয়ে আইটেম যোগ করুন।")
             pw_ok = mgr_check(f"gp_e_pw_{k}")
             if st.button("💾 Edit সংরক্ষণ করুন", key=f"gp_e_save_{k}", type="primary"):
@@ -17889,7 +17908,9 @@ def _gp_manage():
                     st.error("পরিমাণ ০-র বেশি হতে হবে (লাইন বাদ দিতে নিচে Delete ব্যবহার করুন)।")
                 elif not pw_ok:
                     st.error("Manager password ঠিক নেই।")
-                elif guard() and update_gate_pass(f_, lots, new_no, new_src, new_dt.strftime(DATE_FMT), new_rem.strip(), new_qty):
+                elif guard() and _ec_gp_sizes(f_, lots, new_size_, "Gate Pass In page edit") \
+                        and update_gate_pass(f_, lots, new_no, new_src, new_dt.strftime(DATE_FMT), new_rem.strip(), new_qty) \
+                        and _ec_gp_rates(f_, lots, tx_ids_, cur_rate_, new_rate_, set_price_, "Gate Pass In page edit"):
                     done("✅ Gate Pass আপডেট হয়েছে।")
     with st.expander("🗑 Delete (স্টক ফেরত যাবে)"):
         if not can_write:
