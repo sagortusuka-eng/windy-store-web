@@ -14991,6 +14991,188 @@ def _ri_sr_center():
         _ri_item_trail_ui(fac, _pairs, key="srt")
 
 
+@_frag   # typing / picking inside the Challan Center re-runs ONLY this block
+def _ri_challan_center():
+    """Challan Center (like SR Center, for Supplier Receipts): find a received challan, see what was received, add the item(s)
+    the store officer did not receive yet (same challan), fix a qty / remove a wrong line, fix the header, see the stock trail.
+    Uses only the existing stock-safe functions (save_supplier_receipt, pc_edit_tx, delete_transaction, update_tx_group)."""
+    st.markdown(_RQ_CSS, unsafe_allow_html=True)
+    fac = FAC
+    can_write = can_write_ri()
+    gen = st.session_state.get("cc_gen", 0)
+    e = html_lib.escape
+    st.markdown("##### 🧾 Challan Center — Challan number likhun, ki receive hoyeche dekhun, baki item jog korun ba vul thik korun")
+    c1, c2 = st.columns([1.2, 1.8])
+    term = c1.text_input("🔍 Challan No / Supplier", key="cc_term", placeholder="Challan No ba supplier-er nam (puro ba ongsho)").strip()
+    like = f"%{term}%"
+    groups = q("""SELECT COALESCE(t.challan_no,'') AS ch, COALESCE(t.supplier_name,'') AS sup, COUNT(*) AS n, MAX(t.id) AS last_id,
+                         (SELECT x.date FROM transactions x WHERE x.id = MAX(t.id)) AS d
+                  FROM transactions t WHERE t.factory_name=%s AND t.trans_type='Supplier. Rec'
+                    AND (%s='' OR t.challan_no ILIKE %s OR t.supplier_name ILIKE %s)
+                  GROUP BY COALESCE(t.challan_no,''), COALESCE(t.supplier_name,'') ORDER BY MAX(t.id) DESC LIMIT 60""",
+               (fac, term, like, like))
+    if not groups:
+        st.warning("Ei unit-e kono receive kora challan paoa jayni." if not term else f"'{term}' diye kono challan paoa jayni (ei unit-e).")
+        return
+    groups = sorted(groups, key=lambda g: 0 if (term and g["ch"] == term) else 1)    # exact challan number first (stable sort keeps newest-first)
+    gl = {f"{g['ch']}\x1f{g['sup']}": f"Challan {g['ch'] or '(nei)'} · {g['sup'] or '-'} · {g['d']} · {g['n']} item" for g in groups}
+    # stable key (challan + supplier): the selection stays on this challan even when its item count changes after a save
+    ch, sup = c2.selectbox("Challan select", list(gl), format_func=lambda k: gl[k], key="cc_pick_v2").split("\x1f", 1)
+    lines = q("""SELECT t.id, t.sl_no, t.prod_id, t.item_name, COALESCE(i.size,'') AS size, t.qty, COALESCE(t.notes,'') AS notes, t.date,
+                        t.officer_name, COALESCE(t.unit_price_at_tx,0) AS rate
+                 FROM transactions t LEFT JOIN inventory i ON i.factory_name=t.factory_name AND i.sl_no=t.sl_no
+                 WHERE t.factory_name=%s AND t.trans_type='Supplier. Rec' AND COALESCE(t.challan_no,'')=%s
+                   AND COALESCE(t.supplier_name,'')=%s ORDER BY t.id""", (fac, ch, sup))
+    if not lines:
+        st.info("Ei challan-e kono line nei.")
+        return
+    label = f"Challan {ch or '(nei)'}"
+    dates = []
+    for r in lines:
+        if r["date"] not in dates:
+            dates.append(r["date"])
+    tot_q = sum(float(r["qty"] or 0) for r in lines)
+    n_late = sum(1 for r in lines if "Added later" in r["notes"])
+    who_ = lines[0]["officer_name"] or "-"
+    st.markdown(f'<div class="rq-hero"><div><div class="rq-eyebrow">SUPPLIER CHALLAN</div><div class="rq-title">{e(str(ch or "(nei)"))}</div>'
+                f'<div class="rq-meta"><span>🚚 {e(str(sup or "-"))}</span><span>📅 {e(", ".join(str(d) for d in dates))}</span>'
+                f'<span>🏭 {e(str(fac))}</span><span>👤 {e(str(who_))}</span></div></div>'
+                f'<div class="rq-badge ok">✅ {len(lines)} item receive hoyeche</div></div>', unsafe_allow_html=True)
+
+    def kpi(lb, v, color):
+        return f'<div class="rq-kpi" style="--c:{color}"><small>{lb}</small><b>{v}</b></div>'
+    st.markdown('<div class="rq-kpis">' + kpi("Received lines", len(lines), "#16a34a") + kpi("Received qty", _rq_n(tot_q), "#0f766e")
+                + kpi("Pore add kora line", n_late, "#7c3aed") + '</div>', unsafe_allow_html=True)
+    st.markdown('<div class="rq-h2">📥 Ei challan theke receive hoyeche</div>', unsafe_allow_html=True)
+    st.dataframe(pd.DataFrame([{"Item": r["item_name"], "Size": r["size"], "ERP Code": r["prod_id"], "Qty": float(r["qty"] or 0),
+                                "Rate": float(r["rate"] or 0) or None, "Date": r["date"], "Received by": r["officer_name"],
+                                "Pore add": "➕ Yes" if "Added later" in r["notes"] else ""} for r in lines]),
+                 hide_index=True, use_container_width=True, height=min(80 + 36 * len(lines), 340))
+    t = lazy_tab_select(["➕ Baki item receive korun", "✏️ Received line thik korun", "📝 Challan header (No / Supplier / Date)",
+                         "🔎 Item details (stock trail)"], "lz_cc")
+    on_challan = {int(r["sl_no"]) for r in lines}
+
+    if t == 0:
+        st.caption("Challan-e 5 ta item, officer 4 ta receive korechhe? Baki item ekhane khuje ekoi challan-e jog korun - stock ar requisition Received qty auto-update hobe.")
+        if not ch:
+            st.warning("Ei group-e Challan No nei - age 'Challan header' tab theke Challan No din.")
+            return
+        term2 = st.text_input("Item khujun (nam / ERP code / size)", key=f"cc_addterm_{gen}").strip()
+        cands = search_items(fac, term2)[:30] if len(term2) >= 2 else []
+        lab = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']} · stock {float(r['stock']):g}": r for r in cands}
+        pk = st.selectbox("Item", list(lab) if lab else ["— age item khujun —"], key=f"cc_addpick_{gen}")
+        a1, a2, a3 = st.columns([1, 1, 2])
+        aq = a1.number_input("Receive qty", min_value=0.0, step=1.0, format="%g", key=f"cc_addqty_{gen}")
+        ar = a2.number_input("Rate (৳)", min_value=0.0, step=1.0, format="%g", key=f"cc_addrate_{gen}",
+                             help="Purchase rate (ঐচ্ছিক). 0 রাখলে Unit Price বদলাবে না।")
+        tx_date, date_ok = _tx_date_pick(a3, "cc_dt", gen, "cc_date", "Receive")
+        _tx_date_banner(tx_date, date_ok, "Receive")
+        note_in = st.text_input("Remarks (ঐচ্ছিক)", key=f"cc_addnote_{gen}").strip()
+        if pk in lab and aq > 0:
+            it = lab[pk]
+            sl = int(it["sl_no"])
+            confirm_dup = True
+            if sl in on_challan:
+                st.warning("⚠️ Ei item ei challan-e ager-i receive kora hoyeche. Same item abar receive korle stock duibar barbe.")
+                confirm_dup = st.checkbox("Haan, abar receive korchi", key=f"cc_dup_{gen}_{sl}")
+            pack, pk_bad = _pk_ui(f"cc_pk_{gen}_{sl}", _pk_states(fac, [sl]).get(sl), float(aq))
+            rate_mode = "Latest purchase rate"
+            if ar > 0:
+                rate_mode = st.selectbox("Unit Price update", ["Latest purchase rate", "Weighted average", "Keep current price"], key=f"cc_rm_{gen}")
+            po_pending = st.checkbox("ERP PO pending", key=f"cc_po_{gen}")
+            if st.button("💾 Ei challan-e receive korun", type="primary", key=f"cc_addbtn_{gen}", disabled=not can_write):
+                if not date_ok:
+                    st.error("Receive-er TARIKH bachai korun (Aaj / Gotokal / Onno tarikh).")
+                elif pk_bad:
+                    st.error("Pack / Pcs prosner uttor baki - age ota thik korun.")
+                elif not confirm_dup:
+                    st.error("Confirm tick din.")
+                elif guard():
+                    who = st.session_state.get("user", "")
+                    tag = f"[Added later to {label} by {who}]"
+                    try:
+                        n = save_supplier_receipt(fac, [{"sl": sl, "qty": float(aq), "rate": float(ar), "pack": pack}], tx_date, sup, ch,
+                                                  (note_in + " " + tag).strip(), po_pending, rate_mode)
+                    except ValueError as ex:
+                        st.error(str(ex))
+                        n = 0
+                    if n:
+                        _rn = st.session_state.pop("_req_auto_note", "")
+                        audit("CHALLAN_CENTER_ADD", f"{fac}: {label} ({sup}): added {it['item_name']} x {float(aq):g} by {who}")
+                        st.session_state["ri_saved"] = {"user": who, "sr": label, "kind": "fix", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
+                                                        "detail": f"add item: {it['item_name']} × {float(aq):g}"}
+                        st.session_state["cc_gen"] = gen + 1
+                        done(f"✅ {who}, {label}-e {it['item_name']} × {float(aq):g} receive hoyeche, stock barche." + (f" {_rn}" if _rn else ""))
+        else:
+            st.caption("Item bachun ar qty din - tarpor Save button ashbe.")
+
+    elif t == 1:
+        h = st.columns([3.2, 1.3, 1.1, 1.4, 1.0])
+        for col, tt in zip(h, ["Item", "ERP Code", "Ager qty", "Notun qty", "Bad den"]):
+            col.caption(tt)
+        edits, dels = {}, []
+        for ln in lines:
+            tid, old = int(ln["id"]), float(ln["qty"] or 0)
+            cc = st.columns([3.2, 1.3, 1.1, 1.4, 1.0])
+            cc[0].write(ln["item_name"] + (f" [{ln['size']}]" if ln["size"] else ""))
+            cc[1].write(ln["prod_id"])
+            cc[2].write(f"{old:g}")
+            nq = cc[3].number_input("q", min_value=0.0, step=1.0, value=old, format="%g", key=f"cc_eq_{tid}_{old:g}", label_visibility="collapsed")
+            if cc[4].checkbox("✖", key=f"cc_ed_{tid}"):
+                dels.append(ln)
+            elif abs(nq - old) > 1e-9:
+                edits[tid] = (ln, float(nq))
+        st.caption("Qty bodlale stock ar requisition Received qty oi onujayi thik hoy. Line bad dile stock theke kome jay (stock negative hole bad deya jabe na).")
+        why = st.text_input("Karon likhun (ki thik korchhen) *", key="cc_editwhy").strip()
+        if st.button("💾 Save korun", type="primary", key="cc_editsave", disabled=not can_write):
+            if not (edits or dels):
+                st.info("Kono poriborton nei.")
+            elif any(nq <= 0 for _, nq in edits.values()):
+                st.error("Qty 0 kora jabe na - oi item bad dite hole ✖ tick din.")
+            elif len(why) < 3:
+                st.error("Karon likhun (kom-pokkhe 3 akkhor).")
+            elif guard():
+                who = st.session_state.get("user", "")
+                n_edit = n_del = 0
+                try:
+                    for tid, (ln, nq) in edits.items():
+                        note = f"{ln['notes'].strip()} [Qty {float(ln['qty'] or 0):g} -> {nq:g} by {who}: {why}]".strip()
+                        if not pc_edit_tx(tid, nq, ln["date"], note):
+                            raise ValueError("ekta line-er correction hoyni (upore error dekhun)")
+                        n_edit += 1
+                    for ln in dels:
+                        stk = q("SELECT COALESCE(current_stock,0) AS s FROM inventory WHERE sl_no=%s AND factory_name=%s", (ln["sl_no"], fac))
+                        if stk and float(stk[0]["s"]) < float(ln["qty"] or 0) - 1e-9:
+                            raise ValueError(f"{ln['item_name']}: line bad dile stock negative hoye jabe (mal ager-i issue hoyeche)")
+                        if not delete_transaction(int(ln["id"])):
+                            raise ValueError("ekta line delete hoyni (upore error dekhun)")
+                        n_del += 1
+                except ValueError as ex:
+                    st.error(f"{ex}  (ei porjonto save hoyeche: {n_edit} qty change, {n_del} delete)")
+                    if n_edit or n_del:
+                        st.rerun()
+                    return
+                audit("CHALLAN_CENTER_FIX", f"{fac}: {label} ({sup}) corrected by {who} (Challan Center): {n_edit} qty change(s), {n_del} line(s) removed - {why}")
+                st.session_state["ri_saved"] = {"user": who, "sr": label, "kind": "fix", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
+                                                "detail": f"{n_edit} qty bodlano, {n_del} line bad"}
+                done(f"✅ {who}, {label}: {n_edit} qty bodlano, {n_del} line bad.")
+
+    elif t == 2:
+        if len(dates) > 1:
+            st.caption("📅 Ei challan-er line-gulor tarikh alada (" + ", ".join(str(d) for d in dates) + "). Header save korle sob line-er tarikh ekoi hoye jabe.")
+        _tx_header_edit("rec", fac, [ln["id"] for ln in lines], ch, sup, lines[0]["date"], "cch_" + re.sub(r"\W+", "_", f"{ch}|{sup}"))
+
+    else:
+        pairs, seen = [], set()
+        for r in lines:
+            sl_ = int(r["sl_no"])
+            if sl_ not in seen:
+                seen.add(sl_)
+                pairs.append((sl_, f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']}"))
+        _ri_item_trail_ui(fac, pairs, key="cct")
+
+
+
 # ------------------------------------------------------------
 #  PREMIUM LOOK for  Issue (SR slip)  +  Supplier Receipt (Challan)  -  presentation only, no business logic touched
 # ------------------------------------------------------------
@@ -15196,9 +15378,12 @@ _RI_PREM_CSS = """<style>
 .st-key-pv_root .st-key-ri_tab_4{--tc:#7C4DDB;--tc2:#5629B0;--tcbg:#F0EAFD;--tcl:#D8CBF5}
 .st-key-pv_root .st-key-ri_tab_4 button[kind="primary"],.st-key-pv_root .st-key-ri_tab_4 button[data-testid="stBaseButton-primary"]{background:linear-gradient(135deg,#5629B0 0%,#7C4DDB 100%)!important;border-color:#5629B0!important;border-top-color:#5629B0!important;transform:translateY(-1px);box-shadow:0 12px 24px #7C4DDB66,inset 0 -4px 0 rgba(255,255,255,.38)!important}
 .st-key-pv_root .st-key-ri_tab_4 button[kind="primary"] p,.st-key-pv_root .st-key-ri_tab_4 button[data-testid="stBaseButton-primary"] p{color:#FFFFFF!important;text-shadow:0 1px 2px rgba(0,0,0,.30)}
-.st-key-pv_root .st-key-ri_tab_5{--tc:#D33B55;--tc2:#A11D33;--tcbg:#FDECEF;--tcl:#F4BFC8}
-.st-key-pv_root .st-key-ri_tab_5 button[kind="primary"],.st-key-pv_root .st-key-ri_tab_5 button[data-testid="stBaseButton-primary"]{background:linear-gradient(135deg,#A11D33 0%,#D33B55 100%)!important;border-color:#A11D33!important;border-top-color:#A11D33!important;transform:translateY(-1px);box-shadow:0 12px 24px #D33B5566,inset 0 -4px 0 rgba(255,255,255,.38)!important}
+.st-key-pv_root .st-key-ri_tab_5{--tc:#0E9AA7;--tc2:#0A6F79;--tcbg:#E3F6F8;--tcl:#B5E3E8}
+.st-key-pv_root .st-key-ri_tab_5 button[kind="primary"],.st-key-pv_root .st-key-ri_tab_5 button[data-testid="stBaseButton-primary"]{background:linear-gradient(135deg,#0A6F79 0%,#0E9AA7 100%)!important;border-color:#0A6F79!important;border-top-color:#0A6F79!important;transform:translateY(-1px);box-shadow:0 12px 24px #0E9AA766,inset 0 -4px 0 rgba(255,255,255,.38)!important}
 .st-key-pv_root .st-key-ri_tab_5 button[kind="primary"] p,.st-key-pv_root .st-key-ri_tab_5 button[data-testid="stBaseButton-primary"] p{color:#FFFFFF!important;text-shadow:0 1px 2px rgba(0,0,0,.30)}
+.st-key-pv_root .st-key-ri_tab_6{--tc:#D33B55;--tc2:#A11D33;--tcbg:#FDECEF;--tcl:#F4BFC8}
+.st-key-pv_root .st-key-ri_tab_6 button[kind="primary"],.st-key-pv_root .st-key-ri_tab_6 button[data-testid="stBaseButton-primary"]{background:linear-gradient(135deg,#A11D33 0%,#D33B55 100%)!important;border-color:#A11D33!important;border-top-color:#A11D33!important;transform:translateY(-1px);box-shadow:0 12px 24px #D33B5566,inset 0 -4px 0 rgba(255,255,255,.38)!important}
+.st-key-pv_root .st-key-ri_tab_6 button[kind="primary"] p,.st-key-pv_root .st-key-ri_tab_6 button[data-testid="stBaseButton-primary"] p{color:#FFFFFF!important;text-shadow:0 1px 2px rgba(0,0,0,.30)}
 /* ---- all warnings in ONE bar, ONE line ---- */
 .st-key-pv_root .pv-note.pv-one{display:flex!important;flex-wrap:wrap;align-items:center;gap:4px 14px;padding:10px 16px!important;font-size:15px!important}
 .st-key-pv_root .pv-note .pv-sep{opacity:.4;font-weight:400}
@@ -15475,7 +15660,7 @@ def _ri_set_mode(m):
 
 
 def _ri_mode_bar(modes):
-    """The five Issue / Receipt / Pending / SR Center / Skip Watch tabs: one keyed button each (ri_tab_1..5) so every tab can
+    """The five Issue / Receipt / Pending / SR Center / Skip Watch tabs: one keyed button each (ri_tab_1..6) so every tab can
     have its own colour. Same session key ('ri_mode') and same mode strings as the old radio, so everything downstream is unchanged."""
     cur = st.session_state.get("ri_mode")
     if cur not in modes:
@@ -15529,7 +15714,8 @@ def _tab_req_issue_body():
     st.session_state["_ri_tabbed"] = False
     _ri_page_header()
     is_mgr = st.session_state.get("role") == "Store Manager"
-    _modes = ["📤 Issue (SR slip)", "📥 Supplier Receipt (Challan)", "⏳ Pending Issue (stock nei)", "🧰 SR Center (edit / fix)"]
+    _modes = ["📤 Issue (SR slip)", "📥 Supplier Receipt (Challan)", "⏳ Pending Issue (stock nei)", "🧰 SR Center (edit / fix)",
+              "🧾 Challan Center (edit / fix)"]
     if st.session_state.get("role") in IW_VIEW_ROLES:
         _modes.append("🕵️ Skip Watch (Manager)")
     mode = _ri_mode_bar(_modes)        # 5 coloured tabs sit right under the one header card
@@ -15553,6 +15739,12 @@ def _tab_req_issue_body():
             _ri_sr_center()
         except Exception as e:
             st.error(f"SR Center load kora jayni: {e}")
+        return
+    if mode.startswith("🧾"):
+        try:
+            _ri_challan_center()
+        except Exception as e:
+            st.error(f"Challan Center load kora jayni: {e}")
         return
     if mode.startswith("⏳"):
         try:
