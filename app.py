@@ -20530,6 +20530,79 @@ def rp_repair_returns(P):
     return blocks, notes, kpis
 
 
+def rp_audit_stock(P):
+    """AUDIT STOCK REPORT (read-only): per item  Opening Qty | Received | Issue | Internal Issue | Internal Received | Total | Closing Stock | Closing Value.
+    Same stock arithmetic as the Stock Movement Report: Closing = today's stock minus every stock-moving entry dated AFTER the period;
+    Opening = Closing minus the period's movement.  Total = Opening + Received + Internal Received (+/- Stock Adjustment);  Closing = Total - Issue - Internal Issue."""
+    d1, d2 = P["d1"], P["d2"]
+    isql, ip = _rp_inv_where(P, "i.")
+    dt = _sql_date("t.date")
+    per = f"{dt} BETWEEN %s AND %s" if d1 else "TRUE"
+    aft = f"{dt} > %s" if d1 else "FALSE"
+    pp = [d1, d2] if d1 else []
+    ap = [d2] if d1 else []
+    IN_, OUT_ = "('Supplier. Rec','Internal Rec','Stock Adjustment (+)')", "('Issued','Internal Issue','Stock Adjustment (-)')"
+    sql = f"""SELECT i.factory_name, i.sl_no, COALESCE(i.item_name,'') AS item, COALESCE(i.size,'') AS size,
+                     COALESCE(NULLIF(i.unit_name,''),'Pcs') AS uom, COALESCE(i.current_stock,0) AS stock, COALESCE(i.unit_price,0) AS price,
+                     COALESCE(SUM(CASE WHEN t.trans_type='Supplier. Rec' AND {per} THEN t.qty ELSE 0 END),0) AS recv,
+                     COALESCE(SUM(CASE WHEN t.trans_type='Internal Rec' AND {per} THEN t.qty ELSE 0 END),0) AS int_rec,
+                     COALESCE(SUM(CASE WHEN t.trans_type='Stock Adjustment (+)' AND {per} THEN t.qty ELSE 0 END),0) AS adj_p,
+                     COALESCE(SUM(CASE WHEN t.trans_type='Issued' AND {per} THEN t.qty ELSE 0 END),0) AS iss,
+                     COALESCE(SUM(CASE WHEN t.trans_type='Internal Issue' AND {per} THEN t.qty ELSE 0 END),0) AS int_iss,
+                     COALESCE(SUM(CASE WHEN t.trans_type='Stock Adjustment (-)' AND {per} THEN t.qty ELSE 0 END),0) AS adj_m,
+                     COALESCE(SUM(CASE WHEN t.trans_type IN {IN_} AND {aft} THEN t.qty
+                                       WHEN t.trans_type IN {OUT_} AND {aft} THEN -t.qty ELSE 0 END),0) AS after_net
+              FROM inventory i
+              LEFT JOIN transactions t ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name AND t.trans_type IN ('Supplier. Rec','Internal Rec','Stock Adjustment (+)','Issued','Internal Issue','Stock Adjustment (-)')
+              WHERE i.factory_name = ANY(%s){isql}
+              GROUP BY i.factory_name, i.sl_no, i.item_name, i.size, i.unit_name, i.current_stock, i.unit_price
+              ORDER BY i.factory_name, LOWER(i.item_name), i.size"""
+    df = qdf(sql, tuple(pp * 6 + ap * 2 + [P["units"]] + ip))
+    _rpn(df, "stock", "price", "recv", "int_rec", "adj_p", "iss", "int_iss", "adj_m", "after_net")
+    if not df.empty:
+        df["adj"] = df["adj_p"] - df["adj_m"]
+        df["closing"] = df["stock"] - df["after_net"]
+        df["opening"] = df["closing"] - (df["recv"] + df["int_rec"] + df["adj"] - df["iss"] - df["int_iss"])
+        df["total"] = df["opening"] + df["recv"] + df["int_rec"] + df["adj"]
+        df["cval"] = (df["closing"] * df["price"]).where(df["price"] > 0, 0.0)
+        df = df[(df[["recv", "int_rec", "adj_p", "iss", "int_iss", "adj_m"]] != 0).any(axis=1) | (df["opening"].abs() > 1e-9) | (df["closing"].abs() > 1e-9)]
+    has_adj = bool((not df.empty) and (df["adj"].abs() > 1e-9).any())
+    cols = [("SL No", "i"), ("Product Name", "t"), ("Size", "t"), ("Price (Tk)", "r"), ("Opening Qty", "q"), ("Received Qty", "q"), ("Issue Qty", "q"),
+            ("Internal Issue", "q"), ("Internal Received", "q")] + ([("Stock Adjust (+/-)", "q")] if has_adj else []) + \
+           [("Total", "q"), ("Closing Stock", "q"), ("Closing Stock Value (Tk)", "a")]
+
+    def build(u):
+        d = df[df["factory_name"] == u] if not df.empty else df
+        if d.empty:
+            return []
+        rows = []
+        for n, r in enumerate(d.itertuples(), 1):
+            hv = r.price > 0
+            rows.append([n, r.item, r.size, r.price if hv else None, r.opening, r.recv, r.iss, r.int_iss, r.int_rec] + ([r.adj] if has_adj else [])
+                        + [r.total, r.closing, r.cval if hv else None])
+        one = d["uom"].nunique() <= 1
+        sm = lambda c: float(d[c].sum()) if one else None
+        tot = [f"TOTAL - {u} ({len(d)} items)", None, None, None, sm("opening"), sm("recv"), sm("iss"), sm("int_iss"), sm("int_rec")] + ([sm("adj")] if has_adj else []) \
+              + [sm("total"), sm("closing"), float(d["cval"].sum())]
+        notes = [x for x in ("Items with different UOMs are not added together, so quantity totals are left blank for this unit." if not one else None, _rp_norate_note(d)) if x]
+        return [_rp_sec(cols, rows, tot, note=" ".join(notes) or None)]
+    blocks = _rp_blocks(P, build)
+    notes = ["Opening Qty = stock at the start of the first day; Closing Stock = stock at the end of the last day of the period. "
+             "Received Qty = supplier receipts; Issue Qty = issued to production; Internal Issue / Internal Received = transfers to / from the other unit.",
+             "Total = Opening Qty + Received Qty + Internal Received" + (" +/- Stock Adjust" if has_adj else "") + ".  Closing Stock = Total - Issue Qty - Internal Issue.  "
+             "Closing Stock Value = Closing Stock x Price (the item's current stock rate).",
+             "Items with no stock and no movement in the period are not listed. Stock-set / opening-balance entries made without a transaction are included in Opening Qty."]
+    kpis = None
+    if len(P["units"]) == 1 and not df.empty:
+        n_noprice = int((df["price"] <= 0).sum())
+        kpis = [("📋", "Items Listed", f"{len(df):,}", "with stock or movement", "blue"),
+                ("💰", "Closing Stock Value", _dbx_tk(float(df["cval"].sum())), "Closing Stock x Price", "green"),
+                ("📦", "Items In Stock", f"{int((df['closing'] > 1e-9).sum()):,}", "closing stock above zero", "teal"),
+                ("⚠️", "Zero / Negative", f"{int((df['closing'] <= 1e-9).sum()):,}", "closing stock zero or below", "red"),
+                ("🏷", "No Rate Recorded", f"{n_noprice:,}", "value not included", "amber")]
+    return blocks, notes, kpis
+
+
 RP_REGISTRY = [
     dict(key="stock", label="Current Stock Report", type="Stock Report", dates=False, flt=("pcat", "bcat", "item", "status"), orient="P", fn=rp_current_stock, status=RP_STOCK_STATUS),
     dict(key="stockqv", label="Stock Quantity and Stock Value Report", type="Stock Report (ERP vs Physical)", dates=False, flt=("pcat", "bcat", "item", "status"), orient="L", fn=rp_stock_qty_value, status=RP_STOCK_STATUS),
@@ -20562,6 +20635,8 @@ RP_REGISTRY = [
          status=["All", "OVER LIMIT", "WARNING", "SAFE", "NO LIMIT SET"]),
     dict(key="repairret", label="Repair & Returns Report (Management)", title="REPAIR & RETURNS REPORT - GATE PASS, REPAIR, WARRANTY & RETURN",
          type="Repair & Returns Management Report", dates=True, flt=("item", "status"), orient="L", fn=rp_repair_returns, status=RP_REPAIR_STATUS),
+    dict(key="auditstock", label="Audit Stock Report (Opening, Receipt, Issue & Closing)", title="AUDIT STOCK REPORT", type="Audit Stock Report (Opening, Receipt, Issue, Internal Transfer & Closing)",
+         dates=True, flt=("item", "pcat", "bcat"), orient="L", fn=rp_audit_stock),
 ]
 
 
