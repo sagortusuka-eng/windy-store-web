@@ -15037,6 +15037,31 @@ def _ri_sr_center():
         if not iss:
             st.info("Ei SR-e kono issued line nei.")
         else:
+            # ---- vul unit-e issue hoye gele: pura SR onno unit-e soriye din ----
+            _dest = other_factory(fac)
+            with st.container(border=True):
+                st.caption(f"🔀 Ei SR vul unit-e issue hoyechilo? Pura SR **{fac}** theke **{_dest}**-e soriye din "
+                           f"({fac}-e stock ferot ashbe, {_dest}-er stock theke kombe).")
+                if st.checkbox(f"🔀 SR {sr} {_dest}-e soriye din", key=f"srmove_on_{sr}"):
+                    _mreason = st.text_input("Karon likhun (jemon: vul unit select hoyechilo) *", key=f"srmove_reason_{sr}").strip()
+                    _mpw = mgr_check(f"srmove_pw_{sr}")
+                    _mconf = confirm_box(f"srmove_conf_{sr}", f"⚠️ Ami confirm korchi - ei SR {fac} theke bad hoye {_dest}-e jabe, stock-shoho.")
+                    if st.button(f"🔀 {_dest}-e soriye din", type="primary", key=f"srmove_btn_{sr}", disabled=not can_write):
+                        if len(_mreason) < 5:
+                            st.error("Karon likhun (kom-pokkhe 5 akkhor).")
+                        elif not _mpw:
+                            st.error("Store Manager password din.")
+                        elif not _mconf:
+                            st.error("Confirm tick din.")
+                        elif guard():
+                            _n = ri_move_sr(fac, sr, _dest, _mreason)
+                            if _n:
+                                who = st.session_state.get("user", "")
+                                st.session_state["ri_saved"] = {"user": who, "sr": sr, "kind": "fix", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
+                                                                "detail": f"{_n} line {fac} theke {_dest}-e soranu hoyeche"}
+                                for _k in (f"srmove_on_{sr}", f"srmove_reason_{sr}", f"srmove_pw_{sr}", f"srmove_conf_{sr}"):
+                                    st.session_state.pop(_k, None)
+                                done(f"✅ {who}, SR {sr} ekhon {_dest}-er under-e ({_n} line). {fac}-er stock ferot esheche, {_dest}-er stock theke komeche.")
             h = st.columns([3.2, 1.2, 1.1, 1.4, 1.0])
             for col, tt in zip(h, ["Item", "ERP Code", "Ager qty", "Notun qty", "Bad den"]):
                 col.caption(tt)
@@ -16642,6 +16667,71 @@ def rr_move_challan(src, ch, sup, dt, dest, reason):
         if not is_blank_code(m["prod_id"]):
             _req_alloc(dest, m["prod_id"], qty, t["date"], tid)
     audit("RECEIPT_UNIT_MOVE", f"Challan {ch or '(nei)'} ({sup or '-'}, {dt}): {len(plan)} item(s) moved {src} -> {dest} by {who} - {reason}")
+    return len(plan)
+
+
+@tx
+def ri_move_sr(src, sr, dest, reason):
+    """Moves a whole ISSUED requisition slip (SR) from one unit to the other (wrong unit chosen at entry): the issued qty goes
+    back into `src` stock and comes out of `dest` stock; the issue rows are re-pointed to the matching `dest` items.
+    Safe-guards: same item must exist in `dest` (exact / same ERP code), same UOM, enough `dest` stock, no auto-transfer line,
+    no machine tag, no pending line, and the SR number must not already be used in `dest`."""
+    if dest == src:
+        raise ValueError("Same unit - onno unit bachun.")
+    rows = q("""SELECT * FROM transactions WHERE factory_name=%s AND req_no=%s AND trans_type = ANY(%s) ORDER BY id FOR UPDATE""",
+             (src, sr, list(ISSUE_TYPES)))
+    if not rows:
+        raise ValueError("SR paoa jay nai (hoyto ager-i soriye deya hoyeche).")
+    if q("SELECT 1 FROM ri_pending_issues WHERE factory_name=%s AND sr_no=%s AND status='Pending' LIMIT 1", (src, sr)):
+        raise ValueError(f"SR {sr}-er kichu item Pending-e ache - age Pending-gulo issue ba bad korun, tarpor SR soran.")
+    if q("SELECT 1 FROM transactions WHERE factory_name=%s AND req_no=%s AND trans_type = ANY(%s) LIMIT 1", (dest, sr, list(ISSUE_TYPES))):
+        raise ValueError(f"SR {sr} {dest}-e ager-i ache - SR No. alada na hole soranu jabe na.")
+    plan, bad, need = [], [], {}
+    for t in rows:
+        qty = float(t["qty"] or 0)
+        if "Auto-transferred" in (t["notes"] or ""):
+            bad.append(f"{t['item_name']}: auto-transfer jukto line - age Transfer History theke transfer thik korun")
+            continue
+        if t.get("machine_id"):
+            bad.append(f"{t['item_name']}: Machine tag kora ache - machine onno unit-er, tai ei line soranu jabe na")
+            continue
+        inv = q(f"SELECT {INV_COLS} FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE", (t["sl_no"], src))
+        if not inv:
+            bad.append(f"{t['item_name']}: {src}-e inventory item paoa jayni")
+            continue
+        it = inv[0]
+        m = find_same_in_other(it["prod_id"], it["item_name"], dest, it["size"])
+        if not m or m.get("level") not in ("exact", "code"):
+            bad.append(f"{it['item_name']} [{it['prod_id']}]: {dest}-er inventory-te hubohu ei item nei - age oi unit-e item add korun")
+            continue
+        if _unit_of(src, it["sl_no"]).strip().lower() != _unit_of(dest, m["sl_no"]).strip().lower():
+            bad.append(f"{it['item_name']}: UOM alada ({src}: {_unit_of(src, it['sl_no'])}, {dest}: {_unit_of(dest, m['sl_no'])}) - age UOM mil korun")
+            continue
+        need[int(m["sl_no"])] = need.get(int(m["sl_no"]), 0.0) + qty
+        plan.append((t, it, m, qty))
+    for dsl, nq in need.items():
+        cur = q("SELECT COALESCE(current_stock,0) AS s, item_name FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE", (dsl, dest))
+        if not cur:
+            bad.append(f"{dest}-er item (SL {dsl}) paoa jayni")
+        elif float(cur[0]["s"] or 0) < nq - 1e-9:
+            bad.append(f"{cur[0]['item_name']}: {dest}-e stock {float(cur[0]['s'] or 0):g}, SR qty {nq:g} - {dest}-e stock kom")
+    if bad:
+        raise ValueError(" | ".join(bad))
+    _dt = rows[0]["date"]
+    _pm = pre_opening_msg(dest, [int(m["sl_no"]) for _, _, m, _ in plan], _dt, {int(m["sl_no"]): m["item_name"] for _, _, m, _ in plan})
+    if _pm:
+        raise ValueError(_pm)
+    who = st.session_state.get("user", "")
+    for t, it, m, qty in plan:
+        run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (qty, it["sl_no"], src))
+        run("UPDATE inventory SET current_stock=current_stock-%s WHERE sl_no=%s AND factory_name=%s", (qty, m["sl_no"], dest))
+        note = f"{(t['notes'] or '').strip()} [Unit moved {src} -> {dest} by {who}: {reason}]".strip()
+        run("UPDATE transactions SET factory_name=%s, sl_no=%s, prod_id=%s, item_name=%s, notes=%s WHERE id=%s",
+            (dest, m["sl_no"], m["prod_id"], m["item_name"], note, int(t["id"])))
+    _sec = (rows[0].get("section") or "").strip()
+    if _sec:
+        run("INSERT INTO ri_sections (factory_name, section_name) VALUES (%s,%s) ON CONFLICT DO NOTHING", (dest, _sec))
+    audit("ISSUE_UNIT_MOVE", f"SR {sr} ({_dt}): {len(plan)} issued line(s) moved {src} -> {dest} by {who} - {reason}")
     return len(plan)
 
 
