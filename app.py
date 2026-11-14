@@ -15078,7 +15078,7 @@ def _ri_challan_center():
                                 "Pore add": "➕ Yes" if "Added later" in r["notes"] else ""} for r in lines]),
                  hide_index=True, use_container_width=True, height=min(80 + 36 * len(lines), 340))
     t = lazy_tab_select(["➕ Baki item receive korun", "✏️ Received line thik korun", "🏷️ Item nam thik korun (shudhu nam)",
-                         "📝 Challan header (No / Supplier / Date)", "🔎 Item details (stock trail)"], "lz_cc")
+                         "🔁 Vul item bodlan (onno item-e soran)", "📝 Challan header (No / Supplier / Date)", "🔎 Item details (stock trail)"], "lz_cc")
     on_challan = {int(r["sl_no"]) for r in lines}
 
     if t == 0:
@@ -15212,7 +15212,7 @@ def _ri_challan_center():
         if new_name:
             st.markdown(f"**{cur_name}** ➜ **{new_name}**")
         why = st.text_input("Karon likhun *", key="cc_rn_why", placeholder="jemon: vul nam-e entry hoyechilo").strip()
-        pw_ok = mgr_check("cc_rn_pw")
+        pw_ok = _mgr_only_ok()
         conf = confirm_box("cc_rn_conf", "⚠️ Ami confirm korchi - shudhu nam bodlabe, stock ba onno kichu bodlabe na.")
         if st.button("🏷️ Nam save korun", type="primary", key="cc_rn_btn", disabled=not can_write):
             if not new_name:
@@ -15222,7 +15222,7 @@ def _ri_challan_center():
             elif len(why) < 3:
                 st.error("Karon likhun (kom-pokkhe 3 akkhor).")
             elif not pw_ok:
-                st.error("Store Manager password din.")
+                st.error("Shudhu Store Manager ei change korte pare.")
             elif not conf:
                 st.error("Confirm tick din.")
             elif guard():
@@ -15235,14 +15235,42 @@ def _ri_challan_center():
                     who = st.session_state.get("user", "")
                     st.session_state["ri_saved"] = {"user": who, "sr": label, "kind": "fix", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
                                                     "detail": f"nam bodlano: {cur_name} ➜ {new_name}"}
-                    for k_ in ("cc_rn_pw", "cc_rn_conf", "cc_rn_why"):
+                    for k_ in ("cc_rn_conf", "cc_rn_why"):
                         st.session_state.pop(k_, None)
                     done(f"✅ {who}, nam bodlano hoyeche: {cur_name} ➜ {new_name} (stock / transaction ager moto-i).")
 
     elif t == 3:
+        st.caption("Vul item receive hoye gele (jemon onno ERP code / onno item select hoyechilo): line ta **shothik item-e soriye din**. "
+                   "Duto item-er stock auto thik hobe, requisition-er Received qty-o notun item-er jonno abar hishab hobe. "
+                   "Shudhu nam vul hole 🏷️ 'Item nam thik korun' tab use korun.")
+        lbl_ = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · qty {float(r['qty']):g} (ID {r['id']})": r for r in lines}
+        ln_ = lbl_[st.selectbox("Kon line-er item vul?", list(lbl_), key="cc_ci_line")]
+        ft_ = st.text_input("Shothik item khujun (nam / ERP code / size)", key=f"cc_ci_q_{ln_['id']}").strip()
+        c_ = [r for r in (search_items(fac, ft_)[:30] if len(ft_) >= 2 else []) if int(r["sl_no"]) != int(ln_["sl_no"])]
+        lab2_ = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']} · stock {float(r['stock']):g}": r for r in c_}
+        npk_ = st.selectbox("Shothik item", list(lab2_) if lab2_ else ["— age item khujun —"], key=f"cc_ci_pk_{ln_['id']}")
+        if npk_ in lab2_:
+            st.markdown(f"**{ln_['item_name']}** ➜ **{lab2_[npk_]['item_name']}** · qty {float(ln_['qty']):g} soriye jabe")
+        why_, pw_, cf_ = _ec_auth(f"cc_ci_{ln_['id']}", "ei line onno item-e jabe, duto item-er stock thik hobe.")
+        if st.button("🔁 Item bodlan", type="primary", key=f"cc_ci_btn_{ln_['id']}", disabled=not can_write):
+            if npk_ not in lab2_:
+                st.error("Age shothik item khuje select korun.")
+            elif _ec_auth_ok(why_, pw_, cf_) and guard():
+                who = st.session_state.get("user", "")
+                try:
+                    ok_ = change_tx_item(int(ln_["id"]), int(lab2_[npk_]["sl_no"]))
+                except ValueError as ex:
+                    st.error(str(ex))
+                    ok_ = False
+                if ok_:
+                    audit("CHALLAN_CENTER_CHANGE_ITEM", f"{fac}: {label} ({sup}) tx {ln_['id']}: '{ln_['item_name']}' -> '{lab2_[npk_]['item_name']}' by {who} - {why_}")
+                    st.session_state["ri_saved"] = {"user": who, "sr": label, "kind": "fix", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
+                                                    "detail": f"item bodlano: {ln_['item_name']} ➜ {lab2_[npk_]['item_name']}"}
+                    done(f"✅ {who}, {label}: {ln_['item_name']} ➜ {lab2_[npk_]['item_name']} (duto item-er stock thik kora hoyeche).")
+    elif t == 4:
         if len(dates) > 1:
             st.caption("📅 Ei challan-er line-gulor tarikh alada (" + ", ".join(str(d) for d in dates) + "). Header save korle sob line-er tarikh ekoi hoye jabe.")
-        _tx_header_edit("rec", fac, [ln["id"] for ln in lines], ch, sup, lines[0]["date"], "cch_" + re.sub(r"\W+", "_", f"{ch}|{sup}"))
+        _tx_header_edit("rec", fac, [ln["id"] for ln in lines], ch, sup, lines[0]["date"], "cch_" + re.sub(r"\W+", "_", f"{ch}|{sup}"), need_pw=False)
 
     else:
         pairs, seen = [], set()
@@ -15754,8 +15782,10 @@ def _ri_mode_bar(modes):
         box = st.container()
     with box:
         cols = st.columns(len(modes))
+        _fixed = {"📤": 1, "📥": 2, "⏳": 3, "🧰": 4, "🧾": 5, "🕵️": 6}      # fixed colour slot per tab (a hidden tab does not shift the others)
         for i, (c, m) in enumerate(zip(cols, modes), 1):
-            c.button(m, key=f"ri_tab_{i}", type="primary" if m == cur else "secondary", use_container_width=True,
+            n = next((v for kx, v in _fixed.items() if m.startswith(kx)), i)
+            c.button(m, key=f"ri_tab_{n}", type="primary" if m == cur else "secondary", use_container_width=True,
                      on_click=_ri_set_mode, args=(m,))
     return st.session_state.get("ri_mode", cur)
 
@@ -15796,8 +15826,9 @@ def _tab_req_issue_body():
     st.session_state["_ri_tabbed"] = False
     _ri_page_header()
     is_mgr = st.session_state.get("role") == "Store Manager"
-    _modes = ["📤 Issue (SR slip)", "📥 Supplier Receipt (Challan)", "⏳ Pending Issue (stock nei)", "🧰 SR Center (edit / fix)",
-              "🧾 Challan Center (edit / fix)"]
+    _modes = ["📤 Issue (SR slip)", "📥 Supplier Receipt (Challan)", "⏳ Pending Issue (stock nei)", "🧰 SR Center (edit / fix)"]
+    if is_mgr:      # Challan Center (edit / fix everything about a received challan): Store Manager only
+        _modes.append("🧾 Challan Center (edit / fix)")
     if st.session_state.get("role") in IW_VIEW_ROLES:
         _modes.append("🕵️ Skip Watch (Manager)")
     mode = _ri_mode_bar(_modes)        # 5 coloured tabs sit right under the one header card
@@ -15823,6 +15854,9 @@ def _tab_req_issue_body():
             st.error(f"SR Center load kora jayni: {e}")
         return
     if mode.startswith("🧾"):
+        if st.session_state.get("role") != "Store Manager":
+            st.error("Ei tab shudhu Store Manager dekhte pare.")
+            return
         try:
             _ri_challan_center()
         except Exception as e:
@@ -16452,7 +16486,7 @@ def rr_move_challan(src, ch, sup, dt, dest, reason):
     return len(plan)
 
 
-def _tx_header_edit(kind, fac, ids, old_no, old_sup, old_date, key):
+def _tx_header_edit(kind, fac, ids, old_no, old_sup, old_date, key, need_pw=True):
     """Change Challan No / Supplier / Date (kind 'rec') or SR No / Date (kind 'sr') of ALL lines of one saved challan / slip.
     No stock effect. Store Manager password + confirmation, same rule as every other fix."""
     with st.container(border=True):
@@ -16463,7 +16497,7 @@ def _tx_header_edit(kind, fac, ids, old_no, old_sup, old_date, key):
         n_no = c[0].text_input("Challan No" if kind == "rec" else "SR No", value=old_no, key=f"{key}_no").strip()
         n_sup = c[1].text_input("Supplier", value=old_sup, key=f"{key}_sup").strip() if kind == "rec" else None
         n_dt = c[2].date_input("Date", value=od.date() if od else local_now().date(), key=f"{key}_dt")
-        pw_ok = mgr_check(f"{key}_pw")
+        pw_ok = mgr_check(f"{key}_pw") if need_pw else _mgr_only_ok()     # Challan Center is Store-Manager-only: no password box there
         conf = confirm_box(f"{key}_conf", "⚠️ Ami confirm korchi - ei header bodlabe (stock bodlabe na).")
         if st.button("💾 Header save korun", type="primary", key=f"{key}_btn", disabled=not can_write_ri()):
             date_s = n_dt.strftime(DATE_FMT)
@@ -26484,7 +26518,7 @@ def _ec_items():
         n_cat = c1.text_input("Category", value=it.get("category") or "", key=f"ec_cat_{sl}_{gen}").strip()
         n_dept = c2.text_input("Department", value=it.get("department") or "", key=f"ec_dept_{sl}_{gen}").strip()
         why = st.text_input("Karon likhun *", key=f"ec_why0_{gen}", placeholder="jemon: price vul chilo / size likha hoyni").strip()
-        pw_ok = mgr_check(f"ec_pw0_{gen}")
+        pw_ok = _mgr_only_ok()
         conf = confirm_box(f"ec_cf0_{gen}", "⚠️ Ami confirm korchi - ei item-er details bodlabe (stock bodlabe na).")
         if st.button("💾 Item save korun", type="primary", key=f"ec_save0_{gen}", disabled=not can_write):
             changed = (n_name != it["item_name"] or n_size != (it.get("size") or "") or n_code != it["prod_id"] or abs(n_price - float(it.get("unit_price") or 0)) > 1e-9
@@ -26544,7 +26578,7 @@ def _ec_items():
         st.caption("Qty bodlale stock ar requisition Received qty oi onujayi thik hoy (stock negative hole bodlano jabe na). Rate bodlale stock bodlay na - "
                    "shudhu oi line-er price / cost report-e bodlay.")
         why = st.text_input("Karon likhun *", key=f"ec_why1_{gen}", placeholder="jemon: rate vul chilo").strip()
-        pw_ok = mgr_check(f"ec_pw1_{gen}")
+        pw_ok = _mgr_only_ok()
         conf = confirm_box(f"ec_cf1_{gen}", "⚠️ Ami confirm korchi - ei line-er change gulo save hobe.")
         if st.button("💾 Line save korun", type="primary", key=f"ec_save1_{gen}", disabled=not can_write):
             d_s = n_date.strftime(DATE_FMT)
@@ -26591,6 +26625,27 @@ def _ec_items():
                 st.session_state["ec_gen"] = gen + 1
                 done(f"✅ {who}, line #{tid} save hoyeche ({', '.join(done_)}).")
 
+        if tt in ("Supplier. Rec", "Issued"):
+            with st.expander("🔁 Vul item receive / issue hoyechilo? Onno item-e soran (duto item-er stock thik hobe)"):
+                ft_ = st.text_input("Shothik item khujun (nam / ERP code / size)", key=f"ec_ci_q_{k}").strip()
+                c_ = [r for r in (search_items(fac, ft_)[:30] if len(ft_) >= 2 else []) if int(r["sl_no"]) != int(sl)]
+                lab2_ = {f"{r['item_name']} [{r['size'] or '-'}]{_uom_tag(r)} · {r['prod_id']} · stock {float(r['stock']):g}": r for r in c_}
+                npk_ = st.selectbox("Shothik item", list(lab2_) if lab2_ else ["— age item khujun —"], key=f"ec_ci_pk_{k}")
+                cwhy, cpw, ccf = _ec_auth(f"ec_ci_{k}", "ei line onno item-e jabe, duto item-er stock thik hobe.")
+                if st.button("🔁 Item bodlan", key=f"ec_ci_btn_{k}", disabled=not can_write):
+                    if npk_ not in lab2_:
+                        st.error("Age shothik item khuje select korun.")
+                    elif _ec_auth_ok(cwhy, cpw, ccf) and guard():
+                        try:
+                            ok_ = change_tx_item(int(tid), int(lab2_[npk_]["sl_no"]))
+                        except ValueError as ex:
+                            st.error(str(ex))
+                            ok_ = False
+                        if ok_:
+                            audit("CHANGE_TX_ITEM_EDIT_CENTER", f"{fac} tx {tid}: '{it['item_name']}' -> '{lab2_[npk_]['item_name']}' by {who} (Edit Center) - {cwhy}")
+                            st.session_state["ec_gen"] = gen + 1
+                            done(f"✅ {who}, line #{tid}: {it['item_name']} ➜ {lab2_[npk_]['item_name']} (duto item-er stock thik kora hoyeche).")
+
         with st.expander("🗑 Ei line delete korun (stock revert hobe)"):
             dconf = confirm_box(f"ec_dcf_{k}", "⚠️ Ami confirm korchi - line delete hobe ar stock oi onujayi thik hobe.")
             if st.button("🗑 Delete", key=f"ec_del_{k}", disabled=not can_write):
@@ -26616,7 +26671,7 @@ def _ec_items():
             st.caption(f"Ei item-er {len(rate_rows)}ti Receipt / Issue line ache. Rate bodlale budget / cost report-e oi line-er mullo bodlay.")
             bulk_rate = st.number_input("Notun rate (৳)", min_value=0.0, step=1.0, format="%g", key=f"ec_brate_{gen}")
             bw = st.text_input("Karon likhun *", key=f"ec_bwhy_{gen}").strip()
-            bpw = mgr_check(f"ec_bpw_{gen}")
+            bpw = _mgr_only_ok()
             bcf = confirm_box(f"ec_bcf_{gen}", f"⚠️ Ami confirm korchi - {len(rate_rows)}ti line-er rate ৳{bulk_rate:g} hobe.")
             if st.button("💰 Sob line-e rate boshan", key=f"ec_bbtn_{gen}", disabled=not can_write):
                 if bulk_rate <= 0:
@@ -26637,10 +26692,15 @@ def _ec_items():
 
 
 # ---------------------------------------------------------------- Edit Center: shared helpers
+def _mgr_only_ok():
+    """Challan Center / Edit Center are visible to the Store Manager only, so no extra password box is asked there."""
+    return st.session_state.get("role") == "Store Manager"
+
+
 def _ec_auth(k, what):
-    """Karon + Store Manager password + confirm tick. Returns (why, pw_ok, confirmed)."""
+    """Karon + confirm tick (Store Manager only page - no password). Returns (why, allowed, confirmed)."""
     why = st.text_input("Karon likhun *", key=f"{k}_why").strip()
-    pw = mgr_check(f"{k}_pw")
+    pw = _mgr_only_ok()
     cf = confirm_box(f"{k}_cf", f"⚠️ Ami confirm korchi - {what}")
     return why, pw, cf
 
@@ -26649,7 +26709,7 @@ def _ec_auth_ok(why, pw, cf):
     if len(why) < 3:
         st.error("Karon likhun (kom-pokkhe 3 akkhor).")
     elif not pw:
-        st.error("Store Manager password din.")
+        st.error("Shudhu Store Manager ei change korte pare.")
     elif not cf:
         st.error("Confirm tick din.")
     else:
@@ -27021,9 +27081,12 @@ def _ec_hold_bill():
 # ---------------------------------------------------------------- the page: one section picker, only the chosen section runs
 @_frag   # every click re-runs ONLY this page block
 def tab_edit_center():
+    if st.session_state.get("role") != "Store Manager":
+        st.error("Edit Center shudhu Store Manager dekhte pare.")
+        return
     st.title("🛠️ Edit Center (A–Z)")
     st.caption("Item, transaction, stock, requisition, gate pass, hold bill - kono kichu vul hole ekhane thik korun. "
-               "Prottek change-e Store Manager password + karon lagbe, ar audit log-e thake.")
+               "Prottek change-e karon + confirm tick lagbe, ar audit log-e thake (shudhu Store Manager dekhte pare).")
     if is_cons_view:
         st.info("ওপর থেকে একটি Factory বাছুন (CONSOLIDATED view-এ edit করা যায় না)।")
         return
@@ -27213,6 +27276,8 @@ html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] but
             for _pi, (_plabel, _proute) in enumerate(_gpages):
                 if _proute not in TAB_NAMES:
                     continue
+                if _proute == NAV_EDIT_CENTER and st.session_state.get("role") != "Store Manager":
+                    continue        # Edit Center: Store Manager only
                 st.button(_plabel, key=f"sidebar_nav_p{_gi}_{_pi}",
                           type="primary" if _proute == _cur_route else "secondary",
                           on_click=_nav_go, args=(_proute,), use_container_width=True)
