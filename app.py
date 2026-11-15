@@ -15150,7 +15150,7 @@ def rename_item_name_only(fac, sl, new_name, reason):
 
 
 @_frag   # typing / picking inside the Challan Center re-runs ONLY this block
-def _ri_challan_center():
+def _ri_challan_center(view_only=False):
     """Challan Center (like SR Center, for Supplier Receipts): find a received challan, see what was received, add the item(s)
     the store officer did not receive yet (same challan), fix a qty / remove a wrong line, fix the header, see the stock trail.
     Uses only the existing stock-safe functions (save_supplier_receipt, pc_edit_tx, delete_transaction, update_tx_group)."""
@@ -15159,7 +15159,10 @@ def _ri_challan_center():
     can_write = can_write_ri()
     gen = st.session_state.get("cc_gen", 0)
     e = html_lib.escape
-    st.markdown("##### 🧾 Challan Center — Challan number likhun, ki receive hoyeche dekhun, baki item jog korun ba vul thik korun")
+    if view_only:
+        st.markdown("##### 🧾 Challan Center (shudhu dekha) — Challan number likhun, ki ki receive hoyeche dekhun")
+    else:
+        st.markdown("##### 🧾 Challan Center — Challan number likhun, ki receive hoyeche dekhun, baki item jog korun ba vul thik korun")
     c1, c2 = st.columns([1.2, 1.8])
     term = c1.text_input("🔍 Challan No / Supplier", key="cc_term", placeholder="Challan No ba supplier-er nam (puro ba ongsho)").strip()
     like = f"%{term}%"
@@ -15206,6 +15209,18 @@ def _ri_challan_center():
                                 "Rate": float(r["rate"] or 0) or None, "Date": r["date"], "Received by": r["officer_name"],
                                 "Pore add": "➕ Yes" if "Added later" in r["notes"] else ""} for r in lines]),
                  hide_index=True, use_container_width=True, height=min(80 + 36 * len(lines), 340))
+    if view_only:
+        st.info("👀 Eta shudhu dekhar jonno. Challan-e item jog kora, qty bodlano, line bad deya ba header thik kora - Store Manager-er kaj. "
+                "Kichu thik korte hole Store Manager-ke janan.")
+        _vp, _vseen = [], set()
+        for r in lines:
+            _s = int(r["sl_no"])
+            if _s not in _vseen:
+                _vseen.add(_s)
+                _vp.append((_s, f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']}"))
+        st.markdown('<div class="rq-h2">🔎 Item details (stock trail)</div>', unsafe_allow_html=True)
+        _ri_item_trail_ui(fac, _vp, key="cct_v")
+        return
     t = lazy_tab_select(["➕ Baki item receive korun", "✏️ Received line thik korun", "🏷️ Item nam thik korun (shudhu nam)",
                          "🔁 Vul item bodlan (onno item-e soran)", "📝 Challan header (No / Supplier / Date)", "🔎 Item details (stock trail)"], "lz_cc")
     on_challan = {int(r["sl_no"]) for r in lines}
@@ -15964,6 +15979,8 @@ def _tab_req_issue_body():
     _modes = ["📤 Issue (SR slip)", "⚡ Quick Issue (regular items)", "📥 Supplier Receipt (Challan)", "⏳ Pending Issue (stock nei)", "🧰 SR Center (edit / fix)"]
     if is_mgr:      # Challan Center (edit / fix everything about a received challan): Store Manager only
         _modes.append("🧾 Challan Center (edit / fix)")
+    else:           # store officers: look only (no edit / delete / move)
+        _modes.append("🧾 Challan Center (shudhu dekha)")
     if st.session_state.get("role") in IW_VIEW_ROLES:
         _modes.append("🕵️ Skip Watch (Manager)")
     mode = _ri_mode_bar(_modes)        # 5 coloured tabs sit right under the one header card
@@ -15999,11 +16016,8 @@ def _tab_req_issue_body():
             st.error(f"SR Center load kora jayni: {e}")
         return
     if mode.startswith("🧾"):
-        if st.session_state.get("role") != "Store Manager":
-            st.error("Ei tab shudhu Store Manager dekhte pare.")
-            return
         try:
-            _ri_challan_center()
+            _ri_challan_center(view_only=st.session_state.get("role") != "Store Manager")
         except Exception as e:
             st.error(f"Challan Center load kora jayni: {e}")
         return
@@ -16287,37 +16301,38 @@ def _qi_parse_qty(txt):
     return v, ""
 
 
-_QI_COLS = [4.0, 1.4, 1.0, 1.0, 1.3]
+_QI_COLS = [3.4, 1.1, 0.8, 0.8, 0.8]
 _QI_CSS = '''<style>
 /* rows: quiet white cards, every cell exactly 42px so name / qty / uom / stock sit on one line */
-[class*="st-key-qi_row_"]{border-radius:10px;padding:6px 10px;border:1px solid #E1E6EF;margin-bottom:6px;background:#FFFFFF;transition:background .1s,border-color .1s}
+[class*="st-key-qi_row_"]{border-radius:8px;padding:4px 8px;border:1px solid #E1E6EF;margin-bottom:3px;background:#FFFFFF;transition:background .1s,border-color .1s}
 [class*="st-key-qi_row_"] [data-testid="stVerticalBlock"]{gap:0!important}
-[class*="st-key-qi_row_"] [data-testid="stHorizontalBlock"]{align-items:flex-start!important;gap:10px}
+[class*="st-key-qi_row_"] [data-testid="stHorizontalBlock"]{align-items:flex-start!important;gap:8px}
 [class*="st-key-qi_row_"] [data-testid="stElementContainer"]{width:100%}
 [class*="st-key-qi_row_"] [data-testid="stWidgetLabel"]{display:none!important}
 [class*="st-key-qi_row_"] [data-testid="stTextInput"],[class*="st-key-qi_row_"] [data-testid="stNumberInput"]{margin:0!important;padding:0!important}
 [class*="st-key-qi_row_"] [data-testid="stMarkdownContainer"],[class*="st-key-qi_row_"] [data-testid="stMarkdown"]{margin:0!important;padding:0!important}
 [class*="st-key-qi_row_"]:hover{background:#EDF3FD!important;border-color:#B7C8E8!important}
 [class*="st-key-qi_row_"]:focus-within{background:#E3EDFC!important;border-color:#2F5FD0!important}
-[class*="st-key-qi_row_"] [data-baseweb="input"]{height:42px!important;min-height:42px!important;border:1px solid #9AA8C2!important;border-radius:8px;background:#FFFFFF!important}
+[class*="st-key-qi_row_"] [data-baseweb="input"]{height:34px!important;min-height:34px!important;border:1px solid #9AA8C2!important;border-radius:8px;background:#FFFFFF!important}
 [class*="st-key-qi_row_"] [data-baseweb="input"]:focus-within{border-color:#2F5FD0!important;box-shadow:0 0 0 3px rgba(47,95,208,.18)!important}
-[class*="st-key-qi_row_"] input{font-weight:700;font-size:1rem;text-align:center;color:#1F2937!important;background:#FFFFFF!important}
+[class*="st-key-qi_row_"] input{font-weight:700;font-size:.95rem;text-align:center;color:#1F2937!important;background:#FFFFFF!important}
 [class*="st-key-qi_row_"] [data-testid="stNumberInput"] button{display:none!important}
-.qi-name{display:flex;align-items:center;gap:8px;height:42px;box-sizing:border-box;background:#F6F8FB;border:1px solid #D5DBE6;border-radius:8px;padding:0 12px;overflow:hidden}
-.qi-item{font-weight:600;color:#1F2937;font-size:.95rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qi-name{display:flex;align-items:center;gap:8px;height:34px;box-sizing:border-box;background:#F6F8FB;border:1px solid #D5DBE6;border-radius:8px;padding:0 10px;overflow:hidden}
+.qi-item{font-weight:600;color:#1F2937;font-size:.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .qi-sz{color:#2F5FD0;font-size:.85rem;font-weight:600;white-space:nowrap}
 .qi-tag{margin-left:auto;font-size:.68rem;color:#6B7280;background:#E9EDF4;border-radius:6px;padding:2px 7px;white-space:nowrap}
-.qi-cell{height:42px;display:flex;align-items:center;justify-content:center}
-.qi-uom{font-weight:600;font-size:.85rem;color:#374151;background:#EEF1F6;border-radius:6px;padding:4px 12px}
-.qi-stk{font-weight:700;font-size:.95rem;color:#1F2937}
+.qi-cell{height:34px;display:flex;align-items:center;justify-content:center}
+.qi-uom{font-weight:600;font-size:.8rem;color:#374151;background:#EEF1F6;border-radius:6px;padding:2px 10px}
+.qi-stk{font-weight:700;font-size:.9rem;color:#1F2937}
 .qi-stk.zero{color:#B26A00}
 .qi-stk.over{color:#C62828}
-.st-key-qi_head{background:#FFFFFF;padding:0 11px 6px 11px;position:sticky;top:0;z-index:30}
+.st-key-qi_head{background:#FFFFFF;padding:0 9px 4px 9px;position:sticky;top:0;z-index:30}
 [data-testid="stLayoutWrapper"]:has(> .st-key-qi_head){position:sticky;top:0;z-index:30;background:#FFFFFF}
-.st-key-qi_head [data-testid="stHorizontalBlock"]{gap:10px}
-.qi-head{background:#EEF1F6;color:#4B5563;font-weight:700;font-size:.78rem;letter-spacing:.02em;border-radius:8px;height:34px;display:flex;align-items:center;justify-content:center;padding:0 12px}
+.st-key-qi_head [data-testid="stHorizontalBlock"]{gap:8px}
+.st-key-qi_rows{max-width:960px}
+.qi-head{background:#EEF1F6;color:#4B5563;font-weight:700;font-size:.76rem;letter-spacing:.02em;border-radius:8px;height:28px;display:flex;align-items:center;justify-content:center;padding:0 10px}
 .qi-head.l{justify-content:flex-start}
-.qi-serial{display:inline-flex;align-items:center;justify-content:center;min-width:32px;height:30px;border-radius:15px;background:#2F5FD0;color:#FFFFFF;font-weight:700;font-size:.9rem}
+.qi-serial{display:inline-flex;align-items:center;justify-content:center;min-width:28px;height:26px;border-radius:13px;background:#2F5FD0;color:#FFFFFF;font-weight:700;font-size:.9rem}
 .qi-serial.off{background:transparent;color:#9AA3B5}
 /* keep the list steady while Streamlit re-runs (no dimming / flicker) */
 .st-key-qi_rows [data-stale="true"]{opacity:1!important;transition:none!important}
@@ -16364,7 +16379,7 @@ def _ri_quick_form():
         import html as _html
         st.markdown(_QI_CSS, unsafe_allow_html=True)
         gvals, bad_qty, ph_ = {}, [], {}
-        with st.container(height=min(80 + 68 * len(reg), 660), key="qi_rows"):
+        with st.container(height=min(56 + 47 * len(reg), 720), key="qi_rows"):
             with st.container(key="qi_head"):
                 _hc = st.columns(_QI_COLS)
                 for _i, (_c, _t) in enumerate(zip(_hc, ["Item · Size", "Issue Qty ✍️", "UOM", "Stock", "Serial (auto)"])):
