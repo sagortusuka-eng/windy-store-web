@@ -16273,14 +16273,29 @@ else:
     _qi_confirm_dialog = None
 
 
-_QI_COLS = [4.6, 1.0, 1.1, 1.4]
+def _qi_parse_qty(txt):
+    """'.3', '0.3', '0,3', '১.৫' -> float. Returns (value|None, error). Blank = (None, '')."""
+    t = str(txt or "").strip().translate(str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")).replace(",", ".").replace(" ", "")
+    if not t:
+        return None, ""
+    try:
+        v = float(t)
+    except ValueError:
+        return None, "invalid"
+    if v != v or v < 0 or v == float("inf"):
+        return None, "invalid"
+    return v, ""
+
+
+_QI_COLS = [3.6, 1.3, 0.8, 0.9, 1.0]
 _QI_CSS = '''<style>
 [class*="st-key-qi_row_"]{border-radius:10px;padding:7px 12px;border:1px solid #D5DCEA;margin-bottom:6px;background:#FFFFFF;transition:background .12s,box-shadow .12s,border-color .12s}
 [class*="st-key-qi_row_"] [data-testid="stHorizontalBlock"]{align-items:center}
 [class*="st-key-qi_row_"]:hover{background:#FFE08A!important;border-color:#D99A00!important;box-shadow:0 3px 12px rgba(217,154,0,.40)}
 [class*="st-key-qi_row_"]:focus-within{background:#BCD8FF!important;border-color:#1F63D6!important;box-shadow:0 0 0 2px #1F63D6 inset,0 3px 12px rgba(31,99,214,.35)}
-[class*="st-key-qi_row_"] [data-testid="stNumberInputContainer"]{border:2px solid #1F63D6!important;border-radius:8px;background:#FFFFFF!important}
-[class*="st-key-qi_row_"] [data-testid="stNumberInput"] input{font-weight:800;font-size:1.05rem;text-align:center;color:#0B1F4D!important;background:#FFFFFF!important}
+[class*="st-key-qi_row_"] [data-baseweb="input"]{border:2px solid #1F63D6!important;border-radius:8px;background:#FFFFFF!important}
+[class*="st-key-qi_row_"] input{font-weight:800;font-size:1.05rem;text-align:center;color:#0B1F4D!important;background:#FFFFFF!important}
+.qi-uom{font-weight:700;color:#0B1F4D;text-align:center;font-size:.9rem}
 .qi-item{font-weight:700;color:#0B1F4D;font-size:.95rem;line-height:1.25}
 .qi-sz{font-weight:600;color:#1F63D6}
 .qi-sub{font-size:.75rem;color:#51607F}
@@ -16329,26 +16344,29 @@ def _ri_quick_form():
         import html as _html
         st.markdown(_QI_CSS, unsafe_allow_html=True)
         _hc = st.columns(_QI_COLS)
-        for _c, _t in zip(_hc, ["Item · Size · ERP Code · UOM", "Stock", "Req. Serial", "Issue Qty ✍️"]):
+        for _c, _t in zip(_hc, ["Item · Size", "Issue Qty ✍️", "UOM", "Stock", "Req. Serial"]):
             _c.markdown(f"<div class='qi-head'>{_t}</div>", unsafe_allow_html=True)
-        gvals = {}
+        gvals, bad_qty = {}, []
         with st.container(height=min(70 + 66 * len(reg), 640), key="qi_rows"):
             for r in reg:
                 sl_ = int(r["sl_no"])
                 stk_ = float(eff.get(sl_, r["stock"]))
                 with st.container(key=f"qi_row_{gen}_{sl_}"):
                     cc = st.columns(_QI_COLS)
-                    qv_ = cc[3].number_input("Issue Qty", min_value=0.0, step=1.0, value=None, format="%g", placeholder="qty",
-                                             key=f"qi_q_{gen}_{sl_}", label_visibility="collapsed")
-                    sv_ = cc[2].number_input("Req. Serial", min_value=1, step=1, value=None, format="%d", placeholder="Sl",
+                    raw_ = cc[1].text_input("Issue Qty", placeholder="qty", key=f"qi_q_{gen}_{sl_}", label_visibility="collapsed",
+                                            help="Qty likhe Enter chapun. .3 / 0.3 / 2 shob cholbe.")
+                    qv_, qe_ = _qi_parse_qty(raw_)
+                    if qe_:
+                        bad_qty.append(f"{r['item_name']} [{r['size'] or '-'}] ('{raw_}')")
+                    sv_ = cc[4].number_input("Req. Serial", min_value=1, step=1, value=None, format="%d", placeholder="Sl",
                                              key=f"qi_s_{gen}_{sl_}", label_visibility="collapsed",
                                              help="Requisition kagoje item-ta koto number line-e ache (na dilew cholbe)")
                     cc[0].markdown(f"<div class='qi-item'>{_html.escape(str(r['item_name']))}"
                                    + (f" <span class='qi-sz'>· {_html.escape(str(r['size']))}</span>" if r["size"] else "") + "</div>"
-                                   f"<div class='qi-sub'>{_html.escape(str(r['prod_id']))} · {_html.escape(str(r['unit']))}"
-                                   + ("" if r.get("own") else " · 🔗 onno unit-er list") + "</div>", unsafe_allow_html=True)
-                    _over = qv_ is not None and float(qv_) > stk_ + 1e-9
-                    cc[1].markdown(f"<div class='qi-stock' style='color:{'#C62828' if _over else '#0B1F4D'}'>{stk_:g}</div>", unsafe_allow_html=True)
+                                   + ("" if r.get("own") else "<div class='qi-sub'>🔗 onno unit-er list</div>"), unsafe_allow_html=True)
+                    cc[2].markdown(f"<div class='qi-uom'>{_html.escape(str(r['unit']))}</div>", unsafe_allow_html=True)
+                    _over = qv_ is not None and qv_ > stk_ + 1e-9
+                    cc[3].markdown(f"<div class='qi-stock' style='color:{'#C62828' if _over else '#0B1F4D'}'>{stk_:g}</div>", unsafe_allow_html=True)
                     gvals[sl_] = (0.0 if qv_ is None else float(qv_), None if sv_ is None else int(sv_))
     # ---- regular list-e nei emon (uncommon) item: ei-i slip-e jog korun, alada SR lagbe na
     extras = st.session_state.setdefault("qi_extra", [])
@@ -16360,17 +16378,17 @@ def _ri_quick_form():
         xc = [r for r in (search_items(fac, xterm)[:30] if len(xterm) >= 2 else []) if int(r["sl_no"]) not in _have]
         xl = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · stock {float(r['stock']):g}": int(r["sl_no"]) for r in xc}
         e2.selectbox(f"Item ({len(xl)} ti)" if xl else "Item", list(xl) if xl else ["— age nam likhe khujun —"], key=f"qi_xp_{gen}")
-        e3.number_input("Qty", min_value=0.0, step=1.0, format="%g", key=f"qi_xq0_{gen}")
+        e3.text_input("Qty", key=f"qi_xq0_{gen}", placeholder="qty")
 
         def _add_x():
             pk = st.session_state.get(f"qi_xp_{gen}")
-            qv_ = float(st.session_state.get(f"qi_xq0_{gen}") or 0)
-            if pk in xl and qv_ > 0:
+            qv_, _qe = _qi_parse_qty(st.session_state.get(f"qi_xq0_{gen}"))
+            if pk in xl and qv_ and qv_ > 0:
                 sl_ = xl[pk]
                 st.session_state["qi_extra"] = list(st.session_state.get("qi_extra", [])) + [sl_]
-                st.session_state[f"qi_xq_{gen}_{sl_}"] = qv_
+                st.session_state[f"qi_xq_{gen}_{sl_}"] = f"{qv_:g}"
                 st.session_state[f"qi_xt_{gen}"] = ""
-                st.session_state[f"qi_xq0_{gen}"] = 0.0
+                st.session_state[f"qi_xq0_{gen}"] = ""
             else:
                 st.session_state["qi_xmsg"] = "Item bachun ar qty 0-r beshi din."
         e4.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
@@ -16394,11 +16412,11 @@ def _ri_quick_form():
                 if not r:
                     continue
                 x1, x2, xs, x3, x4 = st.columns([3.0, 1.1, 1.0, 1.2, 0.6])
-                x1.write(f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']}")
+                x1.write(f"{r['item_name']} [{r['size'] or '-'}]")
                 x2.write(f"stock {float(effx.get(int(sl_), r['stock'])):g}")
                 xs.number_input("serial", min_value=0, step=1, format="%d", key=f"qi_xs_{gen}_{sl_}", label_visibility="collapsed",
                                 help="Requisition kagoje ei item-er serial (0 = serial nei)")
-                x3.number_input("q", min_value=0.0, step=1.0, format="%g", key=f"qi_xq_{gen}_{sl_}", label_visibility="collapsed")
+                x3.text_input("q", key=f"qi_xq_{gen}_{sl_}", label_visibility="collapsed", placeholder="qty")
                 if x4.button("✖", key=f"qi_xrm_{gen}_{sl_}", help="Ei item bad din"):
                     extras.remove(sl_)
                     st.session_state["qi_extra"] = extras
@@ -16414,8 +16432,10 @@ def _ri_quick_form():
             ser[int(r["sl_no"])] = sv if sv and sv > 0 else None
     for sl_ in extras:
         r = ex.get(int(sl_))
-        qv = float(st.session_state.get(f"qi_xq_{gen}_{sl_}") or 0)
-        if r and qv > 0:
+        qv, _qe = _qi_parse_qty(st.session_state.get(f"qi_xq_{gen}_{sl_}"))
+        if _qe and r:
+            bad_qty.append(f"{r['item_name']} [{r['size'] or '-'}] ('{st.session_state.get(f'qi_xq_{gen}_{sl_}')}')")
+        if r and qv and qv > 0:
             sel.append((r, qv, float(effx.get(int(sl_), r["stock"])) if tx_date < local_now().date() else float(r["stock"])))
             _xs = int(st.session_state.get(f"qi_xs_{gen}_{sl_}") or 0)
             ser[int(sl_)] = _xs if _xs > 0 else None
@@ -16423,6 +16443,8 @@ def _ri_quick_form():
     sel.sort(key=lambda t: (ser.get(int(t[0]["sl_no"])) is None, ser.get(int(t[0]["sl_no"])) or 0))
     _sv = [v for v in (ser.get(int(r["sl_no"])) for r, _, _ in sel) if v]
     dup_ser = sorted({v for v in _sv if _sv.count(v) > 1})
+    if bad_qty:
+        st.error("⛔ Qty bujha jachche na: " + "; ".join(bad_qty) + " — shudhu songkha likhun (jemon 2 ba .3).")
     if dup_ser:
         st.error("⛔ Ekoi Serial ekadhik item-e deya hoyeche: " + ", ".join(str(v) for v in dup_ser) + " — Serial thik korun.")
     _sty = "".join(f".st-key-qi_row_{gen}_{int(r['sl_no'])}{{background:#DDF5E4;border-color:#2E9E5B}}" for r, _, _ in sel)
@@ -16491,7 +16513,7 @@ def _ri_quick_form():
             st.error("এই সপ্তাহের compulsory Physical Count শেষ হয়নি — আগে 📱 Physical Count → 🎯 তালিকার আইটেম গুনুন, তারপর Issue save হবে।")
         elif ttype == "Issued" and not section:
             st.error("Section বাছুন (কোন section-এ গেল) — report / audit-এর জন্য এটা দরকার।")
-        elif short or no_rate or dup_ser or len(sel) > RI_MAX_LINES:
+        elif short or no_rate or dup_ser or bad_qty or len(sel) > RI_MAX_LINES:
             st.error("তালিকায় সমস্যা আছে (stock kom / transfer / Rate nei) — upore lal message dekhe thik korun.")
         elif need_names and not verified:
             st.error("Physical verification লাগবে — ghune dekhe tick din.")
