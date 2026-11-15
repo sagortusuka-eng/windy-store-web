@@ -16136,12 +16136,22 @@ def ensure_ri_regular_table():
 
 
 def ri_reg_list(fac):
-    """The unit's regular / common items (with live stock) for the Quick Issue tab."""
-    return q("""SELECT r.sl_no, COALESCE(i.prod_id,'') AS prod_id, COALESCE(i.item_name,'') AS item_name, COALESCE(i.size,'') AS size,
+    """Regular / common items (with live stock) for the Quick Issue tab: the unit's own list PLUS the items that are on the
+    OTHER unit's regular list and also exist in this unit (matched by ERP code, else same name + size). own=False -> mirrored."""
+    return q("""WITH oth AS (
+                    SELECT LOWER(TRIM(COALESCE(o.prod_id,''))) AS code, LOWER(TRIM(COALESCE(o.item_name,''))) AS nm,
+                           LOWER(TRIM(COALESCE(o.size,''))) AS sz
+                    FROM ri_regular_items r2 JOIN inventory o ON o.factory_name=r2.factory_name AND o.sl_no=r2.sl_no
+                    WHERE r2.factory_name=%s)
+                SELECT i.sl_no, COALESCE(i.prod_id,'') AS prod_id, COALESCE(i.item_name,'') AS item_name, COALESCE(i.size,'') AS size,
                        COALESCE(i.current_stock,0) AS stock, COALESCE(NULLIF(TRIM(i.unit_name),''),'Pcs') AS unit,
-                       COALESCE(i.unit_price,0) AS price
-                FROM ri_regular_items r JOIN inventory i ON i.factory_name=r.factory_name AND i.sl_no=r.sl_no
-                WHERE r.factory_name=%s ORDER BY r.sort_no, i.item_name, i.size""", (fac,))
+                       COALESCE(i.unit_price,0) AS price, (r.sl_no IS NOT NULL) AS own
+                FROM inventory i
+                LEFT JOIN ri_regular_items r ON r.factory_name=i.factory_name AND r.sl_no=i.sl_no
+                WHERE i.factory_name=%s AND (r.sl_no IS NOT NULL OR EXISTS (
+                        SELECT 1 FROM oth WHERE (oth.code<>'' AND oth.code=LOWER(TRIM(COALESCE(i.prod_id,''))))
+                           OR (oth.nm<>'' AND oth.nm=LOWER(TRIM(COALESCE(i.item_name,''))) AND oth.sz=LOWER(TRIM(COALESCE(i.size,''))))))
+                ORDER BY i.item_name, i.size""", (other_factory(fac), fac))
 
 
 @tx
@@ -16197,7 +16207,10 @@ def _ri_quick_manage(fac, reg, can_write):
                     done(f"✅ {n} ti item regular list-e jog hoyeche.")
         with m2:
             st.markdown("**🗑 List theke bad din**")
-            rl = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']}": int(r["sl_no"]) for r in reg}
+            rl = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']}": int(r["sl_no"]) for r in reg if r.get("own")}
+            _nm = sum(1 for r in reg if not r.get("own"))
+            if _nm:
+                st.caption(f"🔗 {_nm} ti item onno unit-er regular list theke ashche - eigulo ekhan theke bad hobe na, oi unit-er list theke bad din.")
             rk = st.multiselect("Bad dewar item", list(rl), key="qi_rm_pick")
             if st.button("🗑 List theke bad din", key="qi_rm_btn", disabled=not (can_write and rk)) and guard():
                 n = ri_reg_remove(fac, [rl[x] for x in rk])
@@ -16205,7 +16218,7 @@ def _ri_quick_manage(fac, reg, can_write):
                     done(f"✅ {n} ti item regular list theke bad gelo.")
         st.divider()
         if st.checkbox("🪄 Auto-suggest: shesh-e beshi issue hoyechhe emon item dekhan", key="qi_sug_on"):
-            sug = ri_reg_suggest(fac)
+            sug = [x for x in ri_reg_suggest(fac) if int(x[0]["sl_no"]) not in have]
             if not sug:
                 st.caption("Notun kono suggestion nei.")
             else:
@@ -16260,6 +16273,22 @@ else:
     _qi_confirm_dialog = None
 
 
+_QI_COLS = [4.6, 1.0, 1.1, 1.4]
+_QI_CSS = '''<style>
+[class*="st-key-qi_row_"]{border-radius:10px;padding:7px 12px;border:1px solid #D5DCEA;margin-bottom:6px;background:#FFFFFF;transition:background .12s,box-shadow .12s,border-color .12s}
+[class*="st-key-qi_row_"] [data-testid="stHorizontalBlock"]{align-items:center}
+[class*="st-key-qi_row_"]:hover{background:#FFE08A!important;border-color:#D99A00!important;box-shadow:0 3px 12px rgba(217,154,0,.40)}
+[class*="st-key-qi_row_"]:focus-within{background:#BCD8FF!important;border-color:#1F63D6!important;box-shadow:0 0 0 2px #1F63D6 inset,0 3px 12px rgba(31,99,214,.35)}
+[class*="st-key-qi_row_"] [data-testid="stNumberInputContainer"]{border:2px solid #1F63D6!important;border-radius:8px;background:#FFFFFF!important}
+[class*="st-key-qi_row_"] [data-testid="stNumberInput"] input{font-weight:800;font-size:1.05rem;text-align:center;color:#0B1F4D!important;background:#FFFFFF!important}
+.qi-item{font-weight:700;color:#0B1F4D;font-size:.95rem;line-height:1.25}
+.qi-sz{font-weight:600;color:#1F63D6}
+.qi-sub{font-size:.75rem;color:#51607F}
+.qi-stock{font-weight:700;color:#0B1F4D;text-align:right}
+.qi-head{background:#1E3A6E;color:#fff;font-weight:700;font-size:.82rem;border-radius:8px;padding:7px 12px;margin-bottom:6px}
+</style>'''
+
+
 @_frag
 def _ri_quick_form():
     """⚡ Quick Issue: the unit's regular items are already on screen - the officer types only the qty of what he issues."""
@@ -16297,15 +16326,30 @@ def _ri_quick_form():
             eff = {}
     with _ri_card("qi_items"):
         _ri_step(2, "Qty din", f"{len(reg)} ti regular item - je item issue hobe shudhu tar 'Issue Qty' likhun, baki khali rakhun")
-        df = pd.DataFrame([{"Item": r["item_name"], "Size": r["size"], "ERP Code": r["prod_id"], "UOM": r["unit"],
-                            "Stock": float(eff.get(int(r["sl_no"]), r["stock"])), "Serial": float("nan"), "Issue Qty": 0.0} for r in reg])
-        ed = st.data_editor(df, key=f"qi_grid_{gen}", hide_index=True, use_container_width=True,
-                            height=min(80 + 36 * len(df), 620),
-                            disabled=["Item", "Size", "ERP Code", "UOM", "Stock"],
-                            column_config={"Issue Qty": st.column_config.NumberColumn("Issue Qty ✍️", min_value=0.0, step=1.0, format="%g"),
-                                           "Serial": st.column_config.NumberColumn("Req. Serial ✍️", min_value=1, step=1, format="%d",
-                                                                                   help="Requisition kagoje item-ta koto number line-e ache - confirm window-e ei serial-er kromei dekhabe."),
-                                           "Stock": st.column_config.NumberColumn("Stock", format="%g")})
+        import html as _html
+        st.markdown(_QI_CSS, unsafe_allow_html=True)
+        _hc = st.columns(_QI_COLS)
+        for _c, _t in zip(_hc, ["Item · Size · ERP Code · UOM", "Stock", "Req. Serial", "Issue Qty ✍️"]):
+            _c.markdown(f"<div class='qi-head'>{_t}</div>", unsafe_allow_html=True)
+        gvals = {}
+        with st.container(height=min(70 + 66 * len(reg), 640), key="qi_rows"):
+            for r in reg:
+                sl_ = int(r["sl_no"])
+                stk_ = float(eff.get(sl_, r["stock"]))
+                with st.container(key=f"qi_row_{gen}_{sl_}"):
+                    cc = st.columns(_QI_COLS)
+                    qv_ = cc[3].number_input("Issue Qty", min_value=0.0, step=1.0, value=None, format="%g", placeholder="qty",
+                                             key=f"qi_q_{gen}_{sl_}", label_visibility="collapsed")
+                    sv_ = cc[2].number_input("Req. Serial", min_value=1, step=1, value=None, format="%d", placeholder="Sl",
+                                             key=f"qi_s_{gen}_{sl_}", label_visibility="collapsed",
+                                             help="Requisition kagoje item-ta koto number line-e ache (na dilew cholbe)")
+                    cc[0].markdown(f"<div class='qi-item'>{_html.escape(str(r['item_name']))}"
+                                   + (f" <span class='qi-sz'>· {_html.escape(str(r['size']))}</span>" if r["size"] else "") + "</div>"
+                                   f"<div class='qi-sub'>{_html.escape(str(r['prod_id']))} · {_html.escape(str(r['unit']))}"
+                                   + ("" if r.get("own") else " · 🔗 onno unit-er list") + "</div>", unsafe_allow_html=True)
+                    _over = qv_ is not None and float(qv_) > stk_ + 1e-9
+                    cc[1].markdown(f"<div class='qi-stock' style='color:{'#C62828' if _over else '#0B1F4D'}'>{stk_:g}</div>", unsafe_allow_html=True)
+                    gvals[sl_] = (0.0 if qv_ is None else float(qv_), None if sv_ is None else int(sv_))
     # ---- regular list-e nei emon (uncommon) item: ei-i slip-e jog korun, alada SR lagbe na
     extras = st.session_state.setdefault("qi_extra", [])
     ex, effx = {}, {}
@@ -16363,13 +16407,11 @@ def _ri_quick_form():
                     except TypeError:
                         st.rerun()
     sel, ser = [], {}
-    for r, (_, row) in zip(reg, ed.iterrows()):
-        qv = row["Issue Qty"]
-        qv = 0.0 if qv is None or qv != qv else float(qv)
+    for r in reg:
+        qv, sv = gvals.get(int(r["sl_no"]), (0.0, None))
         if qv > 0:
             sel.append((r, qv, float(eff.get(int(r["sl_no"]), r["stock"]))))
-            sv = row["Serial"]
-            ser[int(r["sl_no"])] = None if sv is None or sv != sv or int(sv) <= 0 else int(sv)
+            ser[int(r["sl_no"])] = sv if sv and sv > 0 else None
     for sl_ in extras:
         r = ex.get(int(sl_))
         qv = float(st.session_state.get(f"qi_xq_{gen}_{sl_}") or 0)
@@ -16383,6 +16425,9 @@ def _ri_quick_form():
     dup_ser = sorted({v for v in _sv if _sv.count(v) > 1})
     if dup_ser:
         st.error("⛔ Ekoi Serial ekadhik item-e deya hoyeche: " + ", ".join(str(v) for v in dup_ser) + " — Serial thik korun.")
+    _sty = "".join(f".st-key-qi_row_{gen}_{int(r['sl_no'])}{{background:#DDF5E4;border-color:#2E9E5B}}" for r, _, _ in sel)
+    if _sty:
+        st.markdown(f"<style>{_sty}</style>", unsafe_allow_html=True)
     # ---- stock kom hole: onno unit theke auto-transfer (same rule as the 📤 Issue tab); tick must stay ON for the line to save
     short, xfer = [], {}
     xcache = st.session_state.setdefault("ri_other_cache", {})
