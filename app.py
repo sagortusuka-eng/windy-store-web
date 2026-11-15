@@ -16287,20 +16287,33 @@ def _qi_parse_qty(txt):
     return v, ""
 
 
-_QI_COLS = [3.6, 1.3, 0.8, 0.9, 1.0]
+_QI_COLS = [4.0, 1.4, 1.0, 1.0, 1.3]
 _QI_CSS = '''<style>
-[class*="st-key-qi_row_"]{border-radius:10px;padding:7px 12px;border:1px solid #D5DCEA;margin-bottom:6px;background:#FFFFFF;transition:background .12s,box-shadow .12s,border-color .12s}
-[class*="st-key-qi_row_"] [data-testid="stHorizontalBlock"]{align-items:center}
+[class*="st-key-qi_row_"]{border-radius:12px;padding:8px 12px;border:1px solid #D5DCEA;margin-bottom:8px;background:#FFFFFF;transition:background .12s,box-shadow .12s,border-color .12s}
+[class*="st-key-qi_row_"] [data-testid="stVerticalBlock"]{gap:0!important}
+[class*="st-key-qi_row_"] [data-testid="stHorizontalBlock"]{align-items:stretch!important;gap:10px}
+[class*="st-key-qi_row_"] [data-testid="stColumn"],[class*="st-key-qi_row_"] [data-testid="column"]{display:flex;flex-direction:column;justify-content:center}
+[class*="st-key-qi_row_"] [data-testid="stElementContainer"]{width:100%}
 [class*="st-key-qi_row_"]:hover{background:#FFE08A!important;border-color:#D99A00!important;box-shadow:0 3px 12px rgba(217,154,0,.40)}
 [class*="st-key-qi_row_"]:focus-within{background:#BCD8FF!important;border-color:#1F63D6!important;box-shadow:0 0 0 2px #1F63D6 inset,0 3px 12px rgba(31,99,214,.35)}
-[class*="st-key-qi_row_"] [data-baseweb="input"]{border:2px solid #1F63D6!important;border-radius:8px;background:#FFFFFF!important}
-[class*="st-key-qi_row_"] input{font-weight:800;font-size:1.05rem;text-align:center;color:#0B1F4D!important;background:#FFFFFF!important}
-.qi-uom{font-weight:700;color:#0B1F4D;text-align:center;font-size:.9rem}
-.qi-item{font-weight:700;color:#0B1F4D;font-size:.95rem;line-height:1.25}
-.qi-sz{font-weight:600;color:#1F63D6}
-.qi-sub{font-size:.75rem;color:#51607F}
-.qi-stock{font-weight:700;color:#0B1F4D;text-align:right}
-.qi-head{background:#1E3A6E;color:#fff;font-weight:700;font-size:.82rem;border-radius:8px;padding:7px 12px;margin-bottom:6px}
+[class*="st-key-qi_row_"] [data-baseweb="input"]{border:2px solid #1F63D6!important;border-radius:10px;background:#FFFFFF!important;min-height:44px}
+[class*="st-key-qi_row_"] [data-baseweb="input"]:focus-within{border-color:#0B3FA8!important;box-shadow:0 0 0 3px rgba(31,99,214,.35)!important}
+[class*="st-key-qi_row_"] input{font-weight:800;font-size:1.1rem;text-align:center;color:#0B1F4D!important;background:#FFFFFF!important}
+.qi-namebox{display:flex;align-items:center;min-height:44px;background:rgba(255,255,255,.82);border:1px solid #C3D2F0;border-left:6px solid #1F63D6;border-radius:10px;padding:6px 14px;box-shadow:0 1px 3px rgba(11,31,77,.08)}
+.qi-item{font-weight:800;color:#0B1F4D;font-size:1rem;line-height:1.25}
+.qi-sz{font-weight:700;color:#1F63D6;font-size:.9rem}
+.qi-sub{font-size:.72rem;color:#51607F;margin-top:2px}
+.qi-box{display:flex;align-items:center;justify-content:center;min-height:44px}
+.qi-uom{display:inline-block;min-width:54px;text-align:center;font-weight:800;font-size:.85rem;color:#0B3FA8;background:#E6EEFF;border:1px solid #AFC4F5;border-radius:999px;padding:5px 12px}
+.qi-stk{display:inline-block;min-width:54px;text-align:center;font-weight:800;font-size:.95rem;border-radius:999px;padding:5px 12px}
+.qi-stk.ok{color:#0F5E33;background:#DDF5E4;border:1px solid #8FD3A8}
+.qi-stk.zero{color:#7A5A00;background:#FFF1C2;border:1px solid #E6C45A}
+.qi-stk.over{color:#FFFFFF;background:#D32F2F;border:1px solid #9A1F1F}
+.st-key-qi_head{background:#FFFFFF;padding:0 13px 6px 13px;position:sticky;top:0;z-index:30}
+[data-testid="stLayoutWrapper"]:has(> .st-key-qi_head){position:sticky;top:0;z-index:30;background:#FFFFFF}
+.st-key-qi_head [data-testid="stHorizontalBlock"]{gap:10px}
+.qi-head{background:#1E3A6E;color:#fff;font-weight:800;font-size:.82rem;border-radius:8px;padding:8px 12px;text-align:center}
+.qi-head.l{text-align:left}
 </style>'''
 
 
@@ -16343,11 +16356,12 @@ def _ri_quick_form():
         _ri_step(2, "Qty din", f"{len(reg)} ti regular item - je item issue hobe shudhu tar 'Issue Qty' likhun, baki khali rakhun")
         import html as _html
         st.markdown(_QI_CSS, unsafe_allow_html=True)
-        _hc = st.columns(_QI_COLS)
-        for _c, _t in zip(_hc, ["Item · Size", "Issue Qty ✍️", "UOM", "Stock", "Req. Serial"]):
-            _c.markdown(f"<div class='qi-head'>{_t}</div>", unsafe_allow_html=True)
         gvals, bad_qty = {}, []
-        with st.container(height=min(70 + 66 * len(reg), 640), key="qi_rows"):
+        with st.container(height=min(80 + 68 * len(reg), 660), key="qi_rows"):
+            with st.container(key="qi_head"):
+                _hc = st.columns(_QI_COLS)
+                for _i, (_c, _t) in enumerate(zip(_hc, ["Item · Size", "Issue Qty ✍️", "UOM", "Stock", "Req. Serial"])):
+                    _c.markdown(f"<div class='qi-head{' l' if _i == 0 else ''}'>{_t}</div>", unsafe_allow_html=True)
             for r in reg:
                 sl_ = int(r["sl_no"])
                 stk_ = float(eff.get(sl_, r["stock"]))
@@ -16361,12 +16375,14 @@ def _ri_quick_form():
                     sv_ = cc[4].number_input("Req. Serial", min_value=1, step=1, value=None, format="%d", placeholder="Sl",
                                              key=f"qi_s_{gen}_{sl_}", label_visibility="collapsed",
                                              help="Requisition kagoje item-ta koto number line-e ache (na dilew cholbe)")
-                    cc[0].markdown(f"<div class='qi-item'>{_html.escape(str(r['item_name']))}"
-                                   + (f" <span class='qi-sz'>· {_html.escape(str(r['size']))}</span>" if r["size"] else "") + "</div>"
-                                   + ("" if r.get("own") else "<div class='qi-sub'>🔗 onno unit-er list</div>"), unsafe_allow_html=True)
-                    cc[2].markdown(f"<div class='qi-uom'>{_html.escape(str(r['unit']))}</div>", unsafe_allow_html=True)
+                    cc[0].markdown("<div class='qi-namebox'><div><span class='qi-item'>" + _html.escape(str(r['item_name'])) + "</span>"
+                                   + (f" <span class='qi-sz'>· {_html.escape(str(r['size']))}</span>" if r["size"] else "")
+                                   + ("" if r.get("own") else "<div class='qi-sub'>🔗 onno unit-er list</div>") + "</div></div>",
+                                   unsafe_allow_html=True)
+                    cc[2].markdown(f"<div class='qi-box'><span class='qi-uom'>{_html.escape(str(r['unit']))}</span></div>", unsafe_allow_html=True)
                     _over = qv_ is not None and qv_ > stk_ + 1e-9
-                    cc[3].markdown(f"<div class='qi-stock' style='color:{'#C62828' if _over else '#0B1F4D'}'>{stk_:g}</div>", unsafe_allow_html=True)
+                    _kls = "over" if _over else ("zero" if stk_ <= 0 else "ok")
+                    cc[3].markdown(f"<div class='qi-box'><span class='qi-stk {_kls}'>{stk_:g}</span></div>", unsafe_allow_html=True)
                     gvals[sl_] = (0.0 if qv_ is None else float(qv_), None if sv_ is None else int(sv_))
     # ---- regular list-e nei emon (uncommon) item: ei-i slip-e jog korun, alada SR lagbe na
     extras = st.session_state.setdefault("qi_extra", [])
