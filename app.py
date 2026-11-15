@@ -16242,7 +16242,7 @@ def _qi_confirm_body(p):
     st.dataframe(pd.DataFrame([{"Serial": (r.get("ser") or "-"), "Item": r["item"], "Size": r["size"], "Qty": r["qty"], "UOM": r["uom"], "Transfer": r["xfer"]}
                                for i, r in enumerate(rows)]),
                  hide_index=True, use_container_width=True, height=min(80 + 36 * len(rows), 420))
-    st.caption("Requisition-er Serial onujayi sajano - kagoj-er sathe line-by-line milan. Thik thakle OK chapun, vul thakle Cancel kore thik korun.")
+    st.caption("Serial = apni je kromei qty diyechen. Kagoj-er sathe line-by-line milan - thik thakle OK chapun, vul thakle Cancel kore thik korun.")
     b1, b2 = st.columns(2)
     if b1.button("✅ OK - Issue korun", type="primary", key="qi_ok", use_container_width=True):
         if guard():
@@ -16317,6 +16317,8 @@ _QI_CSS = '''<style>
 .st-key-qi_head [data-testid="stHorizontalBlock"]{gap:10px}
 .qi-head{background:#EEF1F6;color:#4B5563;font-weight:700;font-size:.78rem;letter-spacing:.02em;border-radius:8px;height:34px;display:flex;align-items:center;justify-content:center;padding:0 12px}
 .qi-head.l{justify-content:flex-start}
+.qi-serial{display:inline-flex;align-items:center;justify-content:center;min-width:32px;height:30px;border-radius:15px;background:#2F5FD0;color:#FFFFFF;font-weight:700;font-size:.9rem}
+.qi-serial.off{background:transparent;color:#9AA3B5}
 /* keep the list steady while Streamlit re-runs (no dimming / flicker) */
 .st-key-qi_rows [data-stale="true"]{opacity:1!important;transition:none!important}
 </style>'''
@@ -16358,14 +16360,14 @@ def _ri_quick_form():
         except Exception:
             eff = {}
     with _ri_card("qi_items"):
-        _ri_step(2, "Qty din", f"{len(reg)} ti regular item - je item issue hobe shudhu tar 'Issue Qty' likhun, baki khali rakhun")
+        _ri_step(2, "Qty din", f"{len(reg)} ti regular item - je item issue hobe shudhu tar 'Issue Qty' likhun. Serial auto hobe: prothom qty deya item = 1, tarpor 2, 3...")
         import html as _html
         st.markdown(_QI_CSS, unsafe_allow_html=True)
-        gvals, bad_qty = {}, []
+        gvals, bad_qty, ph_ = {}, [], {}
         with st.container(height=min(80 + 68 * len(reg), 660), key="qi_rows"):
             with st.container(key="qi_head"):
                 _hc = st.columns(_QI_COLS)
-                for _i, (_c, _t) in enumerate(zip(_hc, ["Item · Size", "Issue Qty ✍️", "UOM", "Stock", "Req. Serial"])):
+                for _i, (_c, _t) in enumerate(zip(_hc, ["Item · Size", "Issue Qty ✍️", "UOM", "Stock", "Serial (auto)"])):
                     _c.markdown(f"<div class='qi-head{' l' if _i == 0 else ''}'>{_t}</div>", unsafe_allow_html=True)
             for r in reg:
                 sl_ = int(r["sl_no"])
@@ -16377,9 +16379,7 @@ def _ri_quick_form():
                     qv_, qe_ = _qi_parse_qty(raw_)
                     if qe_:
                         bad_qty.append(f"{r['item_name']} [{r['size'] or '-'}] ('{raw_}')")
-                    sv_ = cc[4].number_input("Req. Serial", min_value=1, step=1, value=None, format="%d", placeholder="Sl",
-                                             key=f"qi_s_{gen}_{sl_}", label_visibility="collapsed",
-                                             help="Requisition kagoje item-ta koto number line-e ache (na dilew cholbe)")
+                    ph_[sl_] = cc[4].empty()
                     _nm = _html.escape(str(r['item_name']))
                     _sz = _html.escape(str(r['size'])) if r["size"] else ""
                     cc[0].markdown(f"<div class='qi-name' title='{_nm} {_sz}'><span class='qi-item'>{_nm}</span>"
@@ -16389,7 +16389,7 @@ def _ri_quick_form():
                     _over = qv_ is not None and qv_ > stk_ + 1e-9
                     _kls = "over" if _over else ("zero" if stk_ <= 0 else "")
                     cc[3].markdown(f"<div class='qi-cell'><span class='qi-stk {_kls}'>{stk_:g}</span></div>", unsafe_allow_html=True)
-                    gvals[sl_] = (0.0 if qv_ is None else float(qv_), None if sv_ is None else int(sv_))
+                    gvals[sl_] = (0.0 if qv_ is None else float(qv_), None)
     # ---- regular list-e nei emon (uncommon) item: ei-i slip-e jog korun, alada SR lagbe na
     extras = st.session_state.setdefault("qi_extra", [])
     ex, effx = {}, {}
@@ -16436,8 +16436,7 @@ def _ri_quick_form():
                 x1, x2, xs, x3, x4 = st.columns([3.0, 1.1, 1.0, 1.2, 0.6])
                 x1.write(f"{r['item_name']} [{r['size'] or '-'}]")
                 x2.write(f"stock {float(effx.get(int(sl_), r['stock'])):g}")
-                xs.number_input("serial", min_value=0, step=1, format="%d", key=f"qi_xs_{gen}_{sl_}", label_visibility="collapsed",
-                                help="Requisition kagoje ei item-er serial (0 = serial nei)")
+                ph_[int(sl_)] = xs.empty()
                 x3.text_input("q", key=f"qi_xq_{gen}_{sl_}", label_visibility="collapsed", placeholder="qty")
                 if x4.button("✖", key=f"qi_xrm_{gen}_{sl_}", help="Ei item bad din"):
                     extras.remove(sl_)
@@ -16451,7 +16450,6 @@ def _ri_quick_form():
         qv, sv = gvals.get(int(r["sl_no"]), (0.0, None))
         if qv > 0:
             sel.append((r, qv, float(eff.get(int(r["sl_no"]), r["stock"]))))
-            ser[int(r["sl_no"])] = sv if sv and sv > 0 else None
     for sl_ in extras:
         r = ex.get(int(sl_))
         qv, _qe = _qi_parse_qty(st.session_state.get(f"qi_xq_{gen}_{sl_}"))
@@ -16459,12 +16457,17 @@ def _ri_quick_form():
             bad_qty.append(f"{r['item_name']} [{r['size'] or '-'}] ('{st.session_state.get(f'qi_xq_{gen}_{sl_}')}')")
         if r and qv and qv > 0:
             sel.append((r, qv, float(effx.get(int(sl_), r["stock"])) if tx_date < local_now().date() else float(r["stock"])))
-            _xs = int(st.session_state.get(f"qi_xs_{gen}_{sl_}") or 0)
-            ser[int(sl_)] = _xs if _xs > 0 else None
-    # requisition-er serial onujayi sajano (serial nei = shobar shesh-e, list-er kromei) - confirm window ar transaction-o ei kromei
-    sel.sort(key=lambda t: (ser.get(int(t[0]["sl_no"])) is None, ser.get(int(t[0]["sl_no"])) or 0))
-    _sv = [v for v in (ser.get(int(r["sl_no"])) for r, _, _ in sel) if v]
-    dup_ser = sorted({v for v in _sv if _sv.count(v) > 1})
+    # Serial = je kromei officer Issue Qty bosiyeche (prothom item = 1, tarpor 2, 3...). Qty muchle porer-gulo ek dhap egiye jay.
+    _order = st.session_state.setdefault(f"qi_order_{gen}", [])
+    _active = [int(r["sl_no"]) for r, _, _ in sel]
+    _order[:] = [x for x in _order if x in _active] + [x for x in _active if x not in _order]
+    ser = {sl: _order.index(sl) + 1 for sl in _active}
+    sel.sort(key=lambda t: ser[int(t[0]["sl_no"])])
+    dup_ser = []
+    for _sl, _ph in ph_.items():
+        _n = ser.get(_sl)
+        _ph.markdown(f"<div class='qi-cell'><span class='qi-serial'>{_n}</span></div>" if _n
+                     else "<div class='qi-cell'><span class='qi-serial off'>—</span></div>", unsafe_allow_html=True)
     if bad_qty:
         st.error("⛔ Qty bujha jachche na: " + "; ".join(bad_qty) + " — shudhu songkha likhun (jemon 2 ba .3).")
     if dup_ser:
