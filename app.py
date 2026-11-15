@@ -16289,31 +16289,36 @@ def _qi_parse_qty(txt):
 
 _QI_COLS = [4.0, 1.4, 1.0, 1.0, 1.3]
 _QI_CSS = '''<style>
-[class*="st-key-qi_row_"]{border-radius:12px;padding:8px 12px;border:1px solid #D5DCEA;margin-bottom:8px;background:#FFFFFF;transition:background .12s,box-shadow .12s,border-color .12s}
+/* rows: quiet white cards, every cell exactly 42px so name / qty / uom / stock sit on one line */
+[class*="st-key-qi_row_"]{border-radius:10px;padding:6px 10px;border:1px solid #E1E6EF;margin-bottom:6px;background:#FFFFFF;transition:background .1s,border-color .1s}
 [class*="st-key-qi_row_"] [data-testid="stVerticalBlock"]{gap:0!important}
-[class*="st-key-qi_row_"] [data-testid="stHorizontalBlock"]{align-items:stretch!important;gap:10px}
-[class*="st-key-qi_row_"] [data-testid="stColumn"],[class*="st-key-qi_row_"] [data-testid="column"]{display:flex;flex-direction:column;justify-content:center}
+[class*="st-key-qi_row_"] [data-testid="stHorizontalBlock"]{align-items:flex-start!important;gap:10px}
 [class*="st-key-qi_row_"] [data-testid="stElementContainer"]{width:100%}
-[class*="st-key-qi_row_"]:hover{background:#FFE08A!important;border-color:#D99A00!important;box-shadow:0 3px 12px rgba(217,154,0,.40)}
-[class*="st-key-qi_row_"]:focus-within{background:#BCD8FF!important;border-color:#1F63D6!important;box-shadow:0 0 0 2px #1F63D6 inset,0 3px 12px rgba(31,99,214,.35)}
-[class*="st-key-qi_row_"] [data-baseweb="input"]{border:2px solid #1F63D6!important;border-radius:10px;background:#FFFFFF!important;min-height:44px}
-[class*="st-key-qi_row_"] [data-baseweb="input"]:focus-within{border-color:#0B3FA8!important;box-shadow:0 0 0 3px rgba(31,99,214,.35)!important}
-[class*="st-key-qi_row_"] input{font-weight:800;font-size:1.1rem;text-align:center;color:#0B1F4D!important;background:#FFFFFF!important}
-.qi-namebox{display:flex;align-items:center;min-height:44px;background:rgba(255,255,255,.82);border:1px solid #C3D2F0;border-left:6px solid #1F63D6;border-radius:10px;padding:6px 14px;box-shadow:0 1px 3px rgba(11,31,77,.08)}
-.qi-item{font-weight:800;color:#0B1F4D;font-size:1rem;line-height:1.25}
-.qi-sz{font-weight:700;color:#1F63D6;font-size:.9rem}
-.qi-sub{font-size:.72rem;color:#51607F;margin-top:2px}
-.qi-box{display:flex;align-items:center;justify-content:center;min-height:44px}
-.qi-uom{display:inline-block;min-width:54px;text-align:center;font-weight:800;font-size:.85rem;color:#0B3FA8;background:#E6EEFF;border:1px solid #AFC4F5;border-radius:999px;padding:5px 12px}
-.qi-stk{display:inline-block;min-width:54px;text-align:center;font-weight:800;font-size:.95rem;border-radius:999px;padding:5px 12px}
-.qi-stk.ok{color:#0F5E33;background:#DDF5E4;border:1px solid #8FD3A8}
-.qi-stk.zero{color:#7A5A00;background:#FFF1C2;border:1px solid #E6C45A}
-.qi-stk.over{color:#FFFFFF;background:#D32F2F;border:1px solid #9A1F1F}
-.st-key-qi_head{background:#FFFFFF;padding:0 13px 6px 13px;position:sticky;top:0;z-index:30}
+[class*="st-key-qi_row_"] [data-testid="stWidgetLabel"]{display:none!important}
+[class*="st-key-qi_row_"] [data-testid="stTextInput"],[class*="st-key-qi_row_"] [data-testid="stNumberInput"]{margin:0!important;padding:0!important}
+[class*="st-key-qi_row_"] [data-testid="stMarkdownContainer"],[class*="st-key-qi_row_"] [data-testid="stMarkdown"]{margin:0!important;padding:0!important}
+[class*="st-key-qi_row_"]:hover{background:#EDF3FD!important;border-color:#B7C8E8!important}
+[class*="st-key-qi_row_"]:focus-within{background:#E3EDFC!important;border-color:#2F5FD0!important}
+[class*="st-key-qi_row_"] [data-baseweb="input"]{height:42px!important;min-height:42px!important;border:1px solid #9AA8C2!important;border-radius:8px;background:#FFFFFF!important}
+[class*="st-key-qi_row_"] [data-baseweb="input"]:focus-within{border-color:#2F5FD0!important;box-shadow:0 0 0 3px rgba(47,95,208,.18)!important}
+[class*="st-key-qi_row_"] input{font-weight:700;font-size:1rem;text-align:center;color:#1F2937!important;background:#FFFFFF!important}
+[class*="st-key-qi_row_"] [data-testid="stNumberInput"] button{display:none!important}
+.qi-name{display:flex;align-items:center;gap:8px;height:42px;box-sizing:border-box;background:#F6F8FB;border:1px solid #D5DBE6;border-radius:8px;padding:0 12px;overflow:hidden}
+.qi-item{font-weight:600;color:#1F2937;font-size:.95rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qi-sz{color:#2F5FD0;font-size:.85rem;font-weight:600;white-space:nowrap}
+.qi-tag{margin-left:auto;font-size:.68rem;color:#6B7280;background:#E9EDF4;border-radius:6px;padding:2px 7px;white-space:nowrap}
+.qi-cell{height:42px;display:flex;align-items:center;justify-content:center}
+.qi-uom{font-weight:600;font-size:.85rem;color:#374151;background:#EEF1F6;border-radius:6px;padding:4px 12px}
+.qi-stk{font-weight:700;font-size:.95rem;color:#1F2937}
+.qi-stk.zero{color:#B26A00}
+.qi-stk.over{color:#C62828}
+.st-key-qi_head{background:#FFFFFF;padding:0 11px 6px 11px;position:sticky;top:0;z-index:30}
 [data-testid="stLayoutWrapper"]:has(> .st-key-qi_head){position:sticky;top:0;z-index:30;background:#FFFFFF}
 .st-key-qi_head [data-testid="stHorizontalBlock"]{gap:10px}
-.qi-head{background:#1E3A6E;color:#fff;font-weight:800;font-size:.82rem;border-radius:8px;padding:8px 12px;text-align:center}
-.qi-head.l{text-align:left}
+.qi-head{background:#EEF1F6;color:#4B5563;font-weight:700;font-size:.78rem;letter-spacing:.02em;border-radius:8px;height:34px;display:flex;align-items:center;justify-content:center;padding:0 12px}
+.qi-head.l{justify-content:flex-start}
+/* keep the list steady while Streamlit re-runs (no dimming / flicker) */
+.st-key-qi_rows [data-stale="true"]{opacity:1!important;transition:none!important}
 </style>'''
 
 
@@ -16375,14 +16380,15 @@ def _ri_quick_form():
                     sv_ = cc[4].number_input("Req. Serial", min_value=1, step=1, value=None, format="%d", placeholder="Sl",
                                              key=f"qi_s_{gen}_{sl_}", label_visibility="collapsed",
                                              help="Requisition kagoje item-ta koto number line-e ache (na dilew cholbe)")
-                    cc[0].markdown("<div class='qi-namebox'><div><span class='qi-item'>" + _html.escape(str(r['item_name'])) + "</span>"
-                                   + (f" <span class='qi-sz'>· {_html.escape(str(r['size']))}</span>" if r["size"] else "")
-                                   + ("" if r.get("own") else "<div class='qi-sub'>🔗 onno unit-er list</div>") + "</div></div>",
-                                   unsafe_allow_html=True)
-                    cc[2].markdown(f"<div class='qi-box'><span class='qi-uom'>{_html.escape(str(r['unit']))}</span></div>", unsafe_allow_html=True)
+                    _nm = _html.escape(str(r['item_name']))
+                    _sz = _html.escape(str(r['size'])) if r["size"] else ""
+                    cc[0].markdown(f"<div class='qi-name' title='{_nm} {_sz}'><span class='qi-item'>{_nm}</span>"
+                                   + (f"<span class='qi-sz'>{_sz}</span>" if _sz else "")
+                                   + ("" if r.get("own") else "<span class='qi-tag'>onno unit</span>") + "</div>", unsafe_allow_html=True)
+                    cc[2].markdown(f"<div class='qi-cell'><span class='qi-uom'>{_html.escape(str(r['unit']))}</span></div>", unsafe_allow_html=True)
                     _over = qv_ is not None and qv_ > stk_ + 1e-9
-                    _kls = "over" if _over else ("zero" if stk_ <= 0 else "ok")
-                    cc[3].markdown(f"<div class='qi-box'><span class='qi-stk {_kls}'>{stk_:g}</span></div>", unsafe_allow_html=True)
+                    _kls = "over" if _over else ("zero" if stk_ <= 0 else "")
+                    cc[3].markdown(f"<div class='qi-cell'><span class='qi-stk {_kls}'>{stk_:g}</span></div>", unsafe_allow_html=True)
                     gvals[sl_] = (0.0 if qv_ is None else float(qv_), None if sv_ is None else int(sv_))
     # ---- regular list-e nei emon (uncommon) item: ei-i slip-e jog korun, alada SR lagbe na
     extras = st.session_state.setdefault("qi_extra", [])
@@ -16463,7 +16469,7 @@ def _ri_quick_form():
         st.error("⛔ Qty bujha jachche na: " + "; ".join(bad_qty) + " — shudhu songkha likhun (jemon 2 ba .3).")
     if dup_ser:
         st.error("⛔ Ekoi Serial ekadhik item-e deya hoyeche: " + ", ".join(str(v) for v in dup_ser) + " — Serial thik korun.")
-    _sty = "".join(f".st-key-qi_row_{gen}_{int(r['sl_no'])}{{background:#DDF5E4;border-color:#2E9E5B}}" for r, _, _ in sel)
+    _sty = "".join(f".st-key-qi_row_{gen}_{int(r['sl_no'])}{{background:#F1F9F4;border-color:#8FCBA5}}" for r, _, _ in sel)
     if _sty:
         st.markdown(f"<style>{_sty}</style>", unsafe_allow_html=True)
     # ---- stock kom hole: onno unit theke auto-transfer (same rule as the 📤 Issue tab); tick must stay ON for the line to save
