@@ -16472,6 +16472,15 @@ _QI_CSS = '''<style>
 .qi-side-row{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px dashed #E2EAF6;font-size:.85rem}
 .qi-side-row span{color:#5B6B86}
 .qi-side-row b{color:#0B1F4D;text-align:right}
+.qi-side-row.hl-sr,.qi-side-row.hl-sec{align-items:center;border-bottom:0;border-radius:10px;padding:8px 10px;margin:4px 0}
+.qi-side-row.hl-sr{background:#EFE9FF;border:1px solid #D4C6FA}
+.qi-side-row.hl-sr span{color:#5B3FB5;font-weight:700}
+.qi-side-row.hl-sr b{color:#4C1D95;font-size:1.05rem;letter-spacing:.02em}
+.qi-side-row.hl-sec{background:#FFF1DE;border:1px solid #F6D3A2}
+.qi-side-row.hl-sec span{color:#B45309;font-weight:700}
+.qi-side-row.hl-sec b{color:#9A3412;font-size:1rem}
+.qi-side-row.empty{background:#FDECEC;border-color:#F3B5B5}
+.qi-side-row.empty span,.qi-side-row.empty b{color:#B42318}
 .qi-side-ok{margin-top:10px;color:#0F5E33;background:#E6F6EC;border-radius:8px;padding:7px 10px;font-weight:700;font-size:.82rem}
 .qi-side-alert{margin-top:10px;color:#9A1F1F;background:#FDECEC;border-radius:8px;padding:7px 10px;font-weight:700;font-size:.82rem}
 [data-testid="stColumn"]:has(.qi-side),[data-testid="column"]:has(.qi-side){position:sticky;top:64px;align-self:flex-start}
@@ -16780,12 +16789,12 @@ def _ri_quick_form():
         _mc_map, _mc_err = _mc_lines_check(fac, _mlines, [False] * len(_mlines), mc_sel, _mc_msl, tx_date, ttype, True)
     _tq = sum(qv for _, qv, _ in sel)
     _alerts = len(short) + len(no_rate) + len(bad_qty) + len(bad_rate)
-    _sr = lambda k, v: f"<div class='qi-side-row'><span>{k}</span><b>{_html.escape(str(v))}</b></div>"
+    _sr = lambda k, v, c="": f"<div class='qi-side-row {c}'><span>{k}</span><b>{_html.escape(str(v))}</b></div>"
     colR.markdown("<div class='qi-side'><div class='qi-side-h'>📋 Issue Summary</div>"
                   f"<div class='qi-side-kpis'><div class='qi-kpi'><b>{len(sel)}</b><span>Items</span></div>"
                   f"<div class='qi-kpi'><b>{_tq:g}</b><span>Total Qty</span></div></div>"
-                  + _sr("SR No.", sr_no or "—") + _sr("Date", f"{tx_date:%d-%b-%Y}" if date_ok else "— bachai korun —")
-                  + _sr("Type", TRANS_LABELS.get(ttype, ttype)) + _sr("Section", section or "—") + _sr("Unit", fac)
+                  + _sr("SR No.", sr_no or "—", "hl-sr" + ("" if sr_no else " empty")) + _sr("Date", f"{tx_date:%d-%b-%Y}" if date_ok else "— bachai korun —")
+                  + _sr("Type", TRANS_LABELS.get(ttype, ttype)) + _sr("Section", section or "—", "hl-sec" + ("" if section else " empty")) + _sr("Unit", fac)
                   + (f"<div class='qi-side-alert'>⚠ {_alerts} ti shomossha - bam-e lal message dekhun</div>" if _alerts
                      else ("<div class='qi-side-ok'>✔ Shob thik ache - Save korte paren</div>" if sel else ""))
                   + "</div>", unsafe_allow_html=True)
@@ -23183,6 +23192,7 @@ def ensure_mc_repair_schema():
                            item_name TEXT, supplier_name TEXT, send_date DATE, received_date DATE, repair_qty REAL DEFAULT 0,
                            rate REAL DEFAULT 0, total_value REAL DEFAULT 0, bill_no TEXT DEFAULT '', gatepass_no TEXT DEFAULT '',
                            tracing_code TEXT DEFAULT '', notes TEXT DEFAULT '', created_by TEXT, created_at TEXT)""")
+            cur.execute("ALTER TABLE machine_repairs ADD COLUMN IF NOT EXISTS rr_id INTEGER")          # link to Repair & Returns record
             cur.execute("CREATE INDEX IF NOT EXISTS ix_mrep_fac_mc ON machine_repairs(factory_name, machine_id)")
         conn.commit()
     except Exception:
@@ -23192,19 +23202,19 @@ def ensure_mc_repair_schema():
 
 def mc_repair_schema():
     mc_schema()
-    if not st.session_state.get("_mc_repair_ready_v1"):
-        run_once_per_process("mc_repair_v1", ensure_mc_repair_schema)
-        st.session_state["_mc_repair_ready_v1"] = True
+    if not st.session_state.get("_mc_repair_ready_v2"):
+        run_once_per_process("mc_repair_v2", ensure_mc_repair_schema)
+        st.session_state["_mc_repair_ready_v2"] = True
 
 
 @tx
 def mc_repair_add(fac, rec):
     run("""INSERT INTO machine_repairs (factory_name, machine_id, item_name, supplier_name, send_date, received_date, repair_qty, rate,
-                                       total_value, bill_no, gatepass_no, tracing_code, notes, created_by, created_at)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                                       total_value, bill_no, gatepass_no, tracing_code, notes, created_by, created_at, rr_id)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         (fac, rec["machine_id"], rec["item"], rec["supplier"], rec["send"], rec["recv"], rec["qty"], rec["rate"],
          round(rec["qty"] * rec["rate"], 2), rec["bill"], rec["gatepass"], rec["trace"], rec["notes"],
-         st.session_state.get("user", ""), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+         st.session_state.get("user", ""), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), rec.get("rr_id")))
     audit("MACHINE_REPAIR_ADD", f"{fac}: machine id {rec['machine_id']} - {rec['item']} x {rec['qty']:g} @ {rec['rate']:g} "
                                 f"= {rec['qty'] * rec['rate']:,.2f} (supplier {rec['supplier']}, bill {rec['bill'] or '-'})")
     return True
@@ -23232,7 +23242,7 @@ def _mc_repair_df(units):
     df = qdf_c("""SELECT r.id, r.factory_name, r.machine_id, COALESCE(r.item_name,'') AS item_name, COALESCE(r.supplier_name,'') AS supplier_name,
                          r.send_date, r.received_date, COALESCE(r.repair_qty,0) AS repair_qty, COALESCE(r.rate,0) AS rate,
                          COALESCE(r.total_value,0) AS total_value, COALESCE(r.bill_no,'') AS bill_no, COALESCE(r.gatepass_no,'') AS gatepass_no,
-                         COALESCE(r.tracing_code,'') AS tracing_code, COALESCE(r.notes,'') AS notes, COALESCE(r.created_by,'') AS created_by,
+                         COALESCE(r.tracing_code,'') AS tracing_code, COALESCE(r.notes,'') AS notes, COALESCE(r.created_by,'') AS created_by, r.rr_id,
                          m.mc_no, COALESCE(m.machine_no,'') AS machine_no, COALESCE(m.machine_name,'') AS machine_name
                   FROM machine_repairs r JOIN machines m ON m.id=r.machine_id
                   WHERE r.factory_name = ANY(%s) ORDER BY r.id DESC""", (list(units),))
@@ -23304,29 +23314,70 @@ def _mc_repair_view(units, fac, is_mgr):
             labs = {mc_label(r): int(r["id"]) for r in machines}
             gen = st.session_state.get("mc_rp_gen", 0)
             K = lambda n: f"mc_rp_{n}_{gen}"
+            # items already written in 🛠 Repair & Returns (sent out on a gate pass) -> pick one; supplier / qty / dates fill in from it
+            rr = qdf_c("""SELECT id, COALESCE(tracking_code,'') AS tracking_code, COALESCE(gate_pass_no,'') AS gate_pass_no, COALESCE(item_name,'') AS item_name,
+                                 COALESCE(qty,0) AS qty, COALESCE(source_type,'') AS source_type, COALESCE(supplier_name,'') AS supplier_name,
+                                 sent_date, return_date, COALESCE(status,'') AS status
+                          FROM repair_returns WHERE factory_name=%s ORDER BY id DESC LIMIT 400""", (fac,))
+            costed = {}
+            if not rep_all.empty and "rr_id" in rep_all.columns:
+                for _r in rep_all[rep_all["rr_id"].notna()].itertuples():
+                    costed[int(_r.rr_id)] = costed.get(int(_r.rr_id), 0.0) + float(_r.total_value)
+            MANUAL = "✍ অন্য item (Repair & Returns-এ নেই) — নিজে লিখব"
+            ilabs = {}
+            for _r in rr.itertuples():
+                _sd = parse_date(_r.sent_date)
+                _lab = f"{_r.item_name} · {_r.qty:g} · {_r.supplier_name or '-'}"
+                if _sd:
+                    _lab += f" · sent {_sd:%d-%b-%Y}"
+                if _r.gate_pass_no:
+                    _lab += f" · GP {_r.gate_pass_no}"
+                _lab += f" · {_r.status}"
+                if int(_r.id) in costed:
+                    _lab += f" · ✔ costed ৳{costed[int(_r.id)]:,.0f}"
+                ilabs[_lab + f"  [#{_r.id}]"] = _r
             with st.container(border=True):
                 st.markdown('<div class="mcx-h">➕ New repair / servicing entry</div>', unsafe_allow_html=True)
+                ipick = st.selectbox("Item (Repair & Returns-এ যে item লিখে পাঠানো হয়েছে) *", ["— select item —"] + list(ilabs) + [MANUAL],
+                                     key=K("ipick"), help="🛠 Repair & Returns ট্যাবে যে item gate pass দিয়ে পাঠানো হয়েছে সেটাই এখানে আসে। বাছলে Supplier, Qty, তারিখ, Gatepass, Tracing code নিজে থেকে বসে যাবে।")
+                rrow = ilabs.get(ipick)
+                rid = int(rrow.id) if rrow is not None else 0
+                K2 = lambda n: f"mc_rp_{n}_{gen}_{rid}"          # keys change with the chosen item, so its details pre-fill
+                if rrow is not None and rid in costed:
+                    st.warning(f"এই item-এ আগেই ৳{costed[rid]:,.0f} servicing cost এন্ট্রি করা আছে — আলাদা bill হলে তবেই আবার দিন।")
+                _sd0 = parse_date(rrow.sent_date) if rrow is not None else None
+                _rd0 = parse_date(rrow.return_date) if rrow is not None and rrow.status in ("Returned", "Closed") else None
                 c1, c2 = st.columns([1.4, 1])
                 mpick = c1.selectbox("Machine (M/C No) *", ["— select machine —"] + list(labs), key=K("m"),
                                      help="এই repair-এর খরচ যে মেশিনের নামে যাবে")
-                supplier = c2.text_input("Supplier name *", key=K("sup"))
+                supplier = c2.text_input("Supplier name *", value=(rrow.supplier_name if rrow is not None else ""), key=K2("sup"))
                 c3, c4, c5 = st.columns([1.6, 0.8, 0.8])
-                item = c3.text_input("Item / part name (sent for repair) *", key=K("item"))
-                qty = c4.number_input("Repair qty *", min_value=0.0, value=1.0, step=1.0, key=K("qty"))
-                rate = c5.number_input("Rate (৳) *", min_value=0.0, value=0.0, step=1.0, key=K("rate"))
+                if rrow is not None:
+                    item = rrow.item_name
+                    c3.text_input("Item / part name (from Repair & Returns)", value=item, disabled=True, key=K2("itemro"))
+                elif ipick == MANUAL:
+                    item = c3.text_input("Item / part name (sent for repair) *", key=K("item"))
+                else:
+                    item = ""
+                    c3.text_input("Item / part name", value="", disabled=True, placeholder="ওপর থেকে item বাছুন", key=K("itemph"))
+                qty = c4.number_input("Repair qty *", min_value=0.0, value=float(rrow.qty) if rrow is not None and float(rrow.qty) > 0 else 1.0,
+                                      step=1.0, key=K2("qty"))
+                rate = c5.number_input("Rate (৳) *", min_value=0.0, value=0.0, step=1.0, key=K2("rate"))
                 c6, c7, c8 = st.columns(3)
-                send = c6.date_input("Part send date *", value=today, format="DD/MM/YYYY", key=K("send"))
-                recv = c7.date_input("Parts received date (খালি = এখনো ফেরেনি)", value=None, format="DD/MM/YYYY", key=K("recv"))
+                send = c6.date_input("Part send date *", value=_sd0.date() if _sd0 else today, format="DD/MM/YYYY", key=K2("send"))
+                recv = c7.date_input("Parts received date (খালি = এখনো ফেরেনি)", value=_rd0.date() if _rd0 else None, format="DD/MM/YYYY", key=K2("recv"))
                 c8.metric("Total value (৳)", f"{qty * rate:,.2f}", help="Repair qty × Rate")
                 c9, c10, c11 = st.columns(3)
-                bill = c9.text_input("Bill number", key=K("bill"))
-                gp = c10.text_input("Gatepass number", key=K("gp"))
-                trace = c11.text_input("Tracing code number", key=K("trace"))
+                bill = c9.text_input("Bill number", key=K2("bill"))
+                gp = c10.text_input("Gatepass number", value=(rrow.gate_pass_no if rrow is not None else ""), key=K2("gp"))
+                trace = c11.text_input("Tracing code number", value=(rrow.tracking_code if rrow is not None else ""), key=K2("trace"))
                 notes = st.text_input("Notes (optional)", key=K("notes"))
                 if st.button("💾 Save repair entry", type="primary", key=K("save")) and guard():
                     err = ""
                     if mpick not in labs:
                         err = "Machine বাছুন।"
+                    elif rrow is None and ipick != MANUAL:
+                        err = "Item বাছুন (Repair & Returns থেকে)।"
                     elif not item.strip():
                         err = "Item / part name লিখুন।"
                     elif not supplier.strip():
@@ -23343,7 +23394,8 @@ def _mc_repair_view(units, fac, is_mgr):
                         st.error(err)
                     elif mc_repair_add(fac, {"machine_id": labs[mpick], "item": item.strip(), "supplier": supplier.strip(), "send": send,
                                              "recv": recv, "qty": float(qty), "rate": float(rate), "bill": bill.strip(),
-                                             "gatepass": gp.strip(), "trace": trace.strip(), "notes": notes.strip()}):
+                                             "gatepass": gp.strip(), "trace": trace.strip(), "notes": notes.strip(),
+                                             "rr_id": rid or None}):
                         st.session_state["mc_rp_gen"] = gen + 1
                         done(f"✅ Repair entry saved — {mpick}: ৳{qty * rate:,.0f}")
 
