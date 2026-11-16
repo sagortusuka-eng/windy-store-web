@@ -23262,14 +23262,15 @@ def _mc_cost_details(row, df, df_all, plabel):
         c2.metric("Total issued", f"৳{float(ds['amount'].sum()):,.0f}")
         c3.metric("Issue lines", f"{len(ds)}")
         st.dataframe(pd.DataFrame({"Issue Date": ds["date"], "Item": ds["item"] + " [" + ds["size"].replace("", "-") + "]",
-                                   "Dept": ds["dept"], "Qty": ds["qty"], "Rate (৳)": ds["rate"].round(2),
+                                   "Dept": ds["dept"], "Type": ds["dept"].isin(MC_DEPTS).map({True: "Maintenance", False: "Other"}),
+                                   "Qty": ds["qty"], "Rate (৳)": ds["rate"].round(2),
                                    "Amount (৳)": ds["amount"].round(0), "Issued by": ds["officer"]}),
                      hide_index=True, use_container_width=True, height=min(90 + 35 * len(ds), 320))
     export_buttons(rqt, f"machine_{str(row['mc_no']).replace(' ', '_')}_requisitions", f"{row['mc_no']} requisition-wise ({plabel})")
     st.markdown('<div class="mcx-h">All issue lines</div>', unsafe_allow_html=True)
     sr = pd.DataFrame({"Date": dm["date"], "SR": dm["req_no"].replace("", "-"),
                        "Item": dm["item"] + " [" + dm["size"].replace("", "-") + "]", "Dept": dm["dept"],
-                       "Qty": dm["qty"], "Rate (৳)": dm["rate"].round(2), "Amount (৳)": dm["amount"].round(0), "Issued by": dm["officer"]})
+                       "Type": dm["dept"].isin(MC_DEPTS).map({True: "Maintenance", False: "Other"}), "Qty": dm["qty"], "Rate (৳)": dm["rate"].round(2), "Amount (৳)": dm["amount"].round(0), "Issued by": dm["officer"]})
     st.dataframe(sr, hide_index=True, use_container_width=True, height=min(90 + 35 * len(sr), 420))
     export_buttons(sr, f"machine_{str(row['mc_no']).replace(' ', '_')}_detail", f"{row['mc_no']} cost detail ({plabel})")
 
@@ -23349,9 +23350,9 @@ def _mc_view_cost(units, all_machines):
         f'<div class="mcx-kpi navy"><div class="mcx-ic">💰</div><div><div class="l">Total Machine Cost</div><div class="v">৳{total:,.0f}</div>'
         f'<div class="s">{delta or e(plabel)}</div></div></div>'
         f'<div class="mcx-kpi amber"><div class="mcx-ic">🛠</div><div><div class="l">Maintenance Cost</div><div class="v">৳{maint:,.0f}</div>'
-        f'<div class="s">{pm:.1f}% of total</div></div></div>'
+        f'<div class="s">{pm:.1f}% of total · Dept = Maintenance</div></div></div>'
         f'<div class="mcx-kpi blue"><div class="mcx-ic">📦</div><div><div class="l">Other Cost</div><div class="v">৳{other:,.0f}</div>'
-        f'<div class="s">{100 - pm if total else 0:.1f}% of total</div></div></div></div>', unsafe_allow_html=True)
+        f'<div class="s">{100 - pm if total else 0:.1f}% of total · other departments</div></div></div></div>', unsafe_allow_html=True)
     if df.empty:
         st.info(f"{plabel}: মেশিনের নামে কোনো ইস্যু পাওয়া যায়নি।")
         return
@@ -23436,6 +23437,42 @@ def _mc_view_cost(units, all_machines):
     if sel_idx is not None and 0 <= sel_idx < len(mt):
         st.markdown("---")
         _mc_cost_details(mt.iloc[sel_idx], df, df_all, plabel)
+
+    # ---- which items are Maintenance, which are Other (management can verify the split) ----
+    st.markdown('<div class="mcx-h" style="margin-top:18px">Maintenance vs Other — item-wise</div>'
+                '<div class="mcx-hs">কোন আইটেম Maintenance, কোনটা Other — আইটেমের Department দেখে ঠিক হয়: '
+                'Department = <b>Maintenance</b> হলে Maintenance Cost, অন্য যেকোনো Department হলে Other Cost।</div>', unsafe_allow_html=True)
+    tf = st.radio("Show", ["All", "Maintenance", "Other"], horizontal=True, key="mc_cost_typefilter", label_visibility="collapsed")
+    dd = df.assign(Type=is_m.map({True: "Maintenance", False: "Other"}), Department=df["dept"].replace("", "Unclassified"))
+    if tf != "All":
+        dd = dd[dd["Type"] == tf]
+    if dd.empty:
+        st.info("No items in this group for the selected period.")
+    else:
+        ds_ = dd.groupby(["Type", "Department"])["amount"].sum().reset_index().sort_values("amount", ascending=False)
+        ds_["Share %"] = (ds_["amount"] / total * 100).round(1) if total else 0.0
+        ds_ = ds_.rename(columns={"amount": "Cost (৳)"}); ds_["Cost (৳)"] = ds_["Cost (৳)"].round(0)
+        a1, a2 = st.columns([1, 1.7])
+        with a1:
+            st.markdown('<div class="mcx-hs"><b>Department-wise total</b></div>', unsafe_allow_html=True)
+            st.dataframe(ds_, hide_index=True, use_container_width=True, height=min(90 + 35 * len(ds_), 320),
+                         column_config={"Cost (৳)": st.column_config.NumberColumn(format="৳%.0f"),
+                                        "Share %": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=100)})
+        with a2:
+            st.markdown('<div class="mcx-hs"><b>Item-wise (which item went to which machines)</b></div>', unsafe_allow_html=True)
+            mcn = dd["machine_id"].map(master.set_index("machine_id")["mc_no"]) if not master.empty else dd["machine_id"].astype(str)
+            it2 = dd.assign(MC=mcn.fillna("")).groupby(["Type", "Department", "item", "size"]).agg(
+                Qty=("qty", "sum"), Cost=("amount", "sum"), Lines=("id", "count"),
+                Machines=("MC", lambda x: ", ".join(sorted({v for v in x if v})[:6]) + (" …" if len({v for v in x if v}) > 6 else ""))
+            ).reset_index().sort_values("Cost", ascending=False)
+            itt = pd.DataFrame({"Item": it2["item"] + " [" + it2["size"].replace("", "-") + "]", "Department": it2["Department"],
+                                "Type": it2["Type"], "Qty": it2["Qty"].round(2), "Cost (৳)": it2["Cost"].round(0),
+                                "Lines": it2["Lines"], "Machines": it2["Machines"]})
+            st.dataframe(itt, hide_index=True, use_container_width=True, height=min(90 + 35 * len(itt), 420),
+                         column_config={"Cost (৳)": st.column_config.NumberColumn(format="৳%.0f")})
+            export_buttons(itt, "machine_cost_item_type", f"Maintenance vs Other items ({plabel})")
+        if tf == "All" and (dd["Department"] == "Unclassified").any():
+            st.caption("⚠️ কিছু আইটেমের Department ফাঁকা — সেগুলো 'Other'-এ ধরা হয়েছে। Department ঠিক করলে ভাগ ঠিক হবে।")
 
     # ---- machine x month grid ----
     pv = (df_all.dropna(subset=["dt"]).assign(Month=lambda x: x["dt"].dt.to_period("M"))
