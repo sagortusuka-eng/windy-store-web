@@ -23021,6 +23021,32 @@ def mc_update_details(fac, rows):
 
 
 @tx
+def mc_upsert(fac, rows):
+    """rows: (mc_no, machine_no, name, section, extra_dict). Updates the machine if it already exists (same M/C No + Machine No),
+    otherwise adds it. A blank Section never wipes an existing Section."""
+    n_new = n_upd = 0
+    user = st.session_state.get("user", "")
+    for mc_no, m_no, name, sec, ex in rows:
+        got = run("""UPDATE machines SET machine_name=%s, section=COALESCE(NULLIF(%s,''), section),
+                            brand=%s, model=%s, mfg_id=%s, install_date=%s, mfg_year=%s, origin=%s
+                     WHERE factory_name=%s AND lower(mc_no)=lower(%s) AND lower(COALESCE(machine_no,''))=lower(%s) RETURNING id""",
+                  (name, sec, ex.get("brand", ""), ex.get("model", ""), ex.get("mfg_id", ""), ex.get("install_date"),
+                   ex.get("mfg_year"), ex.get("origin", ""), fac, mc_no, m_no))
+        if got:
+            n_upd += 1
+            continue
+        got = run("""INSERT INTO machines (factory_name, mc_no, machine_no, machine_name, section, active, created_by, created_at,
+                                           brand, model, mfg_id, install_date, mfg_year, origin)
+                     VALUES (%s,%s,%s,%s,%s,TRUE,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING id""",
+                  (fac, mc_no, m_no, name, sec, user, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                   ex.get("brand", ""), ex.get("model", ""), ex.get("mfg_id", ""), ex.get("install_date"),
+                   ex.get("mfg_year"), ex.get("origin", "")))
+        n_new += len(got or [])
+    audit("MACHINE_SYNC", f"{fac}: machine list sync - {n_new} added, {n_upd} updated")
+    return {"new": n_new, "upd": n_upd}
+
+
+@tx
 def mc_delete(mid, fac, label):
     run("DELETE FROM machines WHERE id=%s", (mid,))
     audit("MACHINE_DELETE", f"{fac}: machine {label} deleted")
@@ -23302,6 +23328,29 @@ def _mc_manage(fac, is_mgr):
                 if res:
                     st.session_state.pop("mc_bupd", None)
                     done(f"Details updated for {res['n']} machine(s) ({len(parsed) - res['n']} line(s) did not match a machine)")
+
+
+    with st.expander("🔄 Full machine list sync (add new + correct existing)"):
+        st.caption("One machine per line:  `M/C No | Machine No | Name | Section | Brand | Model | MFG ID | Installation Date (DD-MM-YYYY) | MFG Year | Origin`  "
+                   "- an existing machine (same M/C No + Machine No) is corrected, a new one is added. Section left empty keeps the old Section.")
+        bsync = st.text_area("Machine list", height=160, key="mc_bsync")
+        if st.button("🔄 Sync machine list", key="mc_bsync_btn") and guard():
+            parsed = []
+            for ln in bsync.splitlines():
+                p = [x.strip() for x in ln.split("|")]
+                if p and p[0]:
+                    g_ = lambda i: p[i] if len(p) > i else ""
+                    parsed.append((p[0], g_(1), g_(2), g_(3), {"brand": g_(4), "model": g_(5), "mfg_id": g_(6),
+                                                              "install_date": _mc_parse_date(g_(7)), "mfg_year": _mc_to_year(g_(8)),
+                                                              "origin": g_(9)}))
+            if not parsed:
+                st.error("No valid line found")
+            else:
+                res = mc_upsert(fac, parsed)
+                if res:
+                    st.session_state.pop("mc_bsync", None)
+                    done(f"Machine list synced: {res['new']} added, {res['upd']} corrected")
+
 
 
 def _mc_fix_slip(fac, is_mgr):
