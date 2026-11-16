@@ -16253,7 +16253,8 @@ def _qi_confirm_body(p):
     unit_txt = (" " + next(iter(units))) if len(units) == 1 else ""
     st.markdown(f"#### 📋 {len(rows)} ti item · mot **{tot:g}{unit_txt}** issue hocche")
     st.caption(f"SR {p['sr_no']} · 📅 {p['tx_date']:%d-%b-%Y} · 🏭 {p['fac']}" + (f" · 🏷 {p['section']}" if p["section"] else ""))
-    st.dataframe(pd.DataFrame([{"Serial": (r.get("ser") or "-"), "Item": r["item"], "Size": r["size"], "Qty": r["qty"], "UOM": r["uom"], "Transfer": r["xfer"]}
+    st.dataframe(pd.DataFrame([{"Serial": (r.get("ser") or "-"), "Item": r["item"], "Size": r["size"], "Qty": r["qty"], "UOM": r["uom"],
+                                "Rate": (f"৳{r['rate']:g}" + (" (notun)" if r.get("rnew") else "")), "M/C": r.get("mc") or "", "Transfer": r["xfer"]}
                                for i, r in enumerate(rows)]),
                  hide_index=True, use_container_width=True, height=min(80 + 36 * len(rows), 420))
     st.caption("Serial = apni je kromei qty diyechen. Kagoj-er sathe line-by-line milan - thik thakle OK chapun, vul thakle Cancel kore thik korun.")
@@ -16261,7 +16262,7 @@ def _qi_confirm_body(p):
     if b1.button("✅ OK - Issue korun", type="primary", key="qi_ok", use_container_width=True):
         if guard():
             n = save_requisition_issue(p["fac"], p["lines"], p["tx_date"], p["sr_no"], p["ttype"], "[Quick Issue]", p["verified"], False,
-                                       p["section"], machine=None, asof=True)
+                                       p["section"], machine=p.get("machine"), asof=True)
             if n:
                 _who = st.session_state.get("user", "")
                 st.session_state["last_req_no"] = p["sr_no"]
@@ -16287,6 +16288,23 @@ else:
     _qi_confirm_dialog = None
 
 
+def _qi_uom_changed(fac, sl, key, name, old):
+    """UOM vul hole dropdown theke bodlale sathe sathe item-e final save hoy (same as the 📤 Issue tab)."""
+    new = st.session_state.get(key)
+    if not new or new == old:
+        return
+    if not guard():
+        st.session_state[key] = old
+        return
+    if _ri_set_unit_db(fac, int(sl), name, old, new):
+        try:
+            st.toast(f"✅ UOM bodle geche (churanto): {name} → {new}")
+        except Exception:
+            pass
+    else:
+        st.session_state[key] = old
+
+
 def _qi_parse_qty(txt):
     """'.3', '0.3', '0,3', '১.৫' -> float. Returns (value|None, error). Blank = (None, '')."""
     t = str(txt or "").strip().translate(str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")).replace(",", ".").replace(" ", "")
@@ -16301,7 +16319,7 @@ def _qi_parse_qty(txt):
     return v, ""
 
 
-_QI_COLS = [3.4, 1.1, 0.8, 0.8, 0.8]
+_QI_COLS = [3.0, 1.0, 1.1, 0.7, 0.9, 1.5, 0.7]
 _QI_CSS = '''<style>
 /* rows: quiet white cards, every cell exactly 42px so name / qty / uom / stock sit on one line */
 [class*="st-key-qi_row_"]{border-radius:8px;padding:4px 8px;border:1px solid #E1E6EF;margin-bottom:3px;background:#FFFFFF;transition:background .1s,border-color .1s}
@@ -16329,7 +16347,11 @@ _QI_CSS = '''<style>
 .st-key-qi_head{background:#FFFFFF;padding:0 9px 4px 9px;position:sticky;top:0;z-index:30}
 [data-testid="stLayoutWrapper"]:has(> .st-key-qi_head){position:sticky;top:0;z-index:30;background:#FFFFFF}
 .st-key-qi_head [data-testid="stHorizontalBlock"]{gap:8px}
-.st-key-qi_rows{max-width:960px}
+.st-key-qi_rows{max-width:1160px}
+[class*="st-key-qi_row_"] [data-testid="stSelectbox"]{margin:0!important}
+[class*="st-key-qi_row_"] [data-baseweb="select"] > div{min-height:34px!important;height:34px!important;border:1px solid #9AA8C2!important;border-radius:8px;background:#FFFFFF!important;font-size:.82rem}
+.qi-rate{font-weight:700;font-size:.85rem;color:#1F2937}
+.qi-rate.off{font-weight:500;color:#9AA3B5;font-size:.75rem}
 .qi-head{background:#EEF1F6;color:#4B5563;font-weight:700;font-size:.76rem;letter-spacing:.02em;border-radius:8px;height:28px;display:flex;align-items:center;justify-content:center;padding:0 10px}
 .qi-head.l{justify-content:flex-start}
 .qi-serial{display:inline-flex;align-items:center;justify-content:center;min-width:28px;height:26px;border-radius:13px;background:#2F5FD0;color:#FFFFFF;font-weight:700;font-size:.9rem}
@@ -16374,15 +16396,27 @@ def _ri_quick_form():
             eff = stock_asof_many(fac, [int(r["sl_no"]) for r in reg], tx_date, cached=True)
         except Exception:
             eff = {}
+    uoms = get_uoms()
+    try:
+        mc_schema()
+        _mc_all = mc_list(fac)
+        _mc_msl = set(_mc_maint_sls(fac, [int(r["sl_no"]) for r in reg]))
+    except Exception:
+        _mc_all, _mc_msl = [], set()
+    _mc_labs = {f"{m['mc_no']}" + (f" · {m['machine_no']}" if m.get("machine_no") else "")
+                + (f" · {m['machine_name']}" if m.get("machine_name") else ""): int(m["id"]) for m in _mc_all}
+    _mc_rev = {v: k for k, v in _mc_labs.items()}
     with _ri_card("qi_items"):
-        _ri_step(2, "Qty din", f"{len(reg)} ti regular item - je item issue hobe shudhu tar 'Issue Qty' likhun. Serial auto hobe: prothom qty deya item = 1, tarpor 2, 3...")
+        _ri_step(2, "Qty din", f"{len(reg)} ti regular item - je item issue hobe shudhu tar 'Issue Qty' likhun. Serial auto (prothom qty = 1, tarpor 2, 3...). "
+                               "Rate nei hole qty dile Rate box ashe; UOM vul hole dropdown theke bodlan; M/C-er mal hole qty dile M/C dropdown ashe.")
         import html as _html
         st.markdown(_QI_CSS, unsafe_allow_html=True)
         gvals, bad_qty, ph_ = {}, [], {}
+        rate_of, bad_rate, mc_sel, uom_of = {}, [], {}, {}
         with st.container(height=min(56 + 47 * len(reg), 720), key="qi_rows"):
             with st.container(key="qi_head"):
                 _hc = st.columns(_QI_COLS)
-                for _i, (_c, _t) in enumerate(zip(_hc, ["Item · Size", "Issue Qty ✍️", "UOM", "Stock", "Serial (auto)"])):
+                for _i, (_c, _t) in enumerate(zip(_hc, ["Item · Size", "Issue Qty ✍️", "UOM", "Stock", "Rate", "M/C", "Serial"])):
                     _c.markdown(f"<div class='qi-head{' l' if _i == 0 else ''}'>{_t}</div>", unsafe_allow_html=True)
             for r in reg:
                 sl_ = int(r["sl_no"])
@@ -16394,16 +16428,45 @@ def _ri_quick_form():
                     qv_, qe_ = _qi_parse_qty(raw_)
                     if qe_:
                         bad_qty.append(f"{r['item_name']} [{r['size'] or '-'}] ('{raw_}')")
-                    ph_[sl_] = cc[4].empty()
+                    ph_[sl_] = cc[6].empty()
                     _nm = _html.escape(str(r['item_name']))
                     _sz = _html.escape(str(r['size'])) if r["size"] else ""
                     cc[0].markdown(f"<div class='qi-name' title='{_nm} {_sz}'><span class='qi-item'>{_nm}</span>"
                                    + (f"<span class='qi-sz'>{_sz}</span>" if _sz else "")
                                    + ("" if r.get("own") else "<span class='qi-tag'>onno unit</span>") + "</div>", unsafe_allow_html=True)
-                    cc[2].markdown(f"<div class='qi-cell'><span class='qi-uom'>{_html.escape(str(r['unit']))}</span></div>", unsafe_allow_html=True)
+                    _cu = str(r["unit"] or "Pcs")
+                    _uk = f"qi_u_{gen}_{sl_}"
+                    if _uk not in st.session_state:
+                        st.session_state[_uk] = _cu
+                    cc[2].selectbox("unit", uoms if _cu in uoms else uoms + [_cu], key=_uk, label_visibility="collapsed", disabled=not can_write,
+                                    on_change=_qi_uom_changed, args=(fac, sl_, _uk, str(r["item_name"]), _cu),
+                                    help="UOM vul thakle ekhanei bodlan - sathe sathe item-e final save hoye jay.")
+                    uom_of[sl_] = st.session_state.get(_uk, _cu)
                     _over = qv_ is not None and qv_ > stk_ + 1e-9
                     _kls = "over" if _over else ("zero" if stk_ <= 0 else "")
                     cc[3].markdown(f"<div class='qi-cell'><span class='qi-stk {_kls}'>{stk_:g}</span></div>", unsafe_allow_html=True)
+                    _pr = float(r["price"] or 0)
+                    if _pr > 0:
+                        rate_of[sl_] = _pr
+                        cc[4].markdown(f"<div class='qi-cell'><span class='qi-rate'>৳{_pr:g}</span></div>", unsafe_allow_html=True)
+                    elif qv_ and qv_ > 0:
+                        _rraw = cc[4].text_input("rate", placeholder="rate", key=f"qi_r_{gen}_{sl_}", label_visibility="collapsed",
+                                                 help="Ei item-er Rate age deya hoyni - Rate din, eta-i item-er Rate hishebe save hobe.")
+                        _rv, _re = _qi_parse_qty(_rraw)
+                        if _re:
+                            bad_rate.append(f"{r['item_name']} [{r['size'] or '-'}] ('{_rraw}')")
+                        rate_of[sl_] = _rv or 0.0
+                    else:
+                        rate_of[sl_] = 0.0
+                        cc[4].markdown("<div class='qi-cell'><span class='qi-rate off'>rate nei</span></div>", unsafe_allow_html=True)
+                    if _mc_labs and ttype == "Issued" and qv_ and qv_ > 0:
+                        _mpk = cc[5].selectbox("mc", ["— M/C —"] + list(_mc_labs), key=f"qi_m_{gen}_{sl_}", label_visibility="collapsed",
+                                               disabled=not can_write,
+                                               help="Kon machine-er jonno mal jachche - M/C-wise cost report-e auto jabe. Production-e sorasori issue hole fanka rakhun.")
+                        if _mpk != "— M/C —":
+                            mc_sel[sl_] = _mc_labs[_mpk]
+                    else:
+                        cc[5].markdown("<div class='qi-cell'><span class='qi-rate off'>—</span></div>", unsafe_allow_html=True)
                     gvals[sl_] = (0.0 if qv_ is None else float(qv_), None)
     # ---- regular list-e nei emon (uncommon) item: ei-i slip-e jog korun, alada SR lagbe na
     extras = st.session_state.setdefault("qi_extra", [])
@@ -16448,11 +16511,34 @@ def _ri_quick_form():
                 r = ex.get(int(sl_))
                 if not r:
                     continue
-                x1, x2, xs, x3, x4 = st.columns([3.0, 1.1, 1.0, 1.2, 0.6])
+                x1, x2, xs, x3, xu, xr, xm, x4 = st.columns([2.4, 0.7, 0.7, 1.0, 1.1, 0.9, 1.5, 0.5])
                 x1.write(f"{r['item_name']} [{r['size'] or '-'}]")
                 x2.write(f"stock {float(effx.get(int(sl_), r['stock'])):g}")
                 ph_[int(sl_)] = xs.empty()
                 x3.text_input("q", key=f"qi_xq_{gen}_{sl_}", label_visibility="collapsed", placeholder="qty")
+                _xcu = str(r["unit"] or "Pcs")
+                _xuk = f"qi_xu_{gen}_{sl_}"
+                if _xuk not in st.session_state:
+                    st.session_state[_xuk] = _xcu
+                xu.selectbox("unit", uoms if _xcu in uoms else uoms + [_xcu], key=_xuk, label_visibility="collapsed", disabled=not can_write,
+                             on_change=_qi_uom_changed, args=(fac, int(sl_), _xuk, str(r["item_name"]), _xcu),
+                             help="UOM vul thakle ekhanei bodlan.")
+                uom_of[int(sl_)] = st.session_state.get(_xuk, _xcu)
+                _xpr = float(r["price"] or 0)
+                if _xpr > 0:
+                    xr.write(f"৳{_xpr:g}")
+                    rate_of[int(sl_)] = _xpr
+                else:
+                    _xraw = xr.text_input("rate", placeholder="rate", key=f"qi_xr_{gen}_{sl_}", label_visibility="collapsed",
+                                          help="Ei item-er Rate age deya hoyni - Rate din.")
+                    _xrv, _xre = _qi_parse_qty(_xraw)
+                    if _xre:
+                        bad_rate.append(f"{r['item_name']} [{r['size'] or '-'}] ('{_xraw}')")
+                    rate_of[int(sl_)] = _xrv or 0.0
+                if _mc_labs and ttype == "Issued":
+                    _xpk = xm.selectbox("mc", ["— M/C —"] + list(_mc_labs), key=f"qi_xm_{gen}_{sl_}", label_visibility="collapsed", disabled=not can_write)
+                    if _xpk != "— M/C —":
+                        mc_sel[int(sl_)] = _mc_labs[_xpk]
                 if x4.button("✖", key=f"qi_xrm_{gen}_{sl_}", help="Ei item bad din"):
                     extras.remove(sl_)
                     st.session_state["qi_extra"] = extras
@@ -16485,6 +16571,8 @@ def _ri_quick_form():
                      else "<div class='qi-cell'><span class='qi-serial off'>—</span></div>", unsafe_allow_html=True)
     if bad_qty:
         st.error("⛔ Qty bujha jachche na: " + "; ".join(bad_qty) + " — shudhu songkha likhun (jemon 2 ba .3).")
+    if bad_rate:
+        st.error("⛔ Rate bujha jachche na: " + "; ".join(bad_rate) + " — shudhu songkha likhun (jemon 12.5).")
     if dup_ser:
         st.error("⛔ Ekoi Serial ekadhik item-e deya hoyeche: " + ", ".join(str(v) for v in dup_ser) + " — Serial thik korun.")
     _sty = "".join(f".st-key-qi_row_{gen}_{int(r['sl_no'])}{{background:#F1F9F4;border-color:#8FCBA5}}" for r, _, _ in sel)
@@ -16517,11 +16605,11 @@ def _ri_quick_form():
                 short.append(f"{nm_} (transfer tick bondho - tick din ba qty komiye {stk:g} korun)")
         else:
             short.append(f"{nm_} (stock {stk:g}, issue {qv:g}; {other_factory(fac)}-e-o {shortage:g} {r['unit']} stock nei)")
-    no_rate = [f"{r['item_name']} [{r['size'] or '-'}]" for r, qv, _ in sel if float(r["price"] or 0) <= 0]
+    no_rate = [f"{r['item_name']} [{r['size'] or '-'}]" for r, qv, _ in sel if rate_of.get(int(r["sl_no"]), float(r["price"] or 0)) <= 0]
     if short:
         st.error("⛔ Stock kom: " + "; ".join(short) + " — qty komiye din, ba 📤 Issue tab-e Pending diye korun.")
     if no_rate:
-        st.error("⛔ Rate nei: " + "; ".join(no_rate) + " — ei item-gulo 📤 Issue tab-e Rate diye issue korun.")
+        st.error("⛔ Rate nei: " + "; ".join(no_rate) + " — oi item-er Rate box-e rate likhun (eta-i item-er Rate hishebe save hobe).")
     if len(sel) > RI_MAX_LINES:
         st.error(f"Ekta slip-e sorbocho {RI_MAX_LINES} ti item - apni {len(sel)} ti diyechen.")
     verified = False
@@ -16534,11 +16622,15 @@ def _ri_quick_form():
         if need_names:
             verified = st.checkbox("Physically verified — এই আইটেমগুলো ফিজিক্যালি গুনে দেখা হয়েছে: " + ", ".join(need_names), key=f"qi_ver_{gen}")
         try:
-            _sb_issue_warn(fac, section, tx_date, sum(qv * float(r["price"] or 0) for r, qv, _ in sel), ttype)
+            _sb_issue_warn(fac, section, tx_date, sum(qv * rate_of.get(int(r["sl_no"]), float(r["price"] or 0)) for r, qv, _ in sel), ttype)
         except Exception:
             pass
     else:
         need_names = []
+    _mc_map, _mc_err = {}, ""
+    if sel and _mc_labs and ttype == "Issued":          # machine-wise issue (same check as the 📤 Issue tab)
+        _mlines = [{"sl": int(r["sl_no"]), "name": r["item_name"], "size": r["size"]} for r, _, _ in sel]
+        _mc_map, _mc_err = _mc_lines_check(fac, _mlines, [False] * len(_mlines), mc_sel, _mc_msl, tx_date, ttype, True)
     f1, f2 = st.columns([2.4, 2.2])
     _ri_chips([("📋", f"{len(sel)} item", ""), ("🔢", f"Qty {sum(qv for _, qv, _ in sel):g}", "")]
               + ([] if can_write else [("🔒", "Login required to save", "red")]), target=f1)
@@ -16553,7 +16645,9 @@ def _ri_quick_form():
             st.error("এই সপ্তাহের compulsory Physical Count শেষ হয়নি — আগে 📱 Physical Count → 🎯 তালিকার আইটেম গুনুন, তারপর Issue save হবে।")
         elif ttype == "Issued" and not section:
             st.error("Section বাছুন (কোন section-এ গেল) — report / audit-এর জন্য এটা দরকার।")
-        elif short or no_rate or dup_ser or bad_qty or len(sel) > RI_MAX_LINES:
+        elif _mc_err:
+            st.error(_mc_err)
+        elif short or no_rate or dup_ser or bad_qty or bad_rate or len(sel) > RI_MAX_LINES:
             st.error("তালিকায় সমস্যা আছে (stock kom / transfer / Rate nei) — upore lal message dekhe thik korun.")
         elif need_names and not verified:
             st.error("Physical verification লাগবে — ghune dekhe tick din.")
@@ -16562,12 +16656,16 @@ def _ri_quick_form():
         elif guard():
             _rows = []
             for r, qv, _stk in sel:
-                _x = xfer.get(int(r["sl_no"]), (False, 0.0))
-                _rows.append({"ser": ser.get(int(r["sl_no"])), "item": r["item_name"], "size": r["size"] or "-", "qty": qv, "uom": r["unit"],
+                _sl = int(r["sl_no"])
+                _x = xfer.get(_sl, (False, 0.0))
+                _rows.append({"ser": ser.get(_sl), "item": r["item_name"], "size": r["size"] or "-", "qty": qv,
+                              "uom": uom_of.get(_sl, r["unit"]), "rate": rate_of.get(_sl, float(r["price"] or 0)),
+                              "rnew": float(r["price"] or 0) <= 0, "mc": _mc_rev.get(_mc_map.get(_sl), ""),
                               "xfer": (f"🔁 {_x[1]:g} {other_factory(fac)} theke" if _x[0] and _x[1] > 0 else "")})
             _p = {"fac": fac, "gen": gen, "sr_no": sr_no, "tx_date": tx_date, "ttype": ttype, "section": section, "verified": verified,
-                  "rows": _rows,
-                  "lines": [(int(r["sl_no"]), qv, xfer.get(int(r["sl_no"]), (False, 0.0))[0], float(r["price"] or 0),
+                  "rows": _rows, "machine": (_mc_map or None),
+                  "lines": [(int(r["sl_no"]), qv, xfer.get(int(r["sl_no"]), (False, 0.0))[0],
+                             rate_of.get(int(r["sl_no"]), float(r["price"] or 0)),
                              xfer.get(int(r["sl_no"]), (False, 0.0))[1]) for r, qv, _ in sel]}
             st.session_state["qi_confirm"] = _p
             if _qi_confirm_dialog:
