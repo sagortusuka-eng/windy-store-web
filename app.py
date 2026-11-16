@@ -23073,7 +23073,7 @@ def _mc_tx_df(units, d1, d2):
     psql, pp = period_sql("t.date", d1, d2)
     df = qdf_c(f"""SELECT t.id, t.factory_name, t.machine_id, t.date, COALESCE(t.qty,0) AS qty, t.sl_no,
                           COALESCE(NULLIF(t.prod_id,''), i.prod_id, '') AS code, COALESCE(NULLIF(t.item_name,''), i.item_name, '') AS item,
-                          COALESCE(i.size,'') AS size, COALESCE(NULLIF(i.unit_name,''),'Pcs') AS uom,
+                          COALESCE(i.size,'') AS size, COALESCE(i.department,'') AS dept, COALESCE(NULLIF(i.unit_name,''),'Pcs') AS uom,
                           COALESCE(NULLIF(t.unit_price_at_tx,0), i.unit_price, 0) AS rate, COALESCE(t.req_no,'') AS req_no,
                           COALESCE(t.officer_name,'') AS officer, m.mc_no, COALESCE(m.machine_no,'') AS machine_no,
                           COALESCE(m.machine_name,'') AS machine_name, COALESCE(m.section,'') AS msection,
@@ -23097,30 +23097,121 @@ def _mc_tx_df(units, d1, d2):
 
 
 _MC_CSS = """<style>
-.mcx-hero{background:linear-gradient(135deg,#0B1B2E 0%,#132238 55%,#0F766E 130%);border-radius:18px;padding:22px 26px;color:#fff;
-  display:flex;flex-wrap:wrap;gap:22px;align-items:center;justify-content:space-between;box-shadow:0 10px 28px rgba(11,27,46,.28);margin:6px 0 14px}
-.mcx-hero .k{font-size:12px;letter-spacing:.9px;text-transform:uppercase;color:#9FD8CF;font-weight:700}
-.mcx-hero .v{font-size:40px;font-weight:800;line-height:1.1;margin-top:4px}
-.mcx-hero .s{font-size:13px;color:#CBD5E1;margin-top:4px}
-.mcx-pills{display:flex;gap:10px;flex-wrap:wrap}
-.mcx-pill{background:rgba(255,255,255,.09);border:1px solid rgba(255,255,255,.16);border-radius:12px;padding:10px 16px;min-width:104px}
-.mcx-pill b{display:block;font-size:21px;font-weight:800}
-.mcx-pill span{font-size:11.5px;color:#B8C4D4}
-.mcx-up{color:#FCA5A5}.mcx-down{color:#86EFAC}
-.mcx-card{background:#fff;border:1px solid #E2E8F0;border-radius:14px;padding:13px 16px;margin-bottom:9px;box-shadow:0 2px 8px rgba(15,23,42,.045)}
-.mcx-row{display:flex;align-items:center;gap:12px}
-.mcx-rank{width:30px;height:30px;border-radius:9px;background:#E8F5F2;color:#0F766E;font-weight:800;display:flex;align-items:center;justify-content:center;flex:none}
-.mcx-card.top .mcx-rank{background:#0F766E;color:#fff}
-.mcx-name{font-weight:750;color:#172033;font-size:14.5px;flex:1;min-width:0}
-.mcx-name small{display:block;color:#64748B;font-weight:500;font-size:12px;margin-top:1px}
-.mcx-amt{text-align:right;flex:none}
-.mcx-amt b{font-size:17px;color:#172033}
-.mcx-amt span{display:block;font-size:12px;color:#0F766E;font-weight:700}
-.mcx-bar{height:7px;background:#E8EEF5;border-radius:99px;margin-top:10px;overflow:hidden}
-.mcx-bar i{display:block;height:100%;background:linear-gradient(90deg,#0F766E,#2DD4BF);border-radius:99px}
-.mcx-note{background:#F0F9F7;border:1px solid #B7E2D8;border-radius:12px;padding:10px 14px;font-size:13px;color:#134E4A;margin:6px 0 12px}
-.mcx-h{font-weight:800;color:#172033;font-size:16px;margin:18px 0 8px;border-left:4px solid #0F766E;padding-left:10px}
+.mcx-head{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:10px;margin:2px 0 14px}
+.mcx-crumb{font-size:12.5px;color:#64748B;margin-bottom:4px}.mcx-crumb b{color:#0F766E;font-weight:700}
+.mcx-title{font-size:26px;font-weight:800;color:#0B1B2E;letter-spacing:-.3px;line-height:1.15}
+.mcx-sub{font-size:13px;color:#64748B;margin-top:3px}
+.mcx-badge{background:#E8F5F2;color:#0F766E;border:1px solid #B7E2D8;border-radius:99px;padding:5px 14px;font-size:12.5px;font-weight:700}
+.mcx-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin:6px 0 18px}
+.mcx-kpi{background:#fff;border:1px solid #E2E8F0;border-radius:16px;padding:16px 18px;box-shadow:0 2px 10px rgba(15,23,42,.05);display:flex;gap:14px;align-items:center}
+.mcx-ic{width:44px;height:44px;border-radius:12px;background:#E8F5F2;display:flex;align-items:center;justify-content:center;font-size:21px;flex:none}
+.mcx-kpi.navy .mcx-ic{background:#132238}.mcx-kpi.amber .mcx-ic{background:#FEF3C7}.mcx-kpi.blue .mcx-ic{background:#E0EAFF}
+.mcx-kpi .l{font-size:12px;color:#64748B;font-weight:700;letter-spacing:.4px;text-transform:uppercase}
+.mcx-kpi .v{font-size:25px;font-weight:800;color:#0B1B2E;line-height:1.2}
+.mcx-kpi .s{font-size:12px;color:#64748B;margin-top:1px}
+.mcx-up{color:#DC2626;font-weight:700}.mcx-down{color:#16A34A;font-weight:700}
+.mcx-h{font-weight:800;color:#0B1B2E;font-size:16px;margin:10px 0 2px}
+.mcx-hs{font-size:12.5px;color:#64748B;margin-bottom:8px}
+.mcx-leg{display:flex;align-items:center;gap:9px;padding:7px 2px;border-bottom:1px solid #EEF2F7;font-size:13px;color:#172033}
+.mcx-leg i{width:10px;height:10px;border-radius:3px;flex:none}
+.mcx-leg .n{flex:1;min-width:0;font-weight:700}.mcx-leg .n small{color:#64748B;font-weight:500}
+.mcx-leg .a{font-weight:800}.mcx-leg .p{width:52px;text-align:right;color:#0F766E;font-weight:800}
+.mcx-note{background:#F0F9F7;border:1px solid #B7E2D8;border-radius:12px;padding:9px 14px;font-size:12.5px;color:#134E4A;margin:8px 0}
+.mcx-det{background:linear-gradient(135deg,#0B1B2E 0%,#132238 60%,#0F766E 140%);border-radius:18px;padding:20px 24px;color:#fff;margin:8px 0 14px;
+  display:flex;flex-wrap:wrap;gap:18px;justify-content:space-between;align-items:center;box-shadow:0 10px 28px rgba(11,27,46,.25)}
+.mcx-det .no{font-size:30px;font-weight:800;line-height:1.1}.mcx-det .nm{font-size:14px;color:#CBD5E1;margin-top:3px}
+.mcx-det .pr{font-size:12px;color:#9FD8CF;margin-top:6px;font-weight:700;letter-spacing:.5px}
+.mcx-det .tt{text-align:right}.mcx-det .tt b{font-size:32px;font-weight:800;display:block}.mcx-det .tt span{font-size:12px;color:#B8C4D4}
+.mcx-st{display:inline-block;border-radius:99px;padding:2px 10px;font-size:11.5px;font-weight:800;margin-left:8px;vertical-align:middle}
+.mcx-st.on{background:#DCFCE7;color:#166534}.mcx-st.off{background:#FEE2E2;color:#991B1B}
+@media (max-width:640px){.mcx-title{font-size:21px}.mcx-det .tt{text-align:left}.mcx-kpi .v{font-size:21px}}
 </style>"""
+
+_MC_PALETTE = ["#0F766E", "#132238", "#2DD4BF", "#3B82F6", "#F59E0B", "#8B5CF6", "#EF4444", "#64748B"]
+
+
+def _mc_trend_chart(d, mode, key_h=260):
+    """d: rows with dt + amount. mode 'Daily' | 'Monthly'. Real values only."""
+    if d is None or d.empty or d["dt"].dropna().empty:
+        st.caption("No dated cost to chart.")
+        return
+    d = d.dropna(subset=["dt"])
+    try:
+        import altair as alt
+        if mode == "Daily":
+            t = d.groupby(d["dt"].dt.normalize())["amount"].sum().reset_index()
+            t.columns = ["Date", "Cost"]
+            base = alt.Chart(t).encode(x=alt.X("Date:T", title=None, axis=alt.Axis(format="%d %b")),
+                                       y=alt.Y("Cost:Q", title="Cost (৳)"),
+                                       tooltip=[alt.Tooltip("Date:T", format="%d %b %Y"), alt.Tooltip("Cost:Q", format=",.0f", title="Cost ৳")])
+            ch = (base.mark_area(color="#0F766E", opacity=.14, line={"color": "#0F766E", "strokeWidth": 2.4}, interpolate="monotone")
+                  + base.mark_circle(color="#0F766E", size=55))
+        else:
+            t = d.groupby(d["dt"].dt.to_period("M"))["amount"].sum().sort_index().reset_index()
+            t.columns = ["P", "Cost"]
+            t["Month"] = t["P"].map(lambda p: p.strftime("%b-%Y"))
+            ch = alt.Chart(t).mark_bar(color="#0F766E", cornerRadiusTopLeft=6, cornerRadiusTopRight=6, size=34).encode(
+                x=alt.X("Month:N", sort=list(t["Month"]), title=None, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("Cost:Q", title="Cost (৳)"),
+                tooltip=[alt.Tooltip("Month:N"), alt.Tooltip("Cost:Q", format=",.0f", title="Cost ৳")])
+        st.altair_chart(ch.properties(height=key_h).configure_view(strokeWidth=0).configure_axis(
+            grid=True, gridColor="#EEF2F7", domain=False, labelColor="#64748B", titleColor="#64748B"), use_container_width=True)
+    except Exception:
+        if mode == "Daily":
+            t = d.groupby(d["dt"].dt.normalize())["amount"].sum()
+        else:
+            t = d.groupby(d["dt"].dt.to_period("M").astype(str))["amount"].sum()
+        st.bar_chart(t, height=key_h, use_container_width=True)
+
+
+def _mc_cost_details(row, df, df_all, plabel):
+    """Machine-specific view (View Details). df = period rows, df_all = every machine-tagged row."""
+    e = html_lib.escape
+    mid = int(row["machine_id"])
+    dm = df[df["machine_id"] == mid].sort_values(["dt", "req_no"], ascending=[False, True])
+    da = df_all[df_all["machine_id"] == mid]
+    tot = float(dm["amount"].sum())
+    maint = float(dm.loc[dm["dept"].isin(MC_DEPTS), "amount"].sum())
+    st_cls, st_txt = ("on", "Active") if row["active"] else ("off", "Inactive")
+    st.markdown(
+        f'<div class="mcx-det"><div><div class="no">{e(str(row["mc_no"]))}<span class="mcx-st {st_cls}">{st_txt}</span></div>'
+        f'<div class="nm">{e(str(row["machine_name"] or "—"))}' + (f' · Machine No. {e(str(row["machine_no"]))}' if row["machine_no"] else "") +
+        f'</div><div class="pr">PERIOD · {e(plabel)}</div></div>'
+        f'<div class="tt"><b>৳{tot:,.0f}</b><span>Total machine cost</span></div></div>', unsafe_allow_html=True)
+    k = st.columns(4)
+    k[0].metric("Maintenance cost", f"৳{maint:,.0f}")
+    k[1].metric("Other cost", f"৳{tot - maint:,.0f}")
+    k[2].metric("Issue lines", f"{len(dm)}")
+    k[3].metric("SR slips", f"{int(dm.loc[dm['req_no'] != '', 'req_no'].nunique())}")
+    if dm.empty:
+        st.info("No issue recorded for this machine in the selected period.")
+        return
+    c1, c2 = st.columns([1.15, 1])
+    with c1:
+        st.markdown('<div class="mcx-h">Cost history</div>', unsafe_allow_html=True)
+        _mc_trend_chart(dm if plabel != "All months" else da, "Daily" if plabel != "All months" else "Monthly", 220)
+    with c2:
+        st.markdown('<div class="mcx-h">Cost breakdown (by item department)</div>', unsafe_allow_html=True)
+        bd = dm.assign(Department=dm["dept"].replace("", "Unclassified")).groupby("Department")["amount"].sum().sort_values(ascending=False).reset_index()
+        bd["Share %"] = (bd["amount"] / tot * 100).round(1) if tot else 0.0
+        bd = bd.rename(columns={"amount": "Cost (৳)"})
+        bd["Cost (৳)"] = bd["Cost (৳)"].round(0)
+        st.dataframe(bd, hide_index=True, use_container_width=True, height=min(90 + 35 * len(bd), 240),
+                     column_config={"Cost (৳)": st.column_config.NumberColumn(format="৳%.0f"),
+                                    "Share %": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=100)})
+        it = dm.groupby(["item", "size"]).agg(Qty=("qty", "sum"), Cost=("amount", "sum")).reset_index().sort_values("Cost", ascending=False).head(8)
+        it["Item"] = it["item"] + " [" + it["size"].replace("", "-") + "]"
+        st.markdown('<div class="mcx-hs">Top items by cost</div>', unsafe_allow_html=True)
+        st.dataframe(it[["Item", "Qty", "Cost"]].rename(columns={"Cost": "Cost (৳)"}).round(0), hide_index=True, use_container_width=True,
+                     height=min(90 + 35 * len(it), 300), column_config={"Cost (৳)": st.column_config.NumberColumn(format="৳%.0f")})
+    st.markdown('<div class="mcx-h">Issue history (SR-wise)</div>', unsafe_allow_html=True)
+    sr = pd.DataFrame({"Date": dm["date"], "SR": dm["req_no"].replace("", "-"),
+                       "Item": dm["item"] + " [" + dm["size"].replace("", "-") + "]", "Dept": dm["dept"],
+                       "Qty": dm["qty"], "Rate (৳)": dm["rate"].round(2), "Amount (৳)": dm["amount"].round(0), "Issued by": dm["officer"]})
+    st.dataframe(sr, hide_index=True, use_container_width=True, height=min(90 + 35 * len(sr), 420))
+    export_buttons(sr, f"machine_{str(row['mc_no']).replace(' ', '_')}_detail", f"{row['mc_no']} cost detail ({plabel})")
+
+
 
 
 def _mc_period_pick(df_all):
@@ -23157,95 +23248,121 @@ def _mc_view_cost(units, all_machines):
     e = html_lib.escape
     st.markdown(_MC_CSS, unsafe_allow_html=True)
     df_all = _mc_tx_df(units, None, None)
+    # ---- machine master (every machine, with its real M/C No) ----
+    mrows = []
+    for u in units:
+        for r in mc_list(u, active_only=False):
+            mrows.append({"machine_id": int(r["id"]), "mc_no": (short_fac(u) + " | " if len(units) > 1 else "") + str(r["mc_no"]),
+                          "machine_no": r.get("machine_no") or "", "machine_name": r.get("machine_name") or "",
+                          "active": bool(r.get("active", True))})
+    master = pd.DataFrame(mrows, columns=["machine_id", "mc_no", "machine_no", "machine_name", "active"])
+
+    st.markdown('<div class="mcx-head"><div><div class="mcx-crumb">Home &nbsp;›&nbsp; Store &nbsp;›&nbsp; <b>Machine Cost</b></div>'
+                '<div class="mcx-title">Machine Cost</div>'
+                '<div class="mcx-sub">Machine-wise cost of items issued to each machine</div></div></div>', unsafe_allow_html=True)
     if df_all.empty:
         st.info("মেশিনের নামে কোনো ইস্যু এখনো নেই। Requisition Issue-তে মাল ইস্যু করার সময় M/C বাছুন — তাহলে এখানে খরচ আসবে।")
         return
     d1, d2, plabel, mkey = _mc_period_pick(df_all)
-    if d1 is None:
-        df = df_all
-    else:
-        df = df_all[(df_all["dt"] >= pd.Timestamp(d1)) & (df_all["dt"] < pd.Timestamp(d2) + pd.Timedelta(days=1))]
+    if plabel == "সব মাস":
+        plabel = "All months"
+    df = df_all if d1 is None else df_all[(df_all["dt"] >= pd.Timestamp(d1)) & (df_all["dt"] < pd.Timestamp(d2) + pd.Timedelta(days=1))]
+
+    is_m = df["dept"].isin(MC_DEPTS)
+    total = float(df["amount"].sum())
+    maint = float(df.loc[is_m, "amount"].sum())
+    other = total - maint
+    n_cost = int(df["machine_id"].nunique())
+    delta = ""
+    if mkey is not None:
+        prev = float(df_all[df_all["dt"].dt.to_period("M") == mkey - 1]["amount"].sum())
+        if prev > 0:
+            ch = (total - prev) / prev * 100
+            delta = (f'<span class="{"mcx-up" if ch > 0 else "mcx-down"}">{"▲" if ch > 0 else "▼"} {abs(ch):.1f}%</span> vs {(mkey - 1).strftime("%b-%Y")}')
+    pm = (maint / total * 100) if total else 0.0
+    st.markdown(
+        '<div class="mcx-grid">'
+        f'<div class="mcx-kpi"><div class="mcx-ic">⚙️</div><div><div class="l">Total Machines</div><div class="v">{len(master)}</div>'
+        f'<div class="s">{int(master["active"].sum())} active · {n_cost} with cost</div></div></div>'
+        f'<div class="mcx-kpi navy"><div class="mcx-ic">💰</div><div><div class="l">Total Machine Cost</div><div class="v">৳{total:,.0f}</div>'
+        f'<div class="s">{delta or e(plabel)}</div></div></div>'
+        f'<div class="mcx-kpi amber"><div class="mcx-ic">🛠</div><div><div class="l">Maintenance Cost</div><div class="v">৳{maint:,.0f}</div>'
+        f'<div class="s">{pm:.1f}% of total</div></div></div>'
+        f'<div class="mcx-kpi blue"><div class="mcx-ic">📦</div><div><div class="l">Other Cost</div><div class="v">৳{other:,.0f}</div>'
+        f'<div class="s">{100 - pm if total else 0:.1f}% of total</div></div></div></div>', unsafe_allow_html=True)
     if df.empty:
         st.info(f"{plabel}: মেশিনের নামে কোনো ইস্যু পাওয়া যায়নি।")
         return
-    g = df.groupby(["machine_id", "machine"]).agg(Lines=("id", "count"), Items=("sl_no", "nunique"), Cost=("amount", "sum"),
-                                                  Last=("dt", "max")).reset_index()
-    top = df.sort_values("amount", ascending=False).drop_duplicates("machine_id").set_index("machine_id")["item"]
-    g["Top item (খরচ বেশি)"] = g["machine_id"].map(top)
-    g = g.sort_values("Cost", ascending=False).reset_index(drop=True)
-    total = float(g["Cost"].sum())
-    n_sr = int(df.loc[df["req_no"] != "", "req_no"].nunique())
 
-    # ---- hero (selected period total + change vs previous month) ----
-    delta_html = ""
-    if mkey is not None:
-        pp = mkey - 1
-        prev = float(df_all[df_all["dt"].dt.to_period("M") == pp]["amount"].sum())
-        if prev > 0:
-            ch = (total - prev) / prev * 100
-            cls, arrow = ("mcx-up", "▲") if ch > 0 else ("mcx-down", "▼")
-            delta_html = f'<div class="s"><span class="{cls}">{arrow} {abs(ch):.1f}%</span> গত মাসের ({pp.strftime("%b-%Y")}) তুলনায় — আগের মাস ৳{prev:,.0f}</div>'
-        else:
-            delta_html = f'<div class="s">গত মাসে ({pp.strftime("%b-%Y")}) মেশিন-খরচ ছিল না</div>'
-    st.markdown(
-        f'<div class="mcx-hero"><div><div class="k">মোট মেশিন খরচ · {e(plabel)}</div><div class="v">৳{total:,.0f}</div>{delta_html}</div>'
-        f'<div class="mcx-pills"><div class="mcx-pill"><b>{len(g)}</b><span>মেশিনে খরচ</span></div>'
-        f'<div class="mcx-pill"><b>{n_sr}</b><span>SR স্লিপ</span></div>'
-        f'<div class="mcx-pill"><b>{len(df)}</b><span>ইস্যু লাইন</span></div>'
-        f'<div class="mcx-pill"><b>৳{total / len(g):,.0f}</b><span>গড় / মেশিন</span></div></div></div>',
-        unsafe_allow_html=True)
-    st.markdown(
-        f'<div class="mcx-note">ℹ️ <b>মোট খরচে অংশ (%)</b> = ওই মেশিনের খরচ ÷ সব মেশিনের মোট খরচ × ১০০। '
-        f'এটা <u>টাকা নয়</u>, শতকরা ভাগ। যেমন মোট ৳{total:,.0f} হলে <b>54%</b> মানে ওই মেশিনের খরচ ≈ '
-        f'<b>৳{total * 0.54:,.0f}</b> (৫৪ টাকা নয়)।</div>', unsafe_allow_html=True)
-
-    # ---- month-wise trend (always all months, so the user sees every month at once) ----
-    mm = (df_all.dropna(subset=["dt"]).assign(Month=lambda x: x["dt"].dt.to_period("M"))
-          .groupby("Month")["amount"].sum().sort_index())
-    if len(mm) > 1:
-        st.markdown('<div class="mcx-h">📈 মাস অনুযায়ী মেশিন খরচ</div>', unsafe_allow_html=True)
+    # ---- trend + breakdown ----
+    cT, cB = st.columns([1.5, 1])
+    with cT:
+        h1, h2 = st.columns([1.6, 1])
+        h1.markdown('<div class="mcx-h">Machine Cost Trend</div><div class="mcx-hs">Cost of items issued to machines</div>', unsafe_allow_html=True)
+        mode = h2.radio("View", ["Daily", "Monthly"], index=0 if mkey is not None or d1 is not None else 1, horizontal=True,
+                        key="mc_cost_trend", label_visibility="collapsed")
+        _mc_trend_chart(df if mode == "Daily" else (df_all if d1 is None else df), mode)
+        if mode == "Monthly" and d1 is not None and mkey is not None:
+            st.caption("Monthly view shows the selected period only — choose “All months” to compare every month.")
+    g = df.groupby("machine_id")["amount"].sum().sort_values(ascending=False)
+    with cB:
+        st.markdown('<div class="mcx-h">Machine Cost Breakdown</div><div class="mcx-hs">Share of total machine cost</div>', unsafe_allow_html=True)
+        info = master.set_index("machine_id")
+        top = g.head(7)
+        seg = [(str(info.loc[i, "mc_no"]) if i in info.index else str(i), float(v)) for i, v in top.items()]
+        if len(g) > 7:
+            seg.append((f"Others ({len(g) - 7})", float(g.iloc[7:].sum())))
         try:
-            st.bar_chart(pd.DataFrame({"মোট খরচ (৳)": mm.values}, index=[p.strftime("%b-%Y") for p in mm.index]),
-                         use_container_width=True, height=230)
+            import altair as alt
+            sd = pd.DataFrame(seg, columns=["Machine", "Cost"])
+            sd["Share"] = (sd["Cost"] / total * 100).round(1)
+            st.altair_chart(alt.Chart(sd).mark_arc(innerRadius=52, outerRadius=88, stroke="#fff", strokeWidth=2).encode(
+                theta=alt.Theta("Cost:Q"), color=alt.Color("Machine:N", sort=list(sd["Machine"]), legend=None,
+                                                           scale=alt.Scale(domain=list(sd["Machine"]), range=_MC_PALETTE)),
+                tooltip=["Machine:N", alt.Tooltip("Cost:Q", format=",.0f", title="Cost ৳"), alt.Tooltip("Share:Q", format=".1f", title="Share %")]
+            ).properties(height=190).configure_view(strokeWidth=0), use_container_width=True)
         except Exception:
             pass
+        leg = "".join(f'<div class="mcx-leg"><i style="background:{_MC_PALETTE[i % 8]}"></i><div class="n">{e(n)}</div>'
+                      f'<div class="a">৳{v:,.0f}</div><div class="p">{v / total * 100:.1f}%</div></div>' for i, (n, v) in enumerate(seg))
+        st.markdown(leg + f'<div class="mcx-leg"><div class="n"><b>Total</b></div><div class="a">৳{total:,.0f}</div><div class="p">100%</div></div>',
+                    unsafe_allow_html=True)
 
-    # ---- ranked machine cards ----
-    st.markdown('<div class="mcx-h">🏆 মেশিন অনুযায়ী খরচ (বেশি থেকে কম)</div>', unsafe_allow_html=True)
-    cards = []
-    for i, r in g.head(10).iterrows():
-        share = float(r["Cost"]) / total * 100 if total else 0.0
-        cards.append(
-            f'<div class="mcx-card{" top" if i == 0 else ""}"><div class="mcx-row"><div class="mcx-rank">{i + 1}</div>'
-            f'<div class="mcx-name">{e(str(r["machine"]))}<small>{int(r["Lines"])} লাইন · {int(r["Items"])} আইটেম · '
-            f'সবচেয়ে বেশি: {e(str(r["Top item (খরচ বেশি)"] or "-"))}</small></div>'
-            f'<div class="mcx-amt"><b>৳{float(r["Cost"]):,.0f}</b><span>{share:.1f}% অংশ</span></div></div>'
-            f'<div class="mcx-bar"><i style="width:{min(share, 100):.1f}%"></i></div></div>')
-    st.markdown("".join(cards), unsafe_allow_html=True)
-    if len(g) > 10:
-        st.caption(f"আরও {len(g) - 10}টি মেশিন নিচের পূর্ণ তালিকায় আছে।")
-
-    # ---- full table ----
-    out = pd.DataFrame({"Machine": g["machine"], "ইস্যু লাইন": g["Lines"], "ভিন্ন আইটেম": g["Items"],
-                        "মোট খরচ (৳)": g["Cost"].round(0),
-                        "মোট খরচে অংশ (%)": (g["Cost"] / total * 100).round(1) if total else 0.0,
-                        "শেষ মাল নিয়েছে": g["Last"].dt.strftime(DATE_FMT), "সবচেয়ে বেশি খরচের আইটেম": g["Top item (খরচ বেশি)"]})
-    _inf = df.drop_duplicates("machine_id").set_index("machine_id")
-    _pos = 1
-    for _lab in ("Internal ID", "Brand", "Model", "MFG ID"):
-        _src = {"Internal ID": "machine_no", "Brand": "brand", "Model": "model", "MFG ID": "mfg_id"}[_lab]      # Internal ID = Machine No
-        out.insert(_pos, _lab, g["machine_id"].map(_inf[_src]).fillna(""))
-        _pos += 1
-    out.insert(_pos, "Installation Date", g["machine_id"].map(_inf["install_date"]).map(_mc_fmt_date)); _pos += 1
-    out.insert(_pos, "MFG Year", g["machine_id"].map(_inf["mfg_year"]).map(_mc_fmt_year)); _pos += 1
-    out.insert(_pos, "Origin", g["machine_id"].map(_inf["origin"]).fillna("")); _pos += 1
-    out.insert(_pos, "Machine Age (months)", g["machine_id"].map(_inf["install_date"]).map(_mc_age_months))
-    with st.expander("📋 পূর্ণ তালিকা (সব তথ্যসহ)", expanded=False):
-        st.dataframe(out, hide_index=True, use_container_width=True, height=min(90 + 35 * len(out), 520),
-                     column_config={"মোট খরচ (৳)": st.column_config.NumberColumn(format="%.0f"),
-                                    "মোট খরচে অংশ (%)": st.column_config.ProgressColumn(
-                                        "মোট খরচে অংশ (%)", format="%.1f%%", min_value=0, max_value=100,
-                                        help="এই মেশিনের খরচ ÷ সব মেশিনের মোট খরচ × ১০০ (টাকা নয়, শতকরা ভাগ)")})
+    # ---- machine-wise table ----
+    st.markdown('<div class="mcx-h" style="margin-top:18px">Machine Wise Cost Details</div>'
+                '<div class="mcx-hs">Select a row (or use the box below) and open View Details.</div>', unsafe_allow_html=True)
+    mt = master.copy()
+    mt["Maintenance"] = mt["machine_id"].map(df[is_m].groupby("machine_id")["amount"].sum()).fillna(0.0)
+    mt["Total"] = mt["machine_id"].map(g).fillna(0.0)
+    mt["Other"] = mt["Total"] - mt["Maintenance"]
+    mt = mt.sort_values(["Total", "mc_no"], ascending=[False, True]).reset_index(drop=True)
+    tbl = pd.DataFrame({"Sl": range(1, len(mt) + 1), "Machine No": mt["mc_no"], "Internal ID": mt["machine_no"],
+                        "Machine Name": mt["machine_name"].replace("", "—"),
+                        "Maintenance Cost (৳)": mt["Maintenance"].round(0), "Other Cost (৳)": mt["Other"].round(0),
+                        "Total Machine Cost (৳)": mt["Total"].round(0),
+                        "Share %": (mt["Total"] / total * 100).round(1) if total else 0.0,
+                        "Status": mt["active"].map({True: "● Active", False: "○ Inactive"})})
+    cfg = {c: st.column_config.NumberColumn(format="৳%.0f") for c in ("Maintenance Cost (৳)", "Other Cost (৳)", "Total Machine Cost (৳)")}
+    cfg["Share %"] = st.column_config.ProgressColumn("Share %", format="%.1f%%", min_value=0, max_value=100,
+                                                     help="Machine cost ÷ total machine cost × 100 (a percentage, not taka)")
+    sel_idx = None
+    try:
+        ev = st.dataframe(tbl, hide_index=True, use_container_width=True, height=min(90 + 35 * len(tbl), 520), column_config=cfg,
+                          on_select="rerun", selection_mode="single-row", key="mc_cost_tbl")
+        rows_sel = list(ev.selection.rows) if ev is not None and getattr(ev, "selection", None) else []
+        sel_idx = rows_sel[0] if rows_sel else None
+    except TypeError:
+        st.dataframe(tbl, hide_index=True, use_container_width=True, height=min(90 + 35 * len(tbl), 520), column_config=cfg)
+    st.caption("Share % = machine cost ÷ total machine cost × 100 — a percentage, not taka. Example: total ৳700 and 54% means about ৳378.")
+    labs = {f"{r.mc_no}" + (f" · {r.machine_name}" if r.machine_name else ""): i for i, r in mt.iterrows()}
+    cA, cBn = st.columns([2, 1])
+    pick = cA.selectbox("View Details — machine", ["— select a machine —"] + list(labs), key="mc_cost_viewpick")
+    if sel_idx is None and pick in labs:
+        sel_idx = labs[pick]
+    export_buttons(tbl, "machine_wise_cost", f"Machine-wise cost ({plabel})")
+    if sel_idx is not None and 0 <= sel_idx < len(mt):
+        st.markdown("---")
+        _mc_cost_details(mt.iloc[sel_idx], df, df_all, plabel)
 
     # ---- machine x month grid ----
     pv = (df_all.dropna(subset=["dt"]).assign(Month=lambda x: x["dt"].dt.to_period("M"))
@@ -23253,38 +23370,14 @@ def _mc_view_cost(units, all_machines):
     if pv.shape[1] >= 1:
         pv = pv[sorted(pv.columns)]
         pv.columns = [p.strftime("%b-%Y") for p in pv.columns]
-        pv["মোট"] = pv.sum(axis=1)
-        pv = pv.sort_values("মোট", ascending=False).round(0).reset_index().rename(columns={"machine": "Machine"})
-        with st.expander("🗓 মেশিন × মাস (কোন মেশিনে কোন মাসে কত খরচ)", expanded=False):
+        pv["Total"] = pv.sum(axis=1)
+        pv = pv.sort_values("Total", ascending=False).round(0).reset_index().rename(columns={"machine": "Machine"})
+        with st.expander("🗓 Machine × Month cost grid", expanded=False):
             st.dataframe(pv, hide_index=True, use_container_width=True, height=min(90 + 35 * len(pv), 460),
                          column_config={c: st.column_config.NumberColumn(format="৳%.0f") for c in pv.columns if c != "Machine"})
             export_buttons(pv, "machine_month_grid", "Machine x Month cost")
-
-    # ---- SR-wise drill-down: one SR carries many items, each item charged to its machine ----
-    with st.expander("🧾 SR-ভিত্তিক বিস্তারিত (কোন SR-এ কোন আইটেম কোন মেশিনে গেছে)", expanded=False):
-        mpick = st.selectbox("মেশিন বাছুন", list(g["machine"]), key="mc_cost_srpick")
-        dm = df[df["machine"] == mpick].sort_values(["dt", "req_no"], ascending=[False, True])
-        sr = pd.DataFrame({"তারিখ": dm["date"], "SR": dm["req_no"].replace("", "-"),
-                           "Item": dm["item"] + " [" + dm["size"].replace("", "-") + "]",
-                           "পরিমাণ": dm["qty"], "Rate (৳)": dm["rate"].round(2), "Amount (৳)": dm["amount"].round(0),
-                           "Issued by": dm["officer"]})
-        st.metric(f"{mpick} — মোট খরচ ({plabel})", f"৳{float(dm['amount'].sum()):,.0f}")
-        st.dataframe(sr, hide_index=True, use_container_width=True, height=min(90 + 35 * len(sr), 420))
-        per_sr = dm.groupby(dm["req_no"].replace("", "-")).agg(Lines=("id", "count"), Amount=("amount", "sum")).reset_index() \
-                   .rename(columns={"req_no": "SR", "Lines": "লাইন", "Amount": "SR-এর মোট (৳)"}).sort_values("SR-এর মোট (৳)", ascending=False)
-        per_sr["SR-এর মোট (৳)"] = per_sr["SR-এর মোট (৳)"].round(0)
-        st.markdown("**SR অনুযায়ী যোগফল**")
-        st.dataframe(per_sr, hide_index=True, use_container_width=True, height=min(90 + 35 * len(per_sr), 300))
-        export_buttons(sr, "machine_sr_detail", f"{mpick} SR detail ({plabel})")
-
     if (df["rate"] <= 0).any():
-        st.caption(f"ℹ️ {int((df['rate'] <= 0).sum())}টি লাইনে item-এর Rate নেই — ওই লাইনের খরচ ০ ধরা হয়েছে।")
-    if all_machines:
-        have = set(g["machine_id"])
-        idle = [mc_label(r) for u in units for r in mc_list(u) if int(r["id"]) not in have]
-        if idle:
-            st.caption("এই সময়ে কোনো মাল নেয়নি: " + " | ".join(idle[:40]))
-    export_buttons(out, "machine_wise_cost", f"Machine-wise cost ({plabel})")
+        st.caption(f"ℹ️ {int((df['rate'] <= 0).sum())} line(s) have no item rate — counted as ৳0.")
 
 
 def _mc_view_detail(units):
