@@ -23103,18 +23103,25 @@ _MC_CSS = """<style>
 .mcx-sub{font-size:13px;color:#64748B;margin-top:3px}
 .mcx-badge{background:#E8F5F2;color:#0F766E;border:1px solid #B7E2D8;border-radius:99px;padding:5px 14px;font-size:12.5px;font-weight:700}
 .mcx-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin:6px 0 18px}
-.mcx-kpi{background:#fff;border:1px solid #E2E8F0;border-radius:16px;padding:16px 18px;box-shadow:0 2px 10px rgba(15,23,42,.05);display:flex;gap:14px;align-items:center}
-.mcx-ic{width:44px;height:44px;border-radius:12px;background:#E8F5F2;display:flex;align-items:center;justify-content:center;font-size:21px;flex:none}
-.mcx-kpi.navy .mcx-ic{background:#132238}.mcx-kpi.amber .mcx-ic{background:#FEF3C7}.mcx-kpi.blue .mcx-ic{background:#E0EAFF}
-.mcx-kpi .l{font-size:12px;color:#64748B;font-weight:700;letter-spacing:.4px;text-transform:uppercase}
-.mcx-kpi .v{font-size:25px;font-weight:800;color:#0B1B2E;line-height:1.2}
-.mcx-kpi .s{font-size:12px;color:#64748B;margin-top:1px}
+.mcx-kpi{border-radius:18px;padding:18px 20px;display:flex;gap:15px;align-items:center;color:#fff;position:relative;overflow:hidden;
+  box-shadow:0 10px 24px rgba(15,23,42,.18);background:linear-gradient(135deg,#0F766E 0%,#14B8A6 100%)}
+.mcx-kpi::after{content:"";position:absolute;right:-30px;top:-30px;width:120px;height:120px;border-radius:50%;background:rgba(255,255,255,.12)}
+.mcx-kpi.navy{background:linear-gradient(135deg,#0B1B2E 0%,#1E3A5F 100%)}
+.mcx-kpi.amber{background:linear-gradient(135deg,#EA580C 0%,#F59E0B 100%)}
+.mcx-kpi.blue{background:linear-gradient(135deg,#4338CA 0%,#7C83F7 100%)}
+.mcx-ic{width:48px;height:48px;border-radius:14px;background:rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;font-size:23px;flex:none;position:relative;z-index:1}
+.mcx-kpi>div:last-child{position:relative;z-index:1}
+.mcx-kpi .l{font-size:12px;color:rgba(255,255,255,.85);font-weight:700;letter-spacing:.6px;text-transform:uppercase}
+.mcx-kpi .v{font-size:28px;font-weight:800;color:#fff;line-height:1.2}
+.mcx-kpi .s{font-size:12.5px;color:rgba(255,255,255,.88);margin-top:1px}
+.mcx-kpi .mcx-up,.mcx-kpi .mcx-down{background:rgba(255,255,255,.22);color:#fff;border-radius:99px;padding:1px 8px}
 .mcx-up{color:#DC2626;font-weight:700}.mcx-down{color:#16A34A;font-weight:700}
 .mcx-h{font-weight:800;color:#0B1B2E;font-size:16px;margin:10px 0 2px}
 .mcx-hs{font-size:12.5px;color:#64748B;margin-bottom:8px}
-.mcx-leg{display:flex;align-items:center;gap:9px;padding:7px 2px;border-bottom:1px solid #EEF2F7;font-size:13px;color:#172033}
+.mcx-legbox{max-height:430px;overflow-y:auto;padding-right:4px}
+.mcx-leg{display:flex;align-items:center;gap:9px;padding:8px 2px;border-bottom:1px solid #EEF2F7;font-size:13px;color:#172033}
 .mcx-leg i{width:10px;height:10px;border-radius:3px;flex:none}
-.mcx-leg .n{flex:1;min-width:0;font-weight:700}.mcx-leg .n small{color:#64748B;font-weight:500}
+.mcx-leg .n{flex:1;min-width:0;font-weight:700}.mcx-leg .n small{display:block;color:#64748B;font-weight:500;font-size:11.5px;line-height:1.35}
 .mcx-leg .a{font-weight:800}.mcx-leg .p{width:52px;text-align:right;color:#0F766E;font-weight:800}
 .mcx-note{background:#F0F9F7;border:1px solid #B7E2D8;border-radius:12px;padding:9px 14px;font-size:12.5px;color:#134E4A;margin:8px 0}
 .mcx-det{background:linear-gradient(135deg,#0B1B2E 0%,#132238 60%,#0F766E 140%);border-radius:18px;padding:20px 24px;color:#fff;margin:8px 0 14px;
@@ -23124,10 +23131,10 @@ _MC_CSS = """<style>
 .mcx-det .tt{text-align:right}.mcx-det .tt b{font-size:32px;font-weight:800;display:block}.mcx-det .tt span{font-size:12px;color:#B8C4D4}
 .mcx-st{display:inline-block;border-radius:99px;padding:2px 10px;font-size:11.5px;font-weight:800;margin-left:8px;vertical-align:middle}
 .mcx-st.on{background:#DCFCE7;color:#166534}.mcx-st.off{background:#FEE2E2;color:#991B1B}
-@media (max-width:640px){.mcx-title{font-size:21px}.mcx-det .tt{text-align:left}.mcx-kpi .v{font-size:21px}}
+@media (max-width:640px){.mcx-title{font-size:21px}.mcx-det .tt{text-align:left}.mcx-kpi .v{font-size:22px}}
 </style>"""
 
-_MC_PALETTE = ["#0F766E", "#132238", "#2DD4BF", "#3B82F6", "#F59E0B", "#8B5CF6", "#EF4444", "#64748B"]
+_MC_PALETTE = ["#0F766E", "#1E3A5F", "#14B8A6", "#3B82F6", "#F59E0B", "#8B5CF6", "#EF4444", "#EC4899", "#84CC16", "#06B6D4", "#F97316", "#64748B"]
 
 
 def _mc_trend_chart(d, mode, key_h=260):
@@ -23164,6 +23171,26 @@ def _mc_trend_chart(d, mode, key_h=260):
         st.bar_chart(t, height=key_h, use_container_width=True)
 
 
+def _mc_age_lbl(d):
+    m = _mc_age_months(d)
+    return "" if m is None else (f"{m // 12} yr {m % 12} mo" if m >= 12 else f"{m} mo")
+
+
+def _mc_inst_line(r):
+    """'Installed 12-Mar-2021 · MFG 2020 · Age 5 yr 8 mo' from the machine master (only what exists)."""
+    p = []
+    ds = _mc_fmt_date(r.get("install_date"))
+    if ds:
+        p.append(f"Installed {ds}")
+    y = _mc_fmt_year(r.get("mfg_year"))
+    if y:
+        p.append(f"MFG {y}")
+    ag = _mc_age_lbl(r.get("install_date"))
+    if ag:
+        p.append(f"Age {ag}")
+    return " · ".join(p) if p else "Install date not entered"
+
+
 def _mc_cost_details(row, df, df_all, plabel):
     """Machine-specific view (View Details). df = period rows, df_all = every machine-tagged row."""
     e = html_lib.escape
@@ -23176,7 +23203,7 @@ def _mc_cost_details(row, df, df_all, plabel):
     st.markdown(
         f'<div class="mcx-det"><div><div class="no">{e(str(row["mc_no"]))}<span class="mcx-st {st_cls}">{st_txt}</span></div>'
         f'<div class="nm">{e(str(row["machine_name"] or "—"))}' + (f' · Machine No. {e(str(row["machine_no"]))}' if row["machine_no"] else "") +
-        f'</div><div class="pr">PERIOD · {e(plabel)}</div></div>'
+        f'</div><div class="nm">{e(_mc_inst_line(row))}</div><div class="pr">PERIOD · {e(plabel)}</div></div>'
         f'<div class="tt"><b>৳{tot:,.0f}</b><span>Total machine cost</span></div></div>', unsafe_allow_html=True)
     k = st.columns(4)
     k[0].metric("Maintenance cost", f"৳{maint:,.0f}")
@@ -23204,7 +23231,42 @@ def _mc_cost_details(row, df, df_all, plabel):
         st.markdown('<div class="mcx-hs">Top items by cost</div>', unsafe_allow_html=True)
         st.dataframe(it[["Item", "Qty", "Cost"]].rename(columns={"Cost": "Cost (৳)"}).round(0), hide_index=True, use_container_width=True,
                      height=min(90 + 35 * len(it), 300), column_config={"Cost (৳)": st.column_config.NumberColumn(format="৳%.0f")})
-    st.markdown('<div class="mcx-h">Issue history (SR-wise)</div>', unsafe_allow_html=True)
+    # ---- requisition-wise: which SR issued how much to this machine, and when ----
+    st.markdown('<div class="mcx-h">Requisition-wise issue</div>'
+                '<div class="mcx-hs">কোন Requisition (SR) থেকে এই মেশিনে কত টাকার মাল, কবে ইস্যু হয়েছে</div>', unsafe_allow_html=True)
+    dq = dm.assign(SRK=dm["req_no"].replace("", "(No SR)"))
+    rq = dq.groupby("SRK").agg(first=("dt", "min"), last=("dt", "max"), Items=("sl_no", "nunique"), Lines=("id", "count"),
+                               Qty=("qty", "sum"), Amount=("amount", "sum"),
+                               By=("officer", lambda x: ", ".join(sorted({v for v in x if v})))).reset_index()
+    rq = rq.sort_values(["last", "SRK"], ascending=[False, True]).reset_index(drop=True)
+
+    def _rq_date(r):
+        a, b = r["first"], r["last"]
+        if pd.isna(b):
+            return "-"
+        return a.strftime(DATE_FMT) if pd.isna(a) or a.date() == b.date() else f"{a.strftime(DATE_FMT)} → {b.strftime(DATE_FMT)}"
+    rqt = pd.DataFrame({"Requisition / SR": rq["SRK"], "Issue Date": rq.apply(_rq_date, axis=1),
+                        "Items": rq["Items"], "Issue Lines": rq["Lines"], "Total Qty": rq["Qty"].round(2),
+                        "Amount (৳)": rq["Amount"].round(0),
+                        "% of machine cost": (rq["Amount"] / tot * 100).round(1) if tot else 0.0, "Issued by": rq["By"]})
+    st.dataframe(rqt, hide_index=True, use_container_width=True, height=min(90 + 35 * len(rqt), 360),
+                 column_config={"Amount (৳)": st.column_config.NumberColumn(format="৳%.0f"),
+                                "% of machine cost": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=100)})
+    st.caption(f"{len(rqt)} requisition(s) · {len(dm)} issue line(s) · মোট ৳{tot:,.0f}  (প্রতিটি লাইন একবারই গোনা হয়েছে, তাই SR-এর যোগফল = মেশিনের মোট খরচ)")
+    pk = st.selectbox("কোন Requisition-এ কী কী ইস্যু হয়েছে দেখুন", ["— select a requisition —"] + list(rq["SRK"]),
+                      key=f"mc_cost_rqpick_{mid}")
+    if pk != "— select a requisition —":
+        ds = dq[dq["SRK"] == pk].sort_values(["dt", "id"])
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Requisition / SR", pk)
+        c2.metric("Total issued", f"৳{float(ds['amount'].sum()):,.0f}")
+        c3.metric("Issue lines", f"{len(ds)}")
+        st.dataframe(pd.DataFrame({"Issue Date": ds["date"], "Item": ds["item"] + " [" + ds["size"].replace("", "-") + "]",
+                                   "Dept": ds["dept"], "Qty": ds["qty"], "Rate (৳)": ds["rate"].round(2),
+                                   "Amount (৳)": ds["amount"].round(0), "Issued by": ds["officer"]}),
+                     hide_index=True, use_container_width=True, height=min(90 + 35 * len(ds), 320))
+    export_buttons(rqt, f"machine_{str(row['mc_no']).replace(' ', '_')}_requisitions", f"{row['mc_no']} requisition-wise ({plabel})")
+    st.markdown('<div class="mcx-h">All issue lines</div>', unsafe_allow_html=True)
     sr = pd.DataFrame({"Date": dm["date"], "SR": dm["req_no"].replace("", "-"),
                        "Item": dm["item"] + " [" + dm["size"].replace("", "-") + "]", "Dept": dm["dept"],
                        "Qty": dm["qty"], "Rate (৳)": dm["rate"].round(2), "Amount (৳)": dm["amount"].round(0), "Issued by": dm["officer"]})
@@ -23254,8 +23316,8 @@ def _mc_view_cost(units, all_machines):
         for r in mc_list(u, active_only=False):
             mrows.append({"machine_id": int(r["id"]), "mc_no": (short_fac(u) + " | " if len(units) > 1 else "") + str(r["mc_no"]),
                           "machine_no": r.get("machine_no") or "", "machine_name": r.get("machine_name") or "",
-                          "active": bool(r.get("active", True))})
-    master = pd.DataFrame(mrows, columns=["machine_id", "mc_no", "machine_no", "machine_name", "active"])
+                          "active": bool(r.get("active", True)), "install_date": r.get("install_date"), "mfg_year": r.get("mfg_year")})
+    master = pd.DataFrame(mrows, columns=["machine_id", "mc_no", "machine_no", "machine_name", "active", "install_date", "mfg_year"])
 
     st.markdown('<div class="mcx-head"><div><div class="mcx-crumb">Home &nbsp;›&nbsp; Store &nbsp;›&nbsp; <b>Machine Cost</b></div>'
                 '<div class="mcx-title">Machine Cost</div>'
@@ -23308,24 +23370,33 @@ def _mc_view_cost(units, all_machines):
     with cB:
         st.markdown('<div class="mcx-h">Machine Cost Breakdown</div><div class="mcx-hs">Share of total machine cost</div>', unsafe_allow_html=True)
         info = master.set_index("machine_id")
-        top = g.head(7)
-        seg = [(str(info.loc[i, "mc_no"]) if i in info.index else str(i), float(v)) for i, v in top.items()]
-        if len(g) > 7:
-            seg.append((f"Others ({len(g) - 7})", float(g.iloc[7:].sum())))
+        names, seen = {}, {}
+        for i in g.index:
+            nm = str(info.loc[i, "mc_no"]) if i in info.index else str(i)
+            seen[nm] = seen.get(nm, 0) + 1
+            names[i] = nm if seen[nm] == 1 else f"{nm} ({info.loc[i, 'machine_no'] or seen[nm]})"
+        seg = [(names[i], float(v), i) for i, v in g.items()]
         try:
             import altair as alt
-            sd = pd.DataFrame(seg, columns=["Machine", "Cost"])
+            sd = pd.DataFrame([(n, v) for n, v, _ in seg], columns=["Machine", "Cost"])
             sd["Share"] = (sd["Cost"] / total * 100).round(1)
+            dom = list(sd["Machine"])
             st.altair_chart(alt.Chart(sd).mark_arc(innerRadius=52, outerRadius=88, stroke="#fff", strokeWidth=2).encode(
-                theta=alt.Theta("Cost:Q"), color=alt.Color("Machine:N", sort=list(sd["Machine"]), legend=None,
-                                                           scale=alt.Scale(domain=list(sd["Machine"]), range=_MC_PALETTE)),
+                theta=alt.Theta("Cost:Q"), color=alt.Color("Machine:N", sort=dom, legend=None,
+                                                           scale=alt.Scale(domain=dom, range=[_MC_PALETTE[k % 12] for k in range(len(dom))])),
                 tooltip=["Machine:N", alt.Tooltip("Cost:Q", format=",.0f", title="Cost ৳"), alt.Tooltip("Share:Q", format=".1f", title="Share %")]
             ).properties(height=190).configure_view(strokeWidth=0), use_container_width=True)
         except Exception:
             pass
-        leg = "".join(f'<div class="mcx-leg"><i style="background:{_MC_PALETTE[i % 8]}"></i><div class="n">{e(n)}</div>'
-                      f'<div class="a">৳{v:,.0f}</div><div class="p">{v / total * 100:.1f}%</div></div>' for i, (n, v) in enumerate(seg))
-        st.markdown(leg + f'<div class="mcx-leg"><div class="n"><b>Total</b></div><div class="a">৳{total:,.0f}</div><div class="p">100%</div></div>',
+        rows_h = []
+        for k, (n, v, mid_) in enumerate(seg):
+            r_ = info.loc[mid_] if mid_ in info.index else {}
+            nm_ = str(r_.get("machine_name") or "") if len(r_) else ""
+            sub = (e(nm_) + "<br>" if nm_ else "") + e(_mc_inst_line(r_) if len(r_) else "")
+            rows_h.append(f'<div class="mcx-leg"><i style="background:{_MC_PALETTE[k % 12]}"></i><div class="n">{e(n)}<small>{sub}</small></div>'
+                          f'<div class="a">৳{v:,.0f}</div><div class="p">{v / total * 100:.1f}%</div></div>')
+        st.markdown('<div class="mcx-legbox">' + "".join(rows_h) + '</div>'
+                    f'<div class="mcx-leg"><div class="n"><b>Total</b></div><div class="a">৳{total:,.0f}</div><div class="p">100%</div></div>',
                     unsafe_allow_html=True)
 
     # ---- machine-wise table ----
@@ -23338,6 +23409,8 @@ def _mc_view_cost(units, all_machines):
     mt = mt.sort_values(["Total", "mc_no"], ascending=[False, True]).reset_index(drop=True)
     tbl = pd.DataFrame({"Sl": range(1, len(mt) + 1), "Machine No": mt["mc_no"], "Internal ID": mt["machine_no"],
                         "Machine Name": mt["machine_name"].replace("", "—"),
+                        "Installed": mt["install_date"].map(_mc_fmt_date), "MFG Year": mt["mfg_year"].map(_mc_fmt_year),
+                        "Machine Age": mt["install_date"].map(_mc_age_lbl),
                         "Maintenance Cost (৳)": mt["Maintenance"].round(0), "Other Cost (৳)": mt["Other"].round(0),
                         "Total Machine Cost (৳)": mt["Total"].round(0),
                         "Share %": (mt["Total"] / total * 100).round(1) if total else 0.0,
