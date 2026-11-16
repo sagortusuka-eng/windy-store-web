@@ -16356,6 +16356,10 @@ _QI_CSS = '''<style>
 .qi-head.l{justify-content:flex-start}
 .qi-serial{display:inline-flex;align-items:center;justify-content:center;min-width:28px;height:26px;border-radius:13px;background:#2F5FD0;color:#FFFFFF;font-weight:700;font-size:.9rem}
 .qi-serial.off{background:transparent;color:#9AA3B5}
+/* the qty list is its own scroll box: wheel over it scrolls ONLY the list (page stays), box fits the screen so Save stays reachable */
+.st-key-qi_rows,[data-testid="stVerticalBlockBorderWrapper"]:has(> .st-key-qi_rows),[data-testid="stVerticalBlockBorderWrapper"]:has(.st-key-qi_rows){overscroll-behavior:contain}
+.st-key-qi_rows{height:calc(100vh - 340px)!important;min-height:320px;max-height:720px;overflow-y:auto!important}
+[data-testid="stVerticalBlockBorderWrapper"]:has(> .st-key-qi_rows),[data-testid="stVerticalBlockBorderWrapper"]:has(> div > .st-key-qi_rows){height:calc(100vh - 340px)!important;min-height:320px;max-height:720px}
 /* keep the list steady while Streamlit re-runs (no dimming / flicker) */
 .st-key-qi_rows [data-stale="true"]{opacity:1!important;transition:none!important}
 </style>'''
