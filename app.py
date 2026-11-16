@@ -23108,6 +23108,7 @@ _MC_CSS = """<style>
 .mcx-kpi::after{content:"";position:absolute;right:-30px;top:-30px;width:120px;height:120px;border-radius:50%;background:rgba(255,255,255,.12)}
 .mcx-kpi.navy{background:linear-gradient(135deg,#0B1B2E 0%,#1E3A5F 100%)}
 .mcx-kpi.amber{background:linear-gradient(135deg,#EA580C 0%,#F59E0B 100%)}
+.mcx-kpi.rose{background:linear-gradient(135deg,#BE123C 0%,#FB7185 100%)}
 .mcx-kpi.blue{background:linear-gradient(135deg,#4338CA 0%,#7C83F7 100%)}
 .mcx-ic{width:48px;height:48px;border-radius:14px;background:rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;font-size:23px;flex:none;position:relative;z-index:1}
 .mcx-kpi>div:last-child{position:relative;z-index:1}
@@ -23171,6 +23172,247 @@ def _mc_trend_chart(d, mode, key_h=260):
         st.bar_chart(t, height=key_h, use_container_width=True)
 
 
+# ============================================================
+#  REPAIR / SERVICING COST  (parts sent out for repair, charged to a machine)  - additive, own table
+# ============================================================
+def ensure_mc_repair_schema():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS machine_repairs (id SERIAL PRIMARY KEY, factory_name TEXT, machine_id INTEGER,
+                           item_name TEXT, supplier_name TEXT, send_date DATE, received_date DATE, repair_qty REAL DEFAULT 0,
+                           rate REAL DEFAULT 0, total_value REAL DEFAULT 0, bill_no TEXT DEFAULT '', gatepass_no TEXT DEFAULT '',
+                           tracing_code TEXT DEFAULT '', notes TEXT DEFAULT '', created_by TEXT, created_at TEXT)""")
+            cur.execute("CREATE INDEX IF NOT EXISTS ix_mrep_fac_mc ON machine_repairs(factory_name, machine_id)")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def mc_repair_schema():
+    mc_schema()
+    if not st.session_state.get("_mc_repair_ready_v1"):
+        run_once_per_process("mc_repair_v1", ensure_mc_repair_schema)
+        st.session_state["_mc_repair_ready_v1"] = True
+
+
+@tx
+def mc_repair_add(fac, rec):
+    run("""INSERT INTO machine_repairs (factory_name, machine_id, item_name, supplier_name, send_date, received_date, repair_qty, rate,
+                                       total_value, bill_no, gatepass_no, tracing_code, notes, created_by, created_at)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (fac, rec["machine_id"], rec["item"], rec["supplier"], rec["send"], rec["recv"], rec["qty"], rec["rate"],
+         round(rec["qty"] * rec["rate"], 2), rec["bill"], rec["gatepass"], rec["trace"], rec["notes"],
+         st.session_state.get("user", ""), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    audit("MACHINE_REPAIR_ADD", f"{fac}: machine id {rec['machine_id']} - {rec['item']} x {rec['qty']:g} @ {rec['rate']:g} "
+                                f"= {rec['qty'] * rec['rate']:,.2f} (supplier {rec['supplier']}, bill {rec['bill'] or '-'})")
+    return True
+
+
+@tx
+def mc_repair_receive(rid, fac, recv, bill, gatepass):
+    run("""UPDATE machine_repairs SET received_date=%s, bill_no=COALESCE(NULLIF(%s,''), bill_no),
+                  gatepass_no=COALESCE(NULLIF(%s,''), gatepass_no) WHERE id=%s AND factory_name=%s""",
+        (recv, bill, gatepass, rid, fac))
+    audit("MACHINE_REPAIR_RECEIVE", f"{fac}: repair #{rid} received on {recv}")
+    return True
+
+
+@tx
+def mc_repair_delete(rid, fac, label):
+    run("DELETE FROM machine_repairs WHERE id=%s AND factory_name=%s", (rid, fac))
+    audit("MACHINE_REPAIR_DELETE", f"{fac}: repair #{rid} deleted ({label})")
+    return True
+
+
+def _mc_repair_df(units):
+    """Every repair / servicing entry of the given units. dt = received date (work finished), else send date."""
+    mc_repair_schema()
+    df = qdf_c("""SELECT r.id, r.factory_name, r.machine_id, COALESCE(r.item_name,'') AS item_name, COALESCE(r.supplier_name,'') AS supplier_name,
+                         r.send_date, r.received_date, COALESCE(r.repair_qty,0) AS repair_qty, COALESCE(r.rate,0) AS rate,
+                         COALESCE(r.total_value,0) AS total_value, COALESCE(r.bill_no,'') AS bill_no, COALESCE(r.gatepass_no,'') AS gatepass_no,
+                         COALESCE(r.tracing_code,'') AS tracing_code, COALESCE(r.notes,'') AS notes, COALESCE(r.created_by,'') AS created_by,
+                         m.mc_no, COALESCE(m.machine_no,'') AS machine_no, COALESCE(m.machine_name,'') AS machine_name
+                  FROM machine_repairs r JOIN machines m ON m.id=r.machine_id
+                  WHERE r.factory_name = ANY(%s) ORDER BY r.id DESC""", (list(units),))
+    df["send_date"] = pd.to_datetime(df["send_date"], errors="coerce")
+    df["received_date"] = pd.to_datetime(df["received_date"], errors="coerce")
+    for c in ("repair_qty", "rate", "total_value"):
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0).astype(float)
+    df["dt"] = df["received_date"].fillna(df["send_date"])
+    df["amount"] = df["total_value"]
+    df["status"] = ["Received" if pd.notna(r) else "At supplier" for r in df["received_date"]]
+    today = pd.Timestamp(local_now().date())
+    df["days_out"] = [int(((r if pd.notna(r) else today) - s).days) if pd.notna(s) else None
+                      for s, r in zip(df["send_date"], df["received_date"])]
+    multi = len(set(units)) > 1
+    if multi:
+        df["mc_no"] = [short_fac(f) + " | " + str(m) for f, m in zip(df["factory_name"], df["mc_no"])]
+    return df
+
+
+def _mc_in_period(df, d1, d2):
+    if d1 is None or df.empty:
+        return df
+    return df[(df["dt"] >= pd.Timestamp(d1)) & (df["dt"] < pd.Timestamp(d2) + pd.Timedelta(days=1))]
+
+
+def _mc_svc_by_machine(rep):
+    if rep.empty:
+        return pd.DataFrame(columns=["machine_id", "mc_no", "machine_name", "Jobs", "Qty", "Cost", "Pending"])
+    return (rep.groupby(["machine_id", "mc_no", "machine_name"]).agg(
+        Jobs=("id", "count"), Qty=("repair_qty", "sum"), Cost=("amount", "sum"),
+        Pending=("status", lambda s: int((s == "At supplier").sum()))).reset_index().sort_values("Cost", ascending=False))
+
+
+def _mc_service_section(rep, plabel, title="Servicing / Repair cost — machine-wise", key="svc"):
+    st.markdown(f'<div class="mcx-h" style="margin-top:18px">{title}</div>'
+                '<div class="mcx-hs">বাইরে repair / servicing-এ পাঠানো parts-এর খরচ, যে মেশিনের নামে এন্ট্রি হয়েছে</div>', unsafe_allow_html=True)
+    if rep.empty:
+        st.caption("এই সময়ে কোনো servicing / repair এন্ট্রি নেই। এন্ট্রি দিতে ওপরের “🔧 Repair / Servicing” ট্যাব ব্যবহার করুন।")
+        return
+    b = _mc_svc_by_machine(rep)
+    tot = float(b["Cost"].sum())
+    out = pd.DataFrame({"Machine No": b["mc_no"], "Machine Name": b["machine_name"].replace("", "—"), "Repair Jobs": b["Jobs"],
+                        "Repair Qty": b["Qty"].round(2), "Servicing Cost (৳)": b["Cost"].round(0),
+                        "Share %": (b["Cost"] / tot * 100).round(1) if tot else 0.0, "At supplier (pending)": b["Pending"]})
+    st.dataframe(out, hide_index=True, use_container_width=True, height=min(90 + 35 * len(out), 360),
+                 column_config={"Servicing Cost (৳)": st.column_config.NumberColumn(format="৳%.0f"),
+                                "Share %": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=100)})
+    st.caption(f"মোট servicing cost ({plabel}): ৳{tot:,.0f} · {len(rep)} job")
+    export_buttons(out, f"machine_servicing_cost_{key}", f"Servicing cost machine-wise ({plabel})")
+
+
+def _mc_repair_view(units, fac, is_mgr):
+    e = html_lib.escape
+    st.markdown(_MC_CSS, unsafe_allow_html=True)
+    st.markdown('<div class="mcx-head"><div><div class="mcx-crumb">Home &nbsp;›&nbsp; Machine Cost &nbsp;›&nbsp; <b>Repair / Servicing</b></div>'
+                '<div class="mcx-title">Repair / Servicing Entry</div>'
+                '<div class="mcx-sub">Parts sent out for repair — the cost is charged to the selected machine</div></div></div>', unsafe_allow_html=True)
+    rep_all = _mc_repair_df(units)
+    today = local_now().date()
+
+    # ---------------- entry form ----------------
+    if is_cons_view:
+        st.info("Entry দিতে ওপর থেকে একটি Factory (Unit) বাছুন। নিচে সব Unit-এর servicing তালিকা দেখা যাচ্ছে।")
+    else:
+        machines = mc_list(fac)
+        if not machines:
+            st.info("আগে মেশিন যোগ করুন (🛠 মেশিন তালিকা ট্যাব) — তারপর repair এন্ট্রি দেওয়া যাবে।")
+        else:
+            labs = {mc_label(r): int(r["id"]) for r in machines}
+            gen = st.session_state.get("mc_rp_gen", 0)
+            K = lambda n: f"mc_rp_{n}_{gen}"
+            with st.container(border=True):
+                st.markdown('<div class="mcx-h">➕ New repair / servicing entry</div>', unsafe_allow_html=True)
+                c1, c2 = st.columns([1.4, 1])
+                mpick = c1.selectbox("Machine (M/C No) *", ["— select machine —"] + list(labs), key=K("m"),
+                                     help="এই repair-এর খরচ যে মেশিনের নামে যাবে")
+                supplier = c2.text_input("Supplier name *", key=K("sup"))
+                c3, c4, c5 = st.columns([1.6, 0.8, 0.8])
+                item = c3.text_input("Item / part name (sent for repair) *", key=K("item"))
+                qty = c4.number_input("Repair qty *", min_value=0.0, value=1.0, step=1.0, key=K("qty"))
+                rate = c5.number_input("Rate (৳) *", min_value=0.0, value=0.0, step=1.0, key=K("rate"))
+                c6, c7, c8 = st.columns(3)
+                send = c6.date_input("Part send date *", value=today, format="DD/MM/YYYY", key=K("send"))
+                recv = c7.date_input("Parts received date (খালি = এখনো ফেরেনি)", value=None, format="DD/MM/YYYY", key=K("recv"))
+                c8.metric("Total value (৳)", f"{qty * rate:,.2f}", help="Repair qty × Rate")
+                c9, c10, c11 = st.columns(3)
+                bill = c9.text_input("Bill number", key=K("bill"))
+                gp = c10.text_input("Gatepass number", key=K("gp"))
+                trace = c11.text_input("Tracing code number", key=K("trace"))
+                notes = st.text_input("Notes (optional)", key=K("notes"))
+                if st.button("💾 Save repair entry", type="primary", key=K("save")) and guard():
+                    err = ""
+                    if mpick not in labs:
+                        err = "Machine বাছুন।"
+                    elif not item.strip():
+                        err = "Item / part name লিখুন।"
+                    elif not supplier.strip():
+                        err = "Supplier name লিখুন।"
+                    elif qty <= 0:
+                        err = "Repair qty ০-এর বেশি হতে হবে।"
+                    elif recv is not None and recv < send:
+                        err = "Parts received date, send date-এর আগে হতে পারে না।"
+                    elif bill.strip() and q("""SELECT 1 FROM machine_repairs WHERE factory_name=%s AND lower(bill_no)=lower(%s)
+                                               AND lower(supplier_name)=lower(%s) AND lower(item_name)=lower(%s) AND machine_id=%s LIMIT 1""",
+                                            (fac, bill.strip(), supplier.strip(), item.strip(), labs[mpick])):
+                        err = "এই Bill number + Supplier + Item + Machine আগেই এন্ট্রি করা আছে।"
+                    if err:
+                        st.error(err)
+                    elif mc_repair_add(fac, {"machine_id": labs[mpick], "item": item.strip(), "supplier": supplier.strip(), "send": send,
+                                             "recv": recv, "qty": float(qty), "rate": float(rate), "bill": bill.strip(),
+                                             "gatepass": gp.strip(), "trace": trace.strip(), "notes": notes.strip()}):
+                        st.session_state["mc_rp_gen"] = gen + 1
+                        done(f"✅ Repair entry saved — {mpick}: ৳{qty * rate:,.0f}")
+
+    # ---------------- list ----------------
+    st.markdown('<div class="mcx-h" style="margin-top:14px">Repair / Servicing records</div>'
+                '<div class="mcx-hs">মাসের হিসাব: parts ফেরত আসার তারিখ (না এলে send date) অনুযায়ী</div>', unsafe_allow_html=True)
+    if rep_all.empty:
+        st.info("এখনো কোনো repair / servicing এন্ট্রি নেই।")
+        return
+    d1, d2, plabel, _mk = _mc_period_pick(rep_all[["dt", "amount"]], key="mc_rp_month")
+    rep = _mc_in_period(rep_all, d1, d2)
+    sf = st.radio("Status", ["All", "At supplier", "Received"], horizontal=True, key="mc_rp_status", label_visibility="collapsed")
+    view = rep if sf == "All" else rep[rep["status"] == sf]
+    pend_all = rep_all[rep_all["status"] == "At supplier"]
+    tot = float(rep["amount"].sum())
+    st.markdown(
+        '<div class="mcx-grid">'
+        f'<div class="mcx-kpi navy"><div class="mcx-ic">🔧</div><div><div class="l">Servicing Cost</div><div class="v">৳{tot:,.0f}</div><div class="s">{e(plabel)}</div></div></div>'
+        f'<div class="mcx-kpi"><div class="mcx-ic">🧾</div><div><div class="l">Repair Jobs</div><div class="v">{len(rep)}</div>'
+        f'<div class="s">{int(rep["machine_id"].nunique())} machine(s)</div></div></div>'
+        f'<div class="mcx-kpi amber"><div class="mcx-ic">⏳</div><div><div class="l">At Supplier Now</div><div class="v">{len(pend_all)}</div>'
+        f'<div class="s">৳{float(pend_all["amount"].sum()):,.0f} not yet received</div></div></div></div>', unsafe_allow_html=True)
+    if view.empty:
+        st.info("এই ফিল্টারে কোনো এন্ট্রি নেই।")
+    else:
+        v = view.sort_values(["dt", "id"], ascending=[False, False]).reset_index(drop=True)
+        tbl = pd.DataFrame({"Sl": range(1, len(v) + 1), "Machine No": v["mc_no"], "Machine Name": v["machine_name"].replace("", "—"),
+                            "Item (repaired)": v["item_name"], "Supplier": v["supplier_name"],
+                            "Send Date": v["send_date"].dt.strftime(DATE_FMT), "Received Date": v["received_date"].dt.strftime(DATE_FMT).fillna("—"),
+                            "Days": v["days_out"], "Status": v["status"].map({"Received": "✅ Received", "At supplier": "⏳ At supplier"}),
+                            "Qty": v["repair_qty"], "Rate (৳)": v["rate"], "Total Value (৳)": v["total_value"].round(2),
+                            "Bill No": v["bill_no"], "Gatepass No": v["gatepass_no"], "Tracing Code": v["tracing_code"],
+                            "Entered by": v["created_by"]})
+        st.dataframe(tbl, hide_index=True, use_container_width=True, height=min(90 + 35 * len(tbl), 520),
+                     column_config={"Rate (৳)": st.column_config.NumberColumn(format="%.2f"),
+                                    "Total Value (৳)": st.column_config.NumberColumn(format="৳%.0f")})
+        export_buttons(tbl, "machine_repair_servicing", f"Repair / servicing ({plabel})")
+    _mc_service_section(rep, plabel, key="tab")
+
+    # ---------------- actions ----------------
+    if is_cons_view:
+        return
+    mine = rep_all[rep_all["factory_name"] == fac]
+    pend = mine[mine["status"] == "At supplier"]
+    if not pend.empty:
+        with st.expander(f"📥 Parts ফেরত এসেছে — received date দিন ({len(pend)} pending)"):
+            plabs = {f"#{r.id} · {r.mc_no} · {r.item_name} · {r.supplier_name} · sent {r.send_date:%d-%b-%Y}": (int(r.id), r.send_date)
+                     for r in pend.itertuples()}
+            pk = st.selectbox("Pending entry", list(plabs), key="mc_rp_rcv_pick")
+            a1, a2, a3 = st.columns(3)
+            rdate = a1.date_input("Parts received date", value=today, format="DD/MM/YYYY", key="mc_rp_rcv_date")
+            rbill = a2.text_input("Bill number (যদি এখন পাওয়া যায়)", key="mc_rp_rcv_bill")
+            rgp = a3.text_input("Gatepass number (যদি এখন পাওয়া যায়)", key="mc_rp_rcv_gp")
+            if st.button("✅ Mark received", key="mc_rp_rcv_btn") and guard():
+                rid, sdt = plabs[pk]
+                if pd.notna(sdt) and pd.Timestamp(rdate) < sdt:
+                    st.error("Received date, send date-এর আগে হতে পারে না।")
+                elif mc_repair_receive(rid, fac, rdate, rbill.strip(), rgp.strip()):
+                    done("✅ Received date সেভ হয়েছে।")
+    if is_mgr and not mine.empty:
+        with st.expander("🗑 ভুল এন্ট্রি মুছুন (শুধু Store Manager)"):
+            dlabs = {f"#{r.id} · {r.mc_no} · {r.item_name} · {r.supplier_name} · ৳{r.total_value:,.0f}": (int(r.id), f"{r.mc_no} {r.item_name}")
+                     for r in mine.sort_values("id", ascending=False).head(200).itertuples()}
+            dk = st.selectbox("Entry", list(dlabs), key="mc_rp_del_pick")
+            if st.button("🗑 Delete this entry", key="mc_rp_del_btn") and guard():
+                if mc_repair_delete(dlabs[dk][0], fac, dlabs[dk][1]):
+                    done("✅ এন্ট্রি মোছা হয়েছে।")
+
+
 def _mc_age_lbl(d):
     m = _mc_age_months(d)
     return "" if m is None else (f"{m // 12} yr {m % 12} mo" if m >= 12 else f"{m} mo")
@@ -23191,7 +23433,7 @@ def _mc_inst_line(r):
     return " · ".join(p) if p else "Install date not entered"
 
 
-def _mc_cost_details(row, df, df_all, plabel):
+def _mc_cost_details(row, df, df_all, plabel, rep=None):
     """Machine-specific view (View Details). df = period rows, df_all = every machine-tagged row."""
     e = html_lib.escape
     mid = int(row["machine_id"])
@@ -23205,11 +23447,22 @@ def _mc_cost_details(row, df, df_all, plabel):
         f'<div class="nm">{e(str(row["machine_name"] or "—"))}' + (f' · Machine No. {e(str(row["machine_no"]))}' if row["machine_no"] else "") +
         f'</div><div class="nm">{e(_mc_inst_line(row))}</div><div class="pr">PERIOD · {e(plabel)}</div></div>'
         f'<div class="tt"><b>৳{tot:,.0f}</b><span>Total machine cost</span></div></div>', unsafe_allow_html=True)
-    k = st.columns(4)
+    rm = rep[rep["machine_id"] == mid].sort_values(["dt", "id"], ascending=[False, False]) if rep is not None and not rep.empty else None
+    svc_m = float(rm["amount"].sum()) if rm is not None else 0.0
+    k = st.columns(5)
     k[0].metric("Maintenance cost", f"৳{maint:,.0f}")
     k[1].metric("Other cost", f"৳{tot - maint:,.0f}")
-    k[2].metric("Issue lines", f"{len(dm)}")
-    k[3].metric("SR slips", f"{int(dm.loc[dm['req_no'] != '', 'req_no'].nunique())}")
+    k[2].metric("Servicing (repair) cost", f"৳{svc_m:,.0f}")
+    k[3].metric("Issue lines", f"{len(dm)}")
+    k[4].metric("SR slips", f"{int(dm.loc[dm['req_no'] != '', 'req_no'].nunique())}")
+    if rm is not None and not rm.empty:
+        st.markdown('<div class="mcx-h">Repair / Servicing history</div>', unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame({"Item (repaired)": rm["item_name"], "Supplier": rm["supplier_name"],
+                                   "Send": rm["send_date"].dt.strftime(DATE_FMT), "Received": rm["received_date"].dt.strftime(DATE_FMT).fillna("—"),
+                                   "Qty": rm["repair_qty"], "Rate (৳)": rm["rate"], "Total (৳)": rm["total_value"].round(0),
+                                   "Bill No": rm["bill_no"], "Gatepass": rm["gatepass_no"], "Tracing Code": rm["tracing_code"],
+                                   "Status": rm["status"]}), hide_index=True, use_container_width=True, height=min(90 + 35 * len(rm), 300),
+                     column_config={"Total (৳)": st.column_config.NumberColumn(format="৳%.0f")})
     if dm.empty:
         st.info("No issue recorded for this machine in the selected period.")
         return
@@ -23277,7 +23530,7 @@ def _mc_cost_details(row, df, df_all, plabel):
 
 
 
-def _mc_period_pick(df_all):
+def _mc_period_pick(df_all, key="mc_cost_month"):
     """Month-wise selector for the Machine Cost page -> (date_from, date_to, label, month_key or None).
     Months that really have machine cost are listed (newest first) with their total, so the user sees at a glance which month cost what."""
     e = html_lib.escape
@@ -23291,13 +23544,13 @@ def _mc_period_pick(df_all):
     cur_p = pd.Period(local_now().date(), "M")
     default = next((l for l, p in labs.items() if p == cur_p), opts[0])
     c1, c2, c3 = st.columns([2, 1, 1])
-    pick = c1.selectbox("📅 মাস বাছুন (কোন মাসে কত খরচ)", opts, index=opts.index(default), key="mc_cost_month")
+    pick = c1.selectbox("📅 মাস বাছুন (কোন মাসে কত খরচ)", opts, index=opts.index(default), key=key)
     if pick == ALL:
         return None, None, "সব মাস", None
     if pick == CUSTOM:
         today = local_now().date()
-        d1 = c2.date_input("From", value=today.replace(day=1), key="mc_cost_f")
-        d2 = c3.date_input("To", value=today, key="mc_cost_t")
+        d1 = c2.date_input("From", value=today.replace(day=1), key=key + "_f")
+        d2 = c3.date_input("To", value=today, key=key + "_t")
         if d1 > d2:
             d1, d2 = d2, d1
         return d1, d2, f"{d1:%d-%b-%Y} → {d2:%d-%b-%Y}", None
@@ -23323,13 +23576,24 @@ def _mc_view_cost(units, all_machines):
     st.markdown('<div class="mcx-head"><div><div class="mcx-crumb">Home &nbsp;›&nbsp; Store &nbsp;›&nbsp; <b>Machine Cost</b></div>'
                 '<div class="mcx-title">Machine Cost</div>'
                 '<div class="mcx-sub">Machine-wise cost of items issued to each machine</div></div></div>', unsafe_allow_html=True)
-    if df_all.empty:
-        st.info("মেশিনের নামে কোনো ইস্যু এখনো নেই। Requisition Issue-তে মাল ইস্যু করার সময় M/C বাছুন — তাহলে এখানে খরচ আসবে।")
+    rep_all = _mc_repair_df(units)
+    if df_all.empty and rep_all.empty:
+        st.info("মেশিনের নামে কোনো ইস্যু বা repair এখনো নেই। Requisition Issue-তে মাল ইস্যু করার সময় M/C বাছুন, অথবা 🔧 Repair / Servicing ট্যাবে এন্ট্রি দিন — তাহলে এখানে খরচ আসবে।")
         return
-    d1, d2, plabel, mkey = _mc_period_pick(df_all)
+    _parts = ([df_all[["dt", "amount"]]] if not df_all.empty else []) + ([rep_all[["dt"]].assign(amount=0.0)] if not rep_all.empty else [])
+    d1, d2, plabel, mkey = _mc_period_pick(pd.concat(_parts, ignore_index=True))
     if plabel == "সব মাস":
         plabel = "All months"
+    if df_all.empty:       # only repairs so far: empty issue frame with the columns used below
+        df_all = pd.DataFrame({"id": pd.Series(dtype="int64"), "machine_id": pd.Series(dtype="int64"), "machine": pd.Series(dtype=object),
+                               "dt": pd.Series(dtype="datetime64[ns]"), "amount": pd.Series(dtype=float), "dept": pd.Series(dtype=object)})
     df = df_all if d1 is None else df_all[(df_all["dt"] >= pd.Timestamp(d1)) & (df_all["dt"] < pd.Timestamp(d2) + pd.Timedelta(days=1))]
+    rep = _mc_in_period(rep_all, d1, d2)
+    svc = float(rep["amount"].sum())
+    svc_top = ""
+    if not rep.empty:
+        _b = _mc_svc_by_machine(rep).iloc[0]
+        svc_top = f" · top {e(str(_b['mc_no']))} ৳{float(_b['Cost']):,.0f}"
 
     is_m = df["dept"].isin(MC_DEPTS)
     total = float(df["amount"].sum())
@@ -23352,9 +23616,12 @@ def _mc_view_cost(units, all_machines):
         f'<div class="mcx-kpi amber"><div class="mcx-ic">🛠</div><div><div class="l">Maintenance Cost</div><div class="v">৳{maint:,.0f}</div>'
         f'<div class="s">{pm:.1f}% of total · Dept = Maintenance</div></div></div>'
         f'<div class="mcx-kpi blue"><div class="mcx-ic">📦</div><div><div class="l">Other Cost</div><div class="v">৳{other:,.0f}</div>'
-        f'<div class="s">{100 - pm if total else 0:.1f}% of total · other departments</div></div></div></div>', unsafe_allow_html=True)
+        f'<div class="s">{100 - pm if total else 0:.1f}% of total · other departments</div></div></div>'
+        f'<div class="mcx-kpi rose"><div class="mcx-ic">🔧</div><div><div class="l">Servicing Cost</div><div class="v">৳{svc:,.0f}</div>'
+        f'<div class="s">{len(rep)} repair job(s){svc_top}</div></div></div></div>', unsafe_allow_html=True)
     if df.empty:
         st.info(f"{plabel}: মেশিনের নামে কোনো ইস্যু পাওয়া যায়নি।")
+        _mc_service_section(rep, plabel)
         return
 
     # ---- trend + breakdown ----
@@ -23407,16 +23674,19 @@ def _mc_view_cost(units, all_machines):
     mt["Maintenance"] = mt["machine_id"].map(df[is_m].groupby("machine_id")["amount"].sum()).fillna(0.0)
     mt["Total"] = mt["machine_id"].map(g).fillna(0.0)
     mt["Other"] = mt["Total"] - mt["Maintenance"]
-    mt = mt.sort_values(["Total", "mc_no"], ascending=[False, True]).reset_index(drop=True)
+    mt["Servicing"] = mt["machine_id"].map(rep.groupby("machine_id")["amount"].sum() if not rep.empty else pd.Series(dtype=float)).fillna(0.0)
+    mt["Grand"] = mt["Total"] + mt["Servicing"]
+    mt = mt.sort_values(["Grand", "mc_no"], ascending=[False, True]).reset_index(drop=True)
     tbl = pd.DataFrame({"Sl": range(1, len(mt) + 1), "Machine No": mt["mc_no"], "Internal ID": mt["machine_no"],
                         "Machine Name": mt["machine_name"].replace("", "—"),
                         "Installed": mt["install_date"].map(_mc_fmt_date), "MFG Year": mt["mfg_year"].map(_mc_fmt_year),
                         "Machine Age": mt["install_date"].map(_mc_age_lbl),
                         "Maintenance Cost (৳)": mt["Maintenance"].round(0), "Other Cost (৳)": mt["Other"].round(0),
                         "Total Machine Cost (৳)": mt["Total"].round(0),
+                        "Servicing Cost (৳)": mt["Servicing"].round(0), "Grand Total (৳)": mt["Grand"].round(0),
                         "Share %": (mt["Total"] / total * 100).round(1) if total else 0.0,
                         "Status": mt["active"].map({True: "● Active", False: "○ Inactive"})})
-    cfg = {c: st.column_config.NumberColumn(format="৳%.0f") for c in ("Maintenance Cost (৳)", "Other Cost (৳)", "Total Machine Cost (৳)")}
+    cfg = {c: st.column_config.NumberColumn(format="৳%.0f") for c in ("Maintenance Cost (৳)", "Other Cost (৳)", "Total Machine Cost (৳)", "Servicing Cost (৳)", "Grand Total (৳)")}
     cfg["Share %"] = st.column_config.ProgressColumn("Share %", format="%.1f%%", min_value=0, max_value=100,
                                                      help="Machine cost ÷ total machine cost × 100 (a percentage, not taka)")
     sel_idx = None
@@ -23427,7 +23697,7 @@ def _mc_view_cost(units, all_machines):
         sel_idx = rows_sel[0] if rows_sel else None
     except TypeError:
         st.dataframe(tbl, hide_index=True, use_container_width=True, height=min(90 + 35 * len(tbl), 520), column_config=cfg)
-    st.caption("Share % = machine cost ÷ total machine cost × 100 — a percentage, not taka. Example: total ৳700 and 54% means about ৳378.")
+    st.caption("Share % = machine cost ÷ total machine cost × 100 — a percentage, not taka. Example: total ৳700 and 54% means about ৳378. Grand Total = Total Machine Cost (issued items) + Servicing Cost (repair).")
     labs = {f"{r.mc_no}" + (f" · {r.machine_name}" if r.machine_name else ""): i for i, r in mt.iterrows()}
     cA, cBn = st.columns([2, 1])
     pick = cA.selectbox("View Details — machine", ["— select a machine —"] + list(labs), key="mc_cost_viewpick")
@@ -23436,7 +23706,9 @@ def _mc_view_cost(units, all_machines):
     export_buttons(tbl, "machine_wise_cost", f"Machine-wise cost ({plabel})")
     if sel_idx is not None and 0 <= sel_idx < len(mt):
         st.markdown("---")
-        _mc_cost_details(mt.iloc[sel_idx], df, df_all, plabel)
+        _mc_cost_details(mt.iloc[sel_idx], df, df_all, plabel, rep)
+
+    _mc_service_section(rep, plabel)
 
     # ---- which items are Maintenance, which are Other (management can verify the split) ----
     st.markdown('<div class="mcx-h" style="margin-top:18px">Maintenance vs Other — item-wise</div>'
@@ -23656,6 +23928,10 @@ def _mc_manage(fac, is_mgr):
                                   "mfg_year": int(e_year) if e_year else None, "origin": e_orig.strip()}):
                     done("✅ মেশিন আপডেট হয়েছে।")
             used = q("SELECT COUNT(*) AS n FROM transactions WHERE machine_id=%s", (int(r["id"]),))[0]["n"]
+            try:
+                used += q("SELECT COUNT(*) AS n FROM machine_repairs WHERE machine_id=%s", (int(r["id"]),))[0]["n"]      # repair entries also lock the machine
+            except Exception:
+                pass
             if used:
                 x2.caption(f"এই মেশিনে {used}টি ইস্যু আছে — মোছা যাবে না, শুধু 'চালু' টিক তুলে বন্ধ করুন।")
             elif x2.button("🗑 মুছুন", key=k + "d_btn") and guard():
@@ -23743,17 +24019,19 @@ def tab_machine_cost():
         return
     units = list(FACTORIES) if is_cons_view else [FAC]
     is_mgr = st.session_state.get("role") == "Store Manager"
-    labels = ["💰 মেশিন-ভিত্তিক খরচ", "🔎 মেশিন ডিটেইল", "🔩 Parts Life / বারবার", "🛠 মেশিন তালিকা", "🔧 SR-এর মেশিন ঠিক করুন"]
+    labels = ["💰 মেশিন-ভিত্তিক খরচ", "🔧 Repair / Servicing", "🔎 মেশিন ডিটেইল", "🔩 Parts Life / বারবার", "🛠 মেশিন তালিকা", "🔧 SR-এর মেশিন ঠিক করুন"]
     t = lazy_tab_select(labels, "lz_mc")
     if t == 0:
         _mc_view_cost(units, True)
     elif t == 1:
-        _mc_view_detail(units)
+        _mc_repair_view(units, FAC, is_mgr)
     elif t == 2:
+        _mc_view_detail(units)
+    elif t == 3:
         _mc_view_life(units)
     elif is_cons_view:
         st.info("ওপর থেকে একটি Factory বাছুন (মেশিন তালিকা Unit-ভিত্তিক)।")
-    elif t == 3:
+    elif t == 4:
         _mc_manage(FAC, is_mgr)
     else:
         _mc_fix_slip(FAC, is_mgr)
