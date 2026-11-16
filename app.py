@@ -15668,6 +15668,85 @@ _RI_PREM_CSS = """<style>
 .st-key-pv_root [class*="st-key-pv_card_"] div[class*="st-key-rr_search_"] div[data-baseweb="input"]{border:3px solid #1D4ED8!important;background:#EFF6FF!important}
 .st-key-pv_root [class*="st-key-pv_card_"] div[class*="st-key-ri_search_"] div[data-baseweb="input"]:focus-within,
 .st-key-pv_root [class*="st-key-pv_card_"] div[class*="st-key-rr_search_"] div[data-baseweb="input"]:focus-within{border-color:#1E40AF!important;background:#FFFFFF!important}
+/* ===== ERP v3: Navy / White / Light-blue (replaces the gold + multi-colour accents; UI only) ===== */
+.st-key-pv_root{--b-navy:#0B1F4D;--b-blue:#2563EB;--b-ink:#0B1F4D;--b-soft:#EAF3FF;--b-line:#D6E3F5;--b-mut:#5B6B86}
+.st-key-pv_root .pv-hero{background:radial-gradient(900px 220px at 100% 0%,rgba(125,180,255,.35) 0%,rgba(125,180,255,0) 60%),linear-gradient(120deg,#FFFFFF,#EAF3FF)!important;border:1px solid #D6E3F5!important;box-shadow:inset 0 -4px 0 #7DB4FF,0 6px 18px rgba(11,31,77,.08)!important}
+.st-key-pv_root .pv-hero-ic{background:linear-gradient(135deg,#0B1F4D,#1D4ED8)!important;box-shadow:0 8px 18px rgba(11,31,77,.35),inset 0 0 0 1.5px #7DB4FF!important;color:#FFFFFF!important}
+.st-key-pv_root .pv-hero-r{color:#2563EB!important}
+.st-key-pv_root .pv-fac{color:#0B1F4D!important;border:1px solid #9CC2FF!important;background:#F2F8FF!important}
+.st-key-pv_root .pv-n{background:linear-gradient(135deg,#0B1F4D,#1D4ED8)!important;color:#FFFFFF!important;box-shadow:0 3px 8px rgba(11,31,77,.30),inset 0 0 0 1.5px #7DB4FF!important}
+[class*="st-key-pv_card_"]{border:1px solid #D6E3F5!important;border-radius:16px!important;box-shadow:0 6px 22px rgba(11,31,77,.07)!important}
+[class*="st-key-pv_card_"]::before{background:linear-gradient(90deg,#0B1F4D 0%,#2563EB 60%,#8FC1FF 100%)!important}
+.st-key-pv_root .pv-chip{border-color:#D6E3F5}
+.st-key-pv_root .pv-chip.teal{background:#EAF3FF!important;border-color:#BBD6FA!important;color:#0B1F4D!important}
+/* buttons */
+.st-key-pv_root .stButton>button[kind="primary"]{background:linear-gradient(135deg,#0B1F4D,#1D4ED8)!important;border:0!important;color:#FFFFFF!important;box-shadow:0 8px 20px rgba(11,31,77,.30)!important}
+.st-key-pv_root .stButton>button[kind="primary"] p{color:#FFFFFF!important}
+.st-key-pv_root .stButton>button[kind="primary"]:hover{box-shadow:0 12px 26px rgba(11,31,77,.40),0 0 0 3px rgba(125,180,255,.40)!important}
+.st-key-pv_root .stButton>button:not([kind="primary"]){background:#EAF3FF!important;border:1px solid #BBD6FA!important;color:#0B1F4D!important}
+.st-key-pv_root .stButton>button:not([kind="primary"]) p{color:#0B1F4D!important}
+.st-key-pv_root .stButton>button:not([kind="primary"]):hover{background:#0B1F4D!important;border-color:#0B1F4D!important}
+.st-key-pv_root .stButton>button:not([kind="primary"]):hover p{color:#FFFFFF!important}
+.st-key-pv_root [class*="st-key-pv_list_"] .stButton>button:not([kind="primary"]){background:#FFF5F5!important;border:1px solid #F3C6C6!important}
+.st-key-pv_root [class*="st-key-pv_list_"] .stButton>button:not([kind="primary"]) p{color:#B42318!important}
+/* form fields: clear but calm */
+.st-key-pv_root [class*="st-key-pv_card_"] div[data-baseweb="input"],
+.st-key-pv_root [class*="st-key-pv_card_"] div[data-baseweb="textarea"],
+.st-key-pv_root [class*="st-key-pv_card_"] div[data-baseweb="select"]>div{border:2px solid #7C9BD0!important;border-radius:10px!important;min-height:44px!important;box-shadow:0 1px 2px rgba(11,31,77,.08)!important;background:#FFFFFF!important}
+.st-key-pv_root [class*="st-key-pv_card_"] div[data-baseweb="input"]:hover,
+.st-key-pv_root [class*="st-key-pv_card_"] div[data-baseweb="select"]>div:hover{border-color:#2563EB!important}
+.st-key-pv_root [class*="st-key-pv_card_"] div[data-baseweb="input"]:focus-within,
+.st-key-pv_root [class*="st-key-pv_card_"] div[data-baseweb="textarea"]:focus-within,
+.st-key-pv_root [class*="st-key-pv_card_"] div[data-baseweb="select"]>div:focus-within{border-color:#2563EB!important;box-shadow:0 0 0 4px rgba(37,99,235,.20)!important}
+.st-key-pv_root .st-key-pv_card_qi_hdr div[data-testid="stHorizontalBlock"]{align-items:flex-start!important}
+/* top navigation tabs: one calm palette, clear active tab */
+.st-key-pv_root .st-key-ri_modebar{background:#F3F8FF!important;border:1px solid #D6E3F5!important;border-top:0!important;border-radius:0 0 16px 16px!important;padding:10px 14px 12px!important;box-shadow:0 6px 18px rgba(11,31,77,.08)!important}
+.st-key-pv_root .st-key-ri_modebar div[data-testid="stHorizontalBlock"]{gap:8px!important}
+.st-key-pv_root .st-key-ri_modebar [class*="st-key-ri_tab_"]{--tc:#2563EB;--tc2:#0B1F4D;--tcbg:#E4EFFF;--tcl:#C5DAF8}
+.st-key-pv_root .st-key-ri_modebar [class*="st-key-ri_tab_"] button{background:#FFFFFF!important;border:1px solid #C5DAF8!important;border-bottom:3px solid #C5DAF8!important;border-radius:10px!important;min-height:46px!important;box-shadow:0 1px 3px rgba(11,31,77,.06)!important;transition:background .15s,border-color .15s,box-shadow .15s,transform .15s}
+.st-key-pv_root .st-key-ri_modebar [class*="st-key-ri_tab_"] button p{font-size:13.5px!important;font-weight:700!important;color:#0B1F4D!important;white-space:nowrap!important;text-shadow:none!important}
+.st-key-pv_root .st-key-ri_modebar [class*="st-key-ri_tab_"] button:hover{background:#EAF3FF!important;border-color:#7DB4FF!important;border-bottom-color:#2563EB!important;transform:translateY(-1px)!important;box-shadow:0 6px 14px rgba(11,31,77,.12)!important}
+.st-key-pv_root .st-key-ri_modebar [class*="st-key-ri_tab_"] button[kind="primary"],.st-key-pv_root .st-key-ri_modebar [class*="st-key-ri_tab_"] button[data-testid="stBaseButton-primary"]{background:linear-gradient(135deg,#0B1F4D 0%,#1D4ED8 100%)!important;border:1px solid #0B1F4D!important;border-bottom:4px solid #7DB4FF!important;transform:none!important;box-shadow:0 8px 18px rgba(11,31,77,.30)!important}
+.st-key-pv_root .st-key-ri_modebar [class*="st-key-ri_tab_"] button[kind="primary"] p,.st-key-pv_root .st-key-ri_modebar [class*="st-key-ri_tab_"] button[data-testid="stBaseButton-primary"] p{color:#FFFFFF!important}
+/* Quick Issue rows: inputs inside the card keep a compact, consistent height */
+.st-key-pv_root [class*="st-key-pv_card_"] [class*="st-key-qi_row_"] div[data-baseweb="input"]{height:38px!important;min-height:38px!important;border:1.5px solid #8FA8D0!important;border-radius:8px!important;box-shadow:none!important}
+.st-key-pv_root [class*="st-key-pv_card_"] [class*="st-key-qi_row_"] div[data-baseweb="select"]>div{height:38px!important;min-height:38px!important;border:1.5px solid #8FA8D0!important;border-radius:8px!important;box-shadow:none!important;font-size:.82rem}
+.st-key-pv_root [class*="st-key-pv_card_"] [class*="st-key-qi_row_"] div[data-baseweb="input"]:focus-within,
+.st-key-pv_root [class*="st-key-pv_card_"] [class*="st-key-qi_row_"] div[data-baseweb="select"]>div:focus-within{border-color:#2563EB!important;box-shadow:0 0 0 3px rgba(37,99,235,.22)!important}
+/* ===== ERP v3b: follows the supplied reference design (pastel tabs, card headers, user chip, green Clear) ===== */
+.st-key-pv_root .pv-hero{background:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='430' height='120' viewBox='0 0 430 120'><g fill='%23B9D3F2' opacity='.55'><rect x='20' y='62' width='34' height='58'/><rect x='60' y='38' width='40' height='82'/><rect x='108' y='72' width='30' height='48'/><rect x='146' y='22' width='46' height='98'/><rect x='200' y='54' width='36' height='66'/><rect x='244' y='76' width='28' height='44'/><rect x='280' y='34' width='42' height='86'/><rect x='330' y='64' width='34' height='56'/><rect x='372' y='46' width='36' height='74'/></g></svg>") no-repeat right bottom / 400px 112px,radial-gradient(900px 220px at 100% 0%,rgba(125,180,255,.30) 0%,rgba(125,180,255,0) 60%),linear-gradient(120deg,#FFFFFF,#EAF3FF)!important}
+.pv-user{display:flex;align-items:center;gap:10px;background:#FFFFFF;border:1px solid #D6E3F5;border-radius:999px;padding:5px 16px 5px 6px;box-shadow:0 4px 12px rgba(11,31,77,.10);flex:none;position:relative}
+.pv-av{width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#0B1F4D,#2563EB);color:#fff;font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:center}
+.pv-user b{display:block;font-size:13.5px;color:#0B1F4D;line-height:1.2}
+.pv-user small{font-size:11.5px;color:#5B6B86}
+.pv-hero-r{position:relative}
+.st-key-pv_root .st-key-ri_modebar .st-key-ri_tab_1{--pa:#EAF3FF;--pb:#D6E6FF;--pl:#B9D2F5;--pt:#0B3D91;--pm:#2F7BEA;--pd:#0B4FB8;--pbar:#9CC8FF}
+.st-key-pv_root .st-key-ri_modebar .st-key-ri_tab_2{--pa:#EAF8EF;--pb:#D5F0DE;--pl:#B3DEC2;--pt:#0E6A3A;--pm:#35B25C;--pd:#16803A;--pbar:#9BE3B5}
+.st-key-pv_root .st-key-ri_modebar .st-key-ri_tab_3{--pa:#F3EDFF;--pb:#E4D9FC;--pl:#CDBDF3;--pt:#5629B0;--pm:#8C5BE6;--pd:#5629B0;--pbar:#C9B1F8}
+.st-key-pv_root .st-key-ri_modebar .st-key-ri_tab_4{--pa:#E6F7F9;--pb:#CFEEF1;--pl:#A9DDE3;--pt:#0A6F79;--pm:#14B1BF;--pd:#0A6F79;--pbar:#8EE0E8}
+.st-key-pv_root .st-key-ri_modebar .st-key-ri_tab_5{--pa:#EBEDFF;--pb:#D8DCFB;--pl:#BBC2F2;--pt:#2A3AA8;--pm:#5568E8;--pd:#2A3AA8;--pbar:#AEB9FF}
+.st-key-pv_root .st-key-ri_modebar .st-key-ri_tab_6{--pa:#E9EEF8;--pb:#D5DFF0;--pl:#B4C4E0;--pt:#0B2A6B;--pm:#1B4599;--pd:#07173F;--pbar:#7DB4FF}
+.st-key-pv_root .st-key-ri_modebar .st-key-ri_tab_7{--pa:#FFF3E0;--pb:#FFE3BC;--pl:#F6CC8E;--pt:#9A4B00;--pm:#FFA62B;--pd:#E4600B;--pbar:#FFD08A}
+.st-key-pv_root .st-key-ri_modebar [class*="st-key-ri_tab_"] button{background:linear-gradient(180deg,var(--pa),var(--pb))!important;border:1px solid var(--pl)!important;border-bottom:3px solid var(--pl)!important}
+.st-key-pv_root .st-key-ri_modebar [class*="st-key-ri_tab_"] button p{color:var(--pt)!important;font-weight:800!important}
+.st-key-pv_root .st-key-ri_modebar [class*="st-key-ri_tab_"] button:hover{background:linear-gradient(180deg,#FFFFFF,var(--pa))!important;border-color:var(--pm)!important;border-bottom-color:var(--pm)!important}
+.st-key-pv_root .st-key-ri_modebar [class*="st-key-ri_tab_"] button[kind="primary"],.st-key-pv_root .st-key-ri_modebar [class*="st-key-ri_tab_"] button[data-testid="stBaseButton-primary"]{background:linear-gradient(135deg,var(--pm) 0%,var(--pd) 100%)!important;border:1px solid var(--pd)!important;border-bottom:4px solid var(--pbar)!important;box-shadow:0 8px 18px rgba(11,31,77,.28)!important}
+.st-key-pv_root .st-key-ri_modebar [class*="st-key-ri_tab_"] button[kind="primary"] p,.st-key-pv_root .st-key-ri_modebar [class*="st-key-ri_tab_"] button[data-testid="stBaseButton-primary"] p{color:#FFFFFF!important}
+/* card headers */
+.qi-ch{display:flex;align-items:center;gap:12px;margin:0 0 4px}
+.qi-ch-ic{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#0B2A6B,#2F7BEA);color:#fff;display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 4px 10px rgba(11,42,107,.28);flex:none}
+.qi-ch-t{font-size:1.12rem;font-weight:800;color:#0B1F4D}
+.qi-ch-pill{margin-left:auto;background:#E4EFFF;color:#0B3D91;border-radius:10px;padding:6px 14px;font-weight:700;font-size:.85rem;border:1px solid #C5DAF8}
+.qi-ch-sub{font-size:.78rem;color:#5B6B86;margin:0 0 10px 48px}
+.qi-bar{display:flex;align-items:center;gap:10px;background:linear-gradient(100deg,#0A2A6E,#0F3C91 60%,#1450B8);color:#fff;border-radius:12px;padding:11px 16px;margin:0 0 8px;box-shadow:0 6px 16px rgba(10,42,110,.25)}
+.qi-bar .bolt{color:#FFC845;font-size:1.25rem}
+.qi-bar .t{font-weight:800;font-size:1.05rem}
+.qi-bar .r{margin-left:auto;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.30);border-radius:10px;padding:5px 12px;font-size:.82rem;font-weight:700}
+.qi-note{font-size:.78rem;color:#5B6B86;margin:0 0 8px}
+/* green Clear, like the reference */
+.st-key-pv_root .st-key-qi_clear .stButton>button:not([kind="primary"]){background:linear-gradient(135deg,#1E9E4A,#34C26B)!important;border:0!important;color:#FFFFFF!important;min-height:46px;box-shadow:0 6px 14px rgba(30,158,74,.30)!important}
+.st-key-pv_root .st-key-qi_clear .stButton>button:not([kind="primary"]) p{color:#FFFFFF!important}
+.st-key-pv_root .st-key-qi_clear .stButton>button:not([kind="primary"]):hover{background:linear-gradient(135deg,#167C39,#1E9E4A)!important}
 </style>"""
 
 
@@ -15722,13 +15801,21 @@ def _pv_svg(name, size=24):
             f'stroke-linecap="round" stroke-linejoin="round">{_PV_ICONS[name]}</svg>')
 
 
+def _pv_initials(name):
+    parts = [p for p in str(name or "G").replace("_", " ").replace(".", " ").split() if p]
+    return ("".join(p[0] for p in parts[:2]) or "G").upper()
+
+
 def _ri_page_header():
     st.markdown(
         f'<div class="pv-hero"><div class="pv-hero-ic">{_pv_svg("doc", 28)}</div>'
         '<div><div class="pv-hero-t">Requisition Issue &amp; Supplier Receipt</div>'
         '<div class="pv-hero-s">Manage requisition, issue and supplier receipt efficiently</div></div>'
         f'<div class="pv-hero-r"><span class="pv-fac">📍 {html_lib.escape(str(FAC))}</span>'
-        '<span>Smart Inventory • Better Control • Greater Efficiency</span></div></div>', unsafe_allow_html=True)
+        '<span>Smart Inventory • Better Control • Greater Efficiency</span></div>'
+        f'<div class="pv-user"><span class="pv-av">{html_lib.escape(_pv_initials(st.session_state.get("user")))}</span>'
+        f'<div><b>{html_lib.escape(str(st.session_state.get("user") or "Guest"))}</b>'
+        f'<small>{html_lib.escape(str(st.session_state.get("role") or ""))}</small></div></div></div>', unsafe_allow_html=True)
 
 
 def _ri_kpis():
@@ -15869,7 +15956,8 @@ def _ri_recent_tx_panel():
     duplicate entry is seen at once. Read-only list (cached, refreshes after every save); delete / edit keeps the existing
     Store Manager password + confirmation rule and reverts stock exactly like the Transactions page."""
     fac = FAC
-    st.markdown('<div class="section-title">🕘 Recent Transactions (Issue / Receipt / All)</div>', unsafe_allow_html=True)
+    st.markdown("<div class='qi-ch' style='margin-top:8px'><span class='qi-ch-ic'>📋</span><span class='qi-ch-t'>Recent Transactions</span>"
+                "<span class='qi-ch-pill'>Issue · Receipt · All</span></div>", unsafe_allow_html=True)
     f1, f2, f3 = st.columns([1.4, 1.2, 2])
     kind = f1.radio("Type", ["All", "📤 Issue", "📥 Receipt", "Other"], horizontal=True, key="ri_rec_kind", label_visibility="collapsed")
     span = f2.selectbox("Period", ["Last 50", "Today", "Last 3 days", "Last 200"], key="ri_rec_span", label_visibility="collapsed")
@@ -15904,10 +15992,31 @@ def _ri_recent_tx_panel():
     df["when"] = df[["date", "time"]].fillna("").agg(" ".join, axis=1)
     df["type"] = df["trans_type"].map(lambda c: TRANS_LABELS.get(c, c))
     show = df[["id", "when", "type", "item_name", "size", "qty", "req_no", "supplier_name", "challan_no", "officer_name", "notes"]]
-    st.dataframe(show.style.apply(zebra_styles, axis=1), hide_index=True, use_container_width=True, height=330,
-                 column_config={"id": "ID", "when": "Date / Time", "type": "Type", "item_name": "Item", "size": "Size", "qty": "Qty",
-                                "req_no": st.column_config.TextColumn("SR No."), "supplier_name": "Supplier", "challan_no": "Challan",
-                                "officer_name": "Officer", "notes": "Notes"})
+    _cat = {}
+    for _c in df["trans_type"].unique():
+        _cat[TRANS_LABELS.get(_c, _c)] = "iss" if _c in ISSUE_TYPES else ("rec" if _c in RECEIPT_TYPES else "oth")
+    _tcss = {"iss": "background-color:#E3EEFF;color:#0B3D91;font-weight:700", "rec": "background-color:#DDF4E6;color:#0E6A3A;font-weight:700",
+             "oth": "background-color:#EEF1F6;color:#475569;font-weight:700"}
+    _sty = show.style.apply(zebra_styles, axis=1)
+    try:      # status colour on the Type cell + bold qty (cosmetic only - the data is unchanged)
+        _fmap = getattr(_sty, "map", None) or _sty.applymap
+        _sty = _fmap(lambda v: _tcss.get(_cat.get(v, "oth"), ""), subset=["type"])
+        _sty = _sty.set_properties(subset=["qty"], **{"font-weight": "700"})
+    except Exception:
+        _sty = show.style.apply(zebra_styles, axis=1)
+    st.caption("🔵 Issue  ·  🟢 Receipt  ·  ⚪ Other — Type column-er rong dekhei chena jay")
+    st.dataframe(_sty, hide_index=True, use_container_width=True, height=330,
+                 column_config={"id": st.column_config.NumberColumn("ID", width="small"),
+                                "when": st.column_config.TextColumn("Date / Time", width="medium"),
+                                "type": st.column_config.TextColumn("Type", width="medium"),
+                                "item_name": st.column_config.TextColumn("Item", width="large"),
+                                "size": st.column_config.TextColumn("Size", width="small"),
+                                "qty": st.column_config.NumberColumn("Qty", format="%g", width="small"),
+                                "req_no": st.column_config.TextColumn("SR No.", width="small"),
+                                "supplier_name": st.column_config.TextColumn("Supplier", width="medium"),
+                                "challan_no": st.column_config.TextColumn("Challan", width="small"),
+                                "officer_name": st.column_config.TextColumn("Officer", width="small"),
+                                "notes": st.column_config.TextColumn("Notes", width="medium")})
     st.caption(f"{len(show)} ti transaction. Vul entry hole niche Manager password diye delete korle stock auto revert hobe.")
     tx_manager_panel(df, "ri_rec", "🔐 Vul transaction: Delete / Edit (Manager password)")
 
@@ -16159,7 +16268,7 @@ def ri_reg_list(fac):
                     WHERE r2.factory_name=%s)
                 SELECT i.sl_no, COALESCE(i.prod_id,'') AS prod_id, COALESCE(i.item_name,'') AS item_name, COALESCE(i.size,'') AS size,
                        COALESCE(i.current_stock,0) AS stock, COALESCE(NULLIF(TRIM(i.unit_name),''),'Pcs') AS unit,
-                       COALESCE(i.unit_price,0) AS price, (r.sl_no IS NOT NULL) AS own
+                       COALESCE(i.unit_price,0) AS price, COALESCE(i.min_stock,0) AS min_stock, (r.sl_no IS NOT NULL) AS own
                 FROM inventory i
                 LEFT JOIN ri_regular_items r ON r.factory_name=i.factory_name AND r.sl_no=i.sl_no
                 WHERE i.factory_name=%s AND (r.sl_no IS NOT NULL OR EXISTS (
@@ -16305,6 +16414,13 @@ def _qi_uom_changed(fac, sl, key, name, old):
         st.session_state[key] = old
 
 
+def _qi_clear(gen):
+    """Clear = start a fresh, empty slip (new widget keys). The chosen date stays (it is sticky on purpose)."""
+    st.session_state["qi_gen"] = gen + 1
+    st.session_state["qi_extra"] = []
+    st.session_state.pop("qi_confirm", None)
+
+
 def _qi_parse_qty(txt):
     """'.3', '0.3', '0,3', '১.৫' -> float. Returns (value|None, error). Blank = (None, '')."""
     t = str(txt or "").strip().translate(str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")).replace(",", ".").replace(" ", "")
@@ -16319,7 +16435,7 @@ def _qi_parse_qty(txt):
     return v, ""
 
 
-_QI_COLS = [3.0, 1.0, 1.1, 0.7, 0.9, 1.5, 0.7]
+_QI_COLS = [0.5, 3.0, 1.0, 1.1, 0.8, 0.9, 1.5]
 _QI_CSS = '''<style>
 /* rows: quiet white cards, every cell exactly 42px so name / qty / uom / stock sit on one line */
 [class*="st-key-qi_row_"]{border-radius:8px;padding:4px 8px;border:1px solid #E1E6EF;margin-bottom:3px;background:#FFFFFF;transition:background .1s,border-color .1s}
@@ -16329,32 +16445,44 @@ _QI_CSS = '''<style>
 [class*="st-key-qi_row_"] [data-testid="stWidgetLabel"]{display:none!important}
 [class*="st-key-qi_row_"] [data-testid="stTextInput"],[class*="st-key-qi_row_"] [data-testid="stNumberInput"]{margin:0!important;padding:0!important}
 [class*="st-key-qi_row_"] [data-testid="stMarkdownContainer"],[class*="st-key-qi_row_"] [data-testid="stMarkdown"]{margin:0!important;padding:0!important}
-[class*="st-key-qi_row_"]:hover{background:#EDF3FD!important;border-color:#B7C8E8!important}
-[class*="st-key-qi_row_"]:focus-within{background:#E3EDFC!important;border-color:#2F5FD0!important}
+[class*="st-key-qi_row_"]:hover{background:#EEF5FF!important;border-color:#9CC2FF!important}
+[class*="st-key-qi_row_"]:focus-within{background:#DCEBFF!important;border-color:#2563EB!important}
 [class*="st-key-qi_row_"] [data-baseweb="input"]{height:34px!important;min-height:34px!important;border:1px solid #9AA8C2!important;border-radius:8px;background:#FFFFFF!important}
 [class*="st-key-qi_row_"] [data-baseweb="input"]:focus-within{border-color:#2F5FD0!important;box-shadow:0 0 0 3px rgba(47,95,208,.18)!important}
 [class*="st-key-qi_row_"] input{font-weight:700;font-size:.95rem;text-align:center;color:#1F2937!important;background:#FFFFFF!important}
 [class*="st-key-qi_row_"] [data-testid="stNumberInput"] button{display:none!important}
-.qi-name{display:flex;align-items:center;gap:8px;height:34px;box-sizing:border-box;background:#F6F8FB;border:1px solid #D5DBE6;border-radius:8px;padding:0 10px;overflow:hidden}
+.qi-name{display:flex;align-items:center;gap:8px;height:38px;box-sizing:border-box;background:#FFFFFF;border:1px solid #C9D8EE;border-radius:8px;padding:0 10px;overflow:hidden}
 .qi-item{font-weight:600;color:#1F2937;font-size:.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .qi-sz{color:#2F5FD0;font-size:.85rem;font-weight:600;white-space:nowrap}
 .qi-tag{margin-left:auto;font-size:.68rem;color:#6B7280;background:#E9EDF4;border-radius:6px;padding:2px 7px;white-space:nowrap}
-.qi-cell{height:34px;display:flex;align-items:center;justify-content:center}
+.qi-cell{height:38px;display:flex;align-items:center;justify-content:center}
 .qi-uom{font-weight:600;font-size:.8rem;color:#374151;background:#EEF1F6;border-radius:6px;padding:2px 10px}
-.qi-stk{font-weight:700;font-size:.9rem;color:#1F2937}
-.qi-stk.zero{color:#B26A00}
-.qi-stk.over{color:#C62828}
+.qi-stk{display:inline-block;min-width:64px;text-align:center;font-weight:700;font-size:.9rem;color:#1F2937;background:#EEF2F7;border:1px solid #E1E7F0;border-radius:8px;padding:7px 12px}
+.qi-stk.zero{color:#8A5A00;background:#FFF1C9;border-color:#F0D58C}
+.qi-stk.low{color:#9A5B00;background:#FFF3D6;border-color:#F0CF85}
+.qi-side{background:#FFFFFF;border:1px solid #D6E3F5;border-top:4px solid #0B1F4D;border-radius:14px;padding:14px 16px;box-shadow:0 6px 20px rgba(11,31,77,.08);margin-bottom:10px}
+.qi-side-h{font-weight:800;color:#0B1F4D;font-size:1rem;margin-bottom:10px}
+.qi-side-kpis{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}
+.qi-kpi{background:#EAF3FF;border-radius:10px;padding:8px 10px;text-align:center}
+.qi-kpi b{display:block;font-size:1.55rem;color:#0B1F4D;line-height:1.1}
+.qi-kpi span{font-size:.7rem;color:#5B6B86;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+.qi-side-row{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px dashed #E2EAF6;font-size:.85rem}
+.qi-side-row span{color:#5B6B86}
+.qi-side-row b{color:#0B1F4D;text-align:right}
+.qi-side-ok{margin-top:10px;color:#0F5E33;background:#E6F6EC;border-radius:8px;padding:7px 10px;font-weight:700;font-size:.82rem}
+.qi-side-alert{margin-top:10px;color:#9A1F1F;background:#FDECEC;border-radius:8px;padding:7px 10px;font-weight:700;font-size:.82rem}
+[data-testid="stColumn"]:has(.qi-side),[data-testid="column"]:has(.qi-side){position:sticky;top:64px;align-self:flex-start}
+.qi-stk.over{color:#B42318;background:#FDECEC;border-color:#F3B5B5}
 .st-key-qi_head{background:#FFFFFF;padding:0 9px 4px 9px;position:sticky;top:0;z-index:30}
 [data-testid="stLayoutWrapper"]:has(> .st-key-qi_head){position:sticky;top:0;z-index:30;background:#FFFFFF}
 .st-key-qi_head [data-testid="stHorizontalBlock"]{gap:8px}
-.st-key-qi_rows{max-width:1160px}
 [class*="st-key-qi_row_"] [data-testid="stSelectbox"]{margin:0!important}
 [class*="st-key-qi_row_"] [data-baseweb="select"] > div{min-height:34px!important;height:34px!important;border:1px solid #9AA8C2!important;border-radius:8px;background:#FFFFFF!important;font-size:.82rem}
-.qi-rate{font-weight:700;font-size:.85rem;color:#1F2937}
-.qi-rate.off{font-weight:500;color:#9AA3B5;font-size:.75rem}
-.qi-head{background:#EEF1F6;color:#4B5563;font-weight:700;font-size:.76rem;letter-spacing:.02em;border-radius:8px;height:28px;display:flex;align-items:center;justify-content:center;padding:0 10px}
+.qi-rate{display:inline-block;min-width:64px;text-align:center;font-weight:700;font-size:.85rem;color:#1F2937;background:#EEF2F7;border:1px solid #E1E7F0;border-radius:8px;padding:7px 12px}
+.qi-rate.off{font-weight:500;color:#9AA3B5;font-size:.75rem;background:transparent;border:0;min-width:0;padding:0}
+.qi-head{background:#E8F0FC;color:#17325F;border:1px solid #D3E1F5;box-sizing:border-box;font-weight:800;font-size:.78rem;letter-spacing:.03em;border-radius:8px;height:34px;display:flex;align-items:center;justify-content:center;padding:0 10px}
 .qi-head.l{justify-content:flex-start}
-.qi-serial{display:inline-flex;align-items:center;justify-content:center;min-width:28px;height:26px;border-radius:13px;background:#2F5FD0;color:#FFFFFF;font-weight:700;font-size:.9rem}
+.qi-serial{display:inline-flex;align-items:center;justify-content:center;min-width:28px;height:26px;border-radius:13px;background:#0B1F4D;color:#FFFFFF;font-weight:700;font-size:.9rem}
 .qi-serial.off{background:transparent;color:#9AA3B5}
 /* the qty list is its own scroll box: wheel over it scrolls ONLY the list (page stays), box fits the screen so Save stays reachable */
 .st-key-qi_rows,[data-testid="stVerticalBlockBorderWrapper"]:has(> .st-key-qi_rows),[data-testid="stVerticalBlockBorderWrapper"]:has(.st-key-qi_rows){overscroll-behavior:contain}
@@ -16375,7 +16503,9 @@ def _ri_quick_form():
     _ri_chips([("⚡", "Quick Issue - regular item auto", "teal"), ("📍", fac, ""), ("✍️", "Shudhu qty likhun", ""),
                ("🔁", "Stock kom hole onno unit theke auto-transfer", "")])
     with _ri_card("qi_hdr"):
-        _ri_step(1, "Slip details", "Requisition no., tarikh, dhoron ar section")
+        st.markdown(f"<div class='qi-ch'><span class='qi-ch-ic'>🧾</span><span class='qi-ch-t'>Slip details</span>"
+                    f"<span class='qi-ch-pill'>Total Items : {len(reg)}</span></div>"
+                    "<div class='qi-ch-sub'>Requisition no., tarikh, dhoron ar section</div>", unsafe_allow_html=True)
         c1, c2, c3, c4 = st.columns([1, 1, 1.1, 1.3])
         sr_no = c1.text_input("Requisition No. (SR No.) *", key=f"qi_sr_{gen}", placeholder="e.g. 1745").strip()
         tx_date, date_ok = _tx_date_pick(c2, "qi_dt", gen, "qi_date", "Issue", sticky=True)
@@ -16410,146 +16540,152 @@ def _ri_quick_form():
     _mc_labs = {f"{m['mc_no']}" + (f" · {m['machine_no']}" if m.get("machine_no") else "")
                 + (f" · {m['machine_name']}" if m.get("machine_name") else ""): int(m["id"]) for m in _mc_all}
     _mc_rev = {v: k for k, v in _mc_labs.items()}
-    with _ri_card("qi_items"):
-        _ri_step(2, "Qty din", f"{len(reg)} ti regular item - je item issue hobe shudhu tar 'Issue Qty' likhun. Serial auto (prothom qty = 1, tarpor 2, 3...). "
-                               "Rate nei hole qty dile Rate box ashe; UOM vul hole dropdown theke bodlan; M/C-er mal hole qty dile M/C dropdown ashe.")
-        import html as _html
-        st.markdown(_QI_CSS, unsafe_allow_html=True)
-        gvals, bad_qty, ph_ = {}, [], {}
-        rate_of, bad_rate, mc_sel, uom_of = {}, [], {}, {}
-        with st.container(height=min(56 + 47 * len(reg), 720), key="qi_rows"):
-            with st.container(key="qi_head"):
-                _hc = st.columns(_QI_COLS)
-                for _i, (_c, _t) in enumerate(zip(_hc, ["Item · Size", "Issue Qty ✍️", "UOM", "Stock", "Rate", "M/C", "Serial"])):
-                    _c.markdown(f"<div class='qi-head{' l' if _i == 0 else ''}'>{_t}</div>", unsafe_allow_html=True)
-            for r in reg:
-                sl_ = int(r["sl_no"])
-                stk_ = float(eff.get(sl_, r["stock"]))
-                with st.container(key=f"qi_row_{gen}_{sl_}"):
-                    cc = st.columns(_QI_COLS)
-                    raw_ = cc[1].text_input("Issue Qty", placeholder="qty", key=f"qi_q_{gen}_{sl_}", label_visibility="collapsed",
-                                            help="Qty likhe Enter chapun. .3 / 0.3 / 2 shob cholbe.")
-                    qv_, qe_ = _qi_parse_qty(raw_)
-                    if qe_:
-                        bad_qty.append(f"{r['item_name']} [{r['size'] or '-'}] ('{raw_}')")
-                    ph_[sl_] = cc[6].empty()
-                    _nm = _html.escape(str(r['item_name']))
-                    _sz = _html.escape(str(r['size'])) if r["size"] else ""
-                    cc[0].markdown(f"<div class='qi-name' title='{_nm} {_sz}'><span class='qi-item'>{_nm}</span>"
-                                   + (f"<span class='qi-sz'>{_sz}</span>" if _sz else "")
-                                   + ("" if r.get("own") else "<span class='qi-tag'>onno unit</span>") + "</div>", unsafe_allow_html=True)
-                    _cu = str(r["unit"] or "Pcs")
-                    _uk = f"qi_u_{gen}_{sl_}"
-                    if _uk not in st.session_state:
-                        st.session_state[_uk] = _cu
-                    cc[2].selectbox("unit", uoms if _cu in uoms else uoms + [_cu], key=_uk, label_visibility="collapsed", disabled=not can_write,
-                                    on_change=_qi_uom_changed, args=(fac, sl_, _uk, str(r["item_name"]), _cu),
-                                    help="UOM vul thakle ekhanei bodlan - sathe sathe item-e final save hoye jay.")
-                    uom_of[sl_] = st.session_state.get(_uk, _cu)
-                    _over = qv_ is not None and qv_ > stk_ + 1e-9
-                    _kls = "over" if _over else ("zero" if stk_ <= 0 else "")
-                    cc[3].markdown(f"<div class='qi-cell'><span class='qi-stk {_kls}'>{stk_:g}</span></div>", unsafe_allow_html=True)
-                    _pr = float(r["price"] or 0)
-                    if _pr > 0:
-                        rate_of[sl_] = _pr
-                        cc[4].markdown(f"<div class='qi-cell'><span class='qi-rate'>৳{_pr:g}</span></div>", unsafe_allow_html=True)
-                    elif qv_ and qv_ > 0:
-                        _rraw = cc[4].text_input("rate", placeholder="rate", key=f"qi_r_{gen}_{sl_}", label_visibility="collapsed",
-                                                 help="Ei item-er Rate age deya hoyni - Rate din, eta-i item-er Rate hishebe save hobe.")
-                        _rv, _re = _qi_parse_qty(_rraw)
-                        if _re:
-                            bad_rate.append(f"{r['item_name']} [{r['size'] or '-'}] ('{_rraw}')")
-                        rate_of[sl_] = _rv or 0.0
-                    else:
-                        rate_of[sl_] = 0.0
-                        cc[4].markdown("<div class='qi-cell'><span class='qi-rate off'>rate nei</span></div>", unsafe_allow_html=True)
-                    if _mc_labs and ttype == "Issued" and qv_ and qv_ > 0:
-                        _mpk = cc[5].selectbox("mc", ["— M/C —"] + list(_mc_labs), key=f"qi_m_{gen}_{sl_}", label_visibility="collapsed",
-                                               disabled=not can_write,
-                                               help="Kon machine-er jonno mal jachche - M/C-wise cost report-e auto jabe. Production-e sorasori issue hole fanka rakhun.")
-                        if _mpk != "— M/C —":
-                            mc_sel[sl_] = _mc_labs[_mpk]
-                    else:
-                        cc[5].markdown("<div class='qi-cell'><span class='qi-rate off'>—</span></div>", unsafe_allow_html=True)
-                    gvals[sl_] = (0.0 if qv_ is None else float(qv_), None)
-    # ---- regular list-e nei emon (uncommon) item: ei-i slip-e jog korun, alada SR lagbe na
-    extras = st.session_state.setdefault("qi_extra", [])
-    ex, effx = {}, {}
-    with st.expander(f"➕ Regular list-e nei emon item ei slip-e jog korun ({len(extras)} ti jog hoyeche)", expanded=bool(extras)):
-        _have = {int(r["sl_no"]) for r in reg} | {int(x) for x in extras}
-        e1, e2, e3, e4 = st.columns([1.5, 3, 0.9, 0.9])
-        xterm = e1.text_input("🔍 Nam / code / size", key=f"qi_xt_{gen}").strip()
-        xc = [r for r in (search_items(fac, xterm)[:30] if len(xterm) >= 2 else []) if int(r["sl_no"]) not in _have]
-        xl = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · stock {float(r['stock']):g}": int(r["sl_no"]) for r in xc}
-        e2.selectbox(f"Item ({len(xl)} ti)" if xl else "Item", list(xl) if xl else ["— age nam likhe khujun —"], key=f"qi_xp_{gen}")
-        e3.text_input("Qty", key=f"qi_xq0_{gen}", placeholder="qty")
+    colL, colR = st.columns([3.7, 1.1], gap="medium")
+    with colL:
+        with _ri_card("qi_items"):
+            _bar_ph = st.empty()
+            st.markdown("<div class='qi-note'>Je item issue hobe shudhu tar 'Issue Qty' likhun. SL auto: prothom qty = 1, tarpor 2, 3... "
+                        "Rate nei hole qty dile Rate box ashe; UOM vul hole dropdown theke bodlan; M/C-er mal hole qty dile M/C dropdown ashe.</div>",
+                        unsafe_allow_html=True)
+            import html as _html
+            st.markdown(_QI_CSS, unsafe_allow_html=True)
+            gvals, bad_qty, ph_ = {}, [], {}
+            rate_of, bad_rate, mc_sel, uom_of = {}, [], {}, {}
+            with st.container(height=min(56 + 47 * len(reg), 720), key="qi_rows"):
+                with st.container(key="qi_head"):
+                    _hc = st.columns(_QI_COLS)
+                    for _i, (_c, _t) in enumerate(zip(_hc, ["SL", "Item · Size", "Issue Qty ✍️", "UOM", "Stock", "Rate", "M/C"])):
+                        _c.markdown(f"<div class='qi-head{' l' if _i == 1 else ''}'>{_t}</div>", unsafe_allow_html=True)
+                for r in reg:
+                    sl_ = int(r["sl_no"])
+                    stk_ = float(eff.get(sl_, r["stock"]))
+                    with st.container(key=f"qi_row_{gen}_{sl_}"):
+                        cc = st.columns(_QI_COLS)
+                        raw_ = cc[2].text_input("Issue Qty", placeholder="qty", key=f"qi_q_{gen}_{sl_}", label_visibility="collapsed",
+                                                help="Qty likhe Enter chapun. .3 / 0.3 / 2 shob cholbe.")
+                        qv_, qe_ = _qi_parse_qty(raw_)
+                        if qe_:
+                            bad_qty.append(f"{r['item_name']} [{r['size'] or '-'}] ('{raw_}')")
+                        ph_[sl_] = cc[0].empty()
+                        _nm = _html.escape(str(r['item_name']))
+                        _sz = _html.escape(str(r['size'])) if r["size"] else ""
+                        cc[1].markdown(f"<div class='qi-name' title='{_nm} {_sz}'><span class='qi-item'>{_nm}</span>"
+                                       + (f"<span class='qi-sz'>{_sz}</span>" if _sz else "")
+                                       + ("" if r.get("own") else "<span class='qi-tag'>onno unit</span>") + "</div>", unsafe_allow_html=True)
+                        _cu = str(r["unit"] or "Pcs")
+                        _uk = f"qi_u_{gen}_{sl_}"
+                        if _uk not in st.session_state:
+                            st.session_state[_uk] = _cu
+                        cc[3].selectbox("unit", uoms if _cu in uoms else uoms + [_cu], key=_uk, label_visibility="collapsed", disabled=not can_write,
+                                        on_change=_qi_uom_changed, args=(fac, sl_, _uk, str(r["item_name"]), _cu),
+                                        help="UOM vul thakle ekhanei bodlan - sathe sathe item-e final save hoye jay.")
+                        uom_of[sl_] = st.session_state.get(_uk, _cu)
+                        _over = qv_ is not None and qv_ > stk_ + 1e-9
+                        _mn = float(r.get("min_stock") or 0)
+                        _kls = "over" if _over else ("zero" if stk_ <= 0 else ("low" if _mn > 0 and stk_ <= _mn else ""))
+                        cc[4].markdown(f"<div class='qi-cell'><span class='qi-stk {_kls}' title='Min stock: {_mn:g}'>"
+                                       f"{'⚠ ' if _kls == 'low' else ''}{stk_:g}</span></div>", unsafe_allow_html=True)
+                        _pr = float(r["price"] or 0)
+                        if _pr > 0:
+                            rate_of[sl_] = _pr
+                            cc[5].markdown(f"<div class='qi-cell'><span class='qi-rate'>৳{_pr:g}</span></div>", unsafe_allow_html=True)
+                        elif qv_ and qv_ > 0:
+                            _rraw = cc[5].text_input("rate", placeholder="rate", key=f"qi_r_{gen}_{sl_}", label_visibility="collapsed",
+                                                     help="Ei item-er Rate age deya hoyni - Rate din, eta-i item-er Rate hishebe save hobe.")
+                            _rv, _re = _qi_parse_qty(_rraw)
+                            if _re:
+                                bad_rate.append(f"{r['item_name']} [{r['size'] or '-'}] ('{_rraw}')")
+                            rate_of[sl_] = _rv or 0.0
+                        else:
+                            rate_of[sl_] = 0.0
+                            cc[5].markdown("<div class='qi-cell'><span class='qi-rate off'>rate nei</span></div>", unsafe_allow_html=True)
+                        if _mc_labs and ttype == "Issued" and qv_ and qv_ > 0:
+                            _mpk = cc[6].selectbox("mc", ["— M/C —"] + list(_mc_labs), key=f"qi_m_{gen}_{sl_}", label_visibility="collapsed",
+                                                   disabled=not can_write,
+                                                   help="Kon machine-er jonno mal jachche - M/C-wise cost report-e auto jabe. Production-e sorasori issue hole fanka rakhun.")
+                            if _mpk != "— M/C —":
+                                mc_sel[sl_] = _mc_labs[_mpk]
+                        else:
+                            cc[6].markdown("<div class='qi-cell'><span class='qi-rate off'>—</span></div>", unsafe_allow_html=True)
+                        gvals[sl_] = (0.0 if qv_ is None else float(qv_), None)
+        # ---- regular list-e nei emon (uncommon) item: ei-i slip-e jog korun, alada SR lagbe na
+        extras = st.session_state.setdefault("qi_extra", [])
+        ex, effx = {}, {}
+        with st.expander(f"➕ Regular list-e nei emon item ei slip-e jog korun ({len(extras)} ti jog hoyeche)", expanded=bool(extras)):
+            _have = {int(r["sl_no"]) for r in reg} | {int(x) for x in extras}
+            e1, e2, e3, e4 = st.columns([1.5, 3, 0.9, 0.9])
+            xterm = e1.text_input("🔍 Nam / code / size", key=f"qi_xt_{gen}").strip()
+            xc = [r for r in (search_items(fac, xterm)[:30] if len(xterm) >= 2 else []) if int(r["sl_no"]) not in _have]
+            xl = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · stock {float(r['stock']):g}": int(r["sl_no"]) for r in xc}
+            e2.selectbox(f"Item ({len(xl)} ti)" if xl else "Item", list(xl) if xl else ["— age nam likhe khujun —"], key=f"qi_xp_{gen}")
+            e3.text_input("Qty", key=f"qi_xq0_{gen}", placeholder="qty")
 
-        def _add_x():
-            pk = st.session_state.get(f"qi_xp_{gen}")
-            qv_, _qe = _qi_parse_qty(st.session_state.get(f"qi_xq0_{gen}"))
-            if pk in xl and qv_ and qv_ > 0:
-                sl_ = xl[pk]
-                st.session_state["qi_extra"] = list(st.session_state.get("qi_extra", [])) + [sl_]
-                st.session_state[f"qi_xq_{gen}_{sl_}"] = f"{qv_:g}"
-                st.session_state[f"qi_xt_{gen}"] = ""
-                st.session_state[f"qi_xq0_{gen}"] = ""
-            else:
-                st.session_state["qi_xmsg"] = "Item bachun ar qty 0-r beshi din."
-        e4.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
-        e4.button("➕ Jog", key=f"qi_xadd_{gen}", on_click=_add_x, use_container_width=True)
-        _xm = st.session_state.pop("qi_xmsg", None)
-        if _xm:
-            st.error(_xm)
-        if extras:
-            ex = {int(r["sl_no"]): r for r in q("""SELECT sl_no, COALESCE(prod_id,'') AS prod_id, COALESCE(item_name,'') AS item_name, COALESCE(size,'') AS size,
-                                                        COALESCE(current_stock,0) AS stock, COALESCE(NULLIF(TRIM(unit_name),''),'Pcs') AS unit,
-                                                        COALESCE(unit_price,0) AS price
-                                                 FROM inventory WHERE factory_name=%s AND sl_no = ANY(%s)""", (fac, [int(x) for x in extras]))}
-            effx = {}
-            if tx_date < local_now().date():
-                try:
-                    effx = stock_asof_many(fac, [int(x) for x in extras], tx_date, cached=True)
-                except Exception:
-                    effx = {}
-            for sl_ in list(extras):
-                r = ex.get(int(sl_))
-                if not r:
-                    continue
-                x1, x2, xs, x3, xu, xr, xm, x4 = st.columns([2.4, 0.7, 0.7, 1.0, 1.1, 0.9, 1.5, 0.5])
-                x1.write(f"{r['item_name']} [{r['size'] or '-'}]")
-                x2.write(f"stock {float(effx.get(int(sl_), r['stock'])):g}")
-                ph_[int(sl_)] = xs.empty()
-                x3.text_input("q", key=f"qi_xq_{gen}_{sl_}", label_visibility="collapsed", placeholder="qty")
-                _xcu = str(r["unit"] or "Pcs")
-                _xuk = f"qi_xu_{gen}_{sl_}"
-                if _xuk not in st.session_state:
-                    st.session_state[_xuk] = _xcu
-                xu.selectbox("unit", uoms if _xcu in uoms else uoms + [_xcu], key=_xuk, label_visibility="collapsed", disabled=not can_write,
-                             on_change=_qi_uom_changed, args=(fac, int(sl_), _xuk, str(r["item_name"]), _xcu),
-                             help="UOM vul thakle ekhanei bodlan.")
-                uom_of[int(sl_)] = st.session_state.get(_xuk, _xcu)
-                _xpr = float(r["price"] or 0)
-                if _xpr > 0:
-                    xr.write(f"৳{_xpr:g}")
-                    rate_of[int(sl_)] = _xpr
+            def _add_x():
+                pk = st.session_state.get(f"qi_xp_{gen}")
+                qv_, _qe = _qi_parse_qty(st.session_state.get(f"qi_xq0_{gen}"))
+                if pk in xl and qv_ and qv_ > 0:
+                    sl_ = xl[pk]
+                    st.session_state["qi_extra"] = list(st.session_state.get("qi_extra", [])) + [sl_]
+                    st.session_state[f"qi_xq_{gen}_{sl_}"] = f"{qv_:g}"
+                    st.session_state[f"qi_xt_{gen}"] = ""
+                    st.session_state[f"qi_xq0_{gen}"] = ""
                 else:
-                    _xraw = xr.text_input("rate", placeholder="rate", key=f"qi_xr_{gen}_{sl_}", label_visibility="collapsed",
-                                          help="Ei item-er Rate age deya hoyni - Rate din.")
-                    _xrv, _xre = _qi_parse_qty(_xraw)
-                    if _xre:
-                        bad_rate.append(f"{r['item_name']} [{r['size'] or '-'}] ('{_xraw}')")
-                    rate_of[int(sl_)] = _xrv or 0.0
-                if _mc_labs and ttype == "Issued":
-                    _xpk = xm.selectbox("mc", ["— M/C —"] + list(_mc_labs), key=f"qi_xm_{gen}_{sl_}", label_visibility="collapsed", disabled=not can_write)
-                    if _xpk != "— M/C —":
-                        mc_sel[int(sl_)] = _mc_labs[_xpk]
-                if x4.button("✖", key=f"qi_xrm_{gen}_{sl_}", help="Ei item bad din"):
-                    extras.remove(sl_)
-                    st.session_state["qi_extra"] = extras
+                    st.session_state["qi_xmsg"] = "Item bachun ar qty 0-r beshi din."
+            e4.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
+            e4.button("➕ Jog", key=f"qi_xadd_{gen}", on_click=_add_x, use_container_width=True)
+            _xm = st.session_state.pop("qi_xmsg", None)
+            if _xm:
+                st.error(_xm)
+            if extras:
+                ex = {int(r["sl_no"]): r for r in q("""SELECT sl_no, COALESCE(prod_id,'') AS prod_id, COALESCE(item_name,'') AS item_name, COALESCE(size,'') AS size,
+                                                            COALESCE(current_stock,0) AS stock, COALESCE(NULLIF(TRIM(unit_name),''),'Pcs') AS unit,
+                                                            COALESCE(unit_price,0) AS price
+                                                     FROM inventory WHERE factory_name=%s AND sl_no = ANY(%s)""", (fac, [int(x) for x in extras]))}
+                effx = {}
+                if tx_date < local_now().date():
                     try:
-                        st.rerun(scope="fragment")
-                    except TypeError:
-                        st.rerun()
+                        effx = stock_asof_many(fac, [int(x) for x in extras], tx_date, cached=True)
+                    except Exception:
+                        effx = {}
+                for sl_ in list(extras):
+                    r = ex.get(int(sl_))
+                    if not r:
+                        continue
+                    x1, x2, xs, x3, xu, xr, xm, x4 = st.columns([2.4, 0.7, 0.7, 1.0, 1.1, 0.9, 1.5, 0.5])
+                    x1.write(f"{r['item_name']} [{r['size'] or '-'}]")
+                    x2.write(f"stock {float(effx.get(int(sl_), r['stock'])):g}")
+                    ph_[int(sl_)] = xs.empty()
+                    x3.text_input("q", key=f"qi_xq_{gen}_{sl_}", label_visibility="collapsed", placeholder="qty")
+                    _xcu = str(r["unit"] or "Pcs")
+                    _xuk = f"qi_xu_{gen}_{sl_}"
+                    if _xuk not in st.session_state:
+                        st.session_state[_xuk] = _xcu
+                    xu.selectbox("unit", uoms if _xcu in uoms else uoms + [_xcu], key=_xuk, label_visibility="collapsed", disabled=not can_write,
+                                 on_change=_qi_uom_changed, args=(fac, int(sl_), _xuk, str(r["item_name"]), _xcu),
+                                 help="UOM vul thakle ekhanei bodlan.")
+                    uom_of[int(sl_)] = st.session_state.get(_xuk, _xcu)
+                    _xpr = float(r["price"] or 0)
+                    if _xpr > 0:
+                        xr.write(f"৳{_xpr:g}")
+                        rate_of[int(sl_)] = _xpr
+                    else:
+                        _xraw = xr.text_input("rate", placeholder="rate", key=f"qi_xr_{gen}_{sl_}", label_visibility="collapsed",
+                                              help="Ei item-er Rate age deya hoyni - Rate din.")
+                        _xrv, _xre = _qi_parse_qty(_xraw)
+                        if _xre:
+                            bad_rate.append(f"{r['item_name']} [{r['size'] or '-'}] ('{_xraw}')")
+                        rate_of[int(sl_)] = _xrv or 0.0
+                    if _mc_labs and ttype == "Issued":
+                        _xpk = xm.selectbox("mc", ["— M/C —"] + list(_mc_labs), key=f"qi_xm_{gen}_{sl_}", label_visibility="collapsed", disabled=not can_write)
+                        if _xpk != "— M/C —":
+                            mc_sel[int(sl_)] = _mc_labs[_xpk]
+                    if x4.button("✖", key=f"qi_xrm_{gen}_{sl_}", help="Ei item bad din"):
+                        extras.remove(sl_)
+                        st.session_state["qi_extra"] = extras
+                        try:
+                            st.rerun(scope="fragment")
+                        except TypeError:
+                            st.rerun()
     sel, ser = [], {}
     for r in reg:
         qv, sv = gvals.get(int(r["sl_no"]), (0.0, None))
@@ -16569,6 +16705,8 @@ def _ri_quick_form():
     ser = {sl: _order.index(sl) + 1 for sl in _active}
     sel.sort(key=lambda t: ser[int(t[0]["sl_no"])])
     dup_ser = []
+    _bar_ph.markdown(f"<div class='qi-bar'><span class='bolt'>⚡</span><span class='t'>Quick Issue – Regular Items</span>"
+                     f"<span class='r'>{len(reg)} items · {len(sel)} selected</span></div>", unsafe_allow_html=True)
     for _sl, _ph in ph_.items():
         _n = ser.get(_sl)
         _ph.markdown(f"<div class='qi-cell'><span class='qi-serial'>{_n}</span></div>" if _n
@@ -16635,10 +16773,22 @@ def _ri_quick_form():
     if sel and _mc_labs and ttype == "Issued":          # machine-wise issue (same check as the 📤 Issue tab)
         _mlines = [{"sl": int(r["sl_no"]), "name": r["item_name"], "size": r["size"]} for r, _, _ in sel]
         _mc_map, _mc_err = _mc_lines_check(fac, _mlines, [False] * len(_mlines), mc_sel, _mc_msl, tx_date, ttype, True)
-    f1, f2 = st.columns([2.4, 2.2])
-    _ri_chips([("📋", f"{len(sel)} item", ""), ("🔢", f"Qty {sum(qv for _, qv, _ in sel):g}", "")]
-              + ([] if can_write else [("🔒", "Login required to save", "red")]), target=f1)
-    if f2.button("💾 Issue save korun", type="primary", key=f"qi_save_{gen}", use_container_width=True, disabled=not can_write):
+    _tq = sum(qv for _, qv, _ in sel)
+    _alerts = len(short) + len(no_rate) + len(bad_qty) + len(bad_rate)
+    _sr = lambda k, v: f"<div class='qi-side-row'><span>{k}</span><b>{_html.escape(str(v))}</b></div>"
+    colR.markdown("<div class='qi-side'><div class='qi-side-h'>📋 Issue Summary</div>"
+                  f"<div class='qi-side-kpis'><div class='qi-kpi'><b>{len(sel)}</b><span>Items</span></div>"
+                  f"<div class='qi-kpi'><b>{_tq:g}</b><span>Total Qty</span></div></div>"
+                  + _sr("SR No.", sr_no or "—") + _sr("Date", f"{tx_date:%d-%b-%Y}" if date_ok else "— bachai korun —")
+                  + _sr("Type", TRANS_LABELS.get(ttype, ttype)) + _sr("Section", section or "—") + _sr("Unit", fac)
+                  + (f"<div class='qi-side-alert'>⚠ {_alerts} ti shomossha - bam-e lal message dekhun</div>" if _alerts
+                     else ("<div class='qi-side-ok'>✔ Shob thik ache - Save korte paren</div>" if sel else ""))
+                  + "</div>", unsafe_allow_html=True)
+    if not can_write:
+        _ri_chips([("🔒", "Login required to save", "red")], target=colR)
+    _b1, _b2 = colR.columns([1.7, 1])
+    _b2.button("🧹 Clear", key="qi_clear", on_click=_qi_clear, args=(gen,), use_container_width=True)
+    if _b1.button("💾 Issue save korun", type="primary", key=f"qi_save_{gen}", use_container_width=True, disabled=not can_write):
         if not date_ok:
             st.error("Issue-er TARIKH bachai korun (Aaj / Gotokal / Onno tarikh) - tarpor Save korun.")
         elif not sr_no:
