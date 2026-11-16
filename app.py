@@ -7714,12 +7714,15 @@ def req_import_view():
                 _new_names.append(p["item"] + (f" [{p['size']}]" if p.get("size") else ""))
             else:
                 p["inventory"] = "NOT in inventory - NOT created (tick the box above)"
+    if ok_rows and "CONSOLIDATED" not in str(FAC):
+        _wr_req_import_box(FAC, ok_rows)      # warranty check of the imported lines (read-only)
     st.caption(f"Lines to import: {len(ok_rows)} | Skipped/already: {len(parsed) - len(ok_rows)}"
                + (f" | New inventory items: {len(_new_names)}" if _new_names else ""))
     st.dataframe(pd.DataFrame(parsed).drop(columns=["cat_hint"], errors="ignore"), hide_index=True, use_container_width=True)
     if st.button("✅ Import requisition", type="primary", disabled=not (ok_rows and sim_ack and bc_ok), key="req_import_btn"):
         n = import_requisition(FAC, ok_rows, create)
         if n is not None:
+            _wr_after_import(FAC, ok_rows)
             done(f"Requisition import done: {len(ok_rows)} line(s), new inventory items {n}"
                  + (f" ({', '.join(_new_names[:6])}{'...' if len(_new_names) > 6 else ''})" if _new_names else "")
                  + ". Audit approved qty 0 - Officer / Manager approve korbe.")
@@ -16769,6 +16772,8 @@ def _ri_quick_form():
             pass
     else:
         need_names = []
+    if sel:
+        _wr_issue_alert(fac, [(int(r["sl_no"]), r["item_name"], r["size"]) for r, _, _ in sel], tx_date, ttype)      # warranty reminder (read-only)
     _mc_map, _mc_err = {}, ""
     if sel and _mc_labs and ttype == "Issued":          # machine-wise issue (same check as the 📤 Issue tab)
         _mlines = [{"sl": int(r["sl_no"]), "name": r["item_name"], "size": r["size"]} for r, _, _ in sel]
@@ -17063,6 +17068,7 @@ def _ri_form():
                                key=f"ri_ver_{gen}")
     _mc_map, _mc_err = _mc_lines_check(fac, lines, pflags, mc_sel, _mc_msl, tx_date, ttype, bool(_mc_labs))      # machine (Maintenance items only)
     _sb_issue_warn(fac, section, tx_date, sum(q_ * r_ for q_, r_, pf_ in zip(qtys, rates, pflags) if not pf_), ttype)   # section monthly limit
+    _wr_issue_alert(fac, [(int(ln["sl"]), ln["name"], ln["size"]) for ln, pf_ in zip(lines, pflags) if not pf_], tx_date, ttype)   # warranty reminder (read-only)
     can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
     f1, f2, f3 = st.columns([2, 1.2, 2.2])
     _ri_chips([("📋", f"{len(lines)} lines", ""), ("🔢", f"Qty {sum(qtys):g}", "")]
@@ -25081,25 +25087,651 @@ def _wr_view_all(units, fac_ok):
                 done("✅ মোছা হয়েছে।")
 
 
-def tab_warranty():
-    st.markdown("#### 🛡 ওয়ারেন্টি ট্র্যাকিং")
+# ============================================================
+#  PAGE: 🛡 WARRANTY  (premium)  -  Challan -> tick only the items that carry warranty -> per-item period
+#  Later issue / requisition of the same item shows its warranty status right on the slip (see _wr_issue_alert).
+# ============================================================
+_WR_PILL = {"Active": ("#DCFCE7", "#166534", "✅ চালু"), "Expiring": ("#FEF3C7", "#92400E", "⏳ শীঘ্রই শেষ"),
+            "Expired": ("#E2E8F0", "#334155", "মেয়াদ শেষ"), "Claimed": ("#DBEAFE", "#1E40AF", "📨 দাবি করা"),
+            "Recovered": ("#CCFBF1", "#115E59", "💰 আদায়"), "Rejected": ("#FEE2E2", "#991B1B", "❌ বাতিল")}
+
+
+def ensure_wr_schema2():
+    conn = get_conn()
     try:
-        ext_schema()
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE warranty_records ADD COLUMN IF NOT EXISTS serial_no TEXT DEFAULT ''")
+            cur.execute("ALTER TABLE warranty_records ADD COLUMN IF NOT EXISTS claimed_qty REAL DEFAULT 0")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def wr_schema2():
+    ext_schema()
+    if not st.session_state.get("_wr_schema2_ready"):
+        run_once_per_process("wr_schema_v2", ensure_wr_schema2)
+        st.session_state["_wr_schema2_ready"] = True
+
+
+def _wr_status(cs, dl):
+    if cs in ("Claimed", "Recovered", "Rejected"):
+        return cs
+    if dl is None or pd.isna(dl):
+        return "Active"
+    return "Expired" if dl < 0 else ("Expiring" if dl <= 30 else "Active")
+
+
+def _wr_pill(key):
+    bg, fg, lab = _WR_PILL.get(key, ("#EEF2F7", "#475569", key))
+    return f"<span class='rpx-pill' style='background:{bg};color:{fg}'>{lab}</span>"
+
+
+def _wr_tbl(heads, rows, num=()):
+    """rows = lists of ready HTML cells (escape text with html_lib.escape before passing)."""
+    e = html_lib.escape
+    h = ["<div class='rpx-wrap'><div class='rpx-scroll'><table class='rpx'><tr>"]
+    for i, x in enumerate(heads):
+        h.append("<th class='n'>" if i in num else "<th>")
+        h.append(e(str(x)) + "</th>")
+    h.append("</tr>")
+    for r in rows:
+        h.append("<tr>")
+        for i, c in enumerate(r):
+            h.append("<td class='n'>" if i in num else "<td>")
+            h.append(str(c) + "</td>")
+        h.append("</tr>")
+    h.append("</table></div></div>")
+    return "".join(h)
+
+
+@tx
+def wr_add2(fac, recs):
+    user = st.session_state.get("user", "")
+    for r in recs:
+        run("""INSERT INTO warranty_records (factory_name, sl_no, prod_id, item_name, size, qty, supplier, challan, tx_id,
+               purchase_date, warranty_days, expiry_date, notes, serial_no, entered_by, created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (fac, r["sl"], r["code"], r["item"], r["size"], r["qty"], r["supplier"], r["challan"], r["tx_id"],
+             r["pdate"], r["days"], r["expiry"], r["notes"], r["serial"], user, _now_s()))
+    audit("WARRANTY_ADD", f"{fac}: {len(recs)} warranty lot(s): " + ", ".join(f"{r['item']} x{r['qty']:g} till {r['expiry']}" for r in recs[:10]))
+    return {"n": len(recs)}
+
+
+@tx
+def wr_set_claim_q(wid, fac, status, cdate, amount, note, cqty):
+    run("UPDATE warranty_records SET claim_status=%s, claim_date=%s, claim_amount=%s, claim_note=%s, claimed_qty=%s WHERE id=%s",
+        (status, cdate, float(amount or 0), note, float(cqty or 0), wid))
+    audit("WARRANTY_CLAIM", f"{fac}: warranty {wid} -> {status} qty {float(cqty or 0):g} amt {float(amount or 0):g} {note}")
+    return True
+
+
+def _wr_issue_stats(units, w):
+    """{warranty id: {n, q, dates, last}} - issues of the same item AFTER the lot's purchase date (and within its warranty)."""
+    if w.empty:
+        return {}
+    sls = sorted({int(x) for x in w["sl_no"].dropna()})
+    rows = q_c("SELECT factory_name, sl_no, date, COALESCE(qty,0) AS qty FROM transactions "
+               "WHERE factory_name = ANY(%s) AND sl_no = ANY(%s) AND trans_type = ANY(%s)", (list(units), sls, list(ISSUE_TYPES)))
+    ev = {}
+    for r in rows:
+        d = parse_date(r["date"])
+        if d:
+            ev.setdefault((r["factory_name"], int(r["sl_no"])), []).append((d.date(), float(r["qty"] or 0)))
+    out = {}
+    for r in w.to_dict("records"):
+        p, e_ = r.get("p"), r.get("e")
+        if p is None or pd.isna(p) or pd.isna(r.get("sl_no")):
+            out[int(r["id"])] = {"n": 0, "q": 0.0, "dates": [], "last": None}
+            continue
+        lst = sorted(x for x in ev.get((r["factory_name"], int(r["sl_no"])), [])
+                     if x[0] >= p.date() and (e_ is None or pd.isna(e_) or x[0] <= e_.date()))
+        out[int(r["id"])] = {"n": len(lst), "q": sum(q_ for _, q_ in lst), "dates": [d for d, _ in lst], "last": lst[-1][0] if lst else None}
+    return out
+
+
+def _wr_repeat_candidates(w, stats):
+    """Item-level (no machine needed): the same item issued again within MC_REPEAT_DAYS while the lot was under warranty."""
+    out = []
+    for r in w.to_dict("records"):
+        if r.get("claim_status") != "Not claimed" or pd.isna(r.get("days_left")) or r["days_left"] < 0:
+            continue
+        ds = stats.get(int(r["id"]), {}).get("dates", [])
+        for a, b in zip(ds, ds[1:]):
+            if (b - a).days <= MC_REPEAT_DAYS:
+                out.append((r, a, b))
+                break
+    return out
+
+
+def _wr_issue_alert(fac, items, tx_date, ttype):
+    """Shown on the issue slips. items = [(sl_no, name, size)]. Tells the store if an item being issued is under warranty
+    and whether it was already issued earlier in the warranty (-> this may be a replacement: claim from the supplier)."""
+    try:
+        if ttype not in ISSUE_TYPES or not items:
+            return
+        wr_schema2()
+        sls = sorted({int(x[0]) for x in items})
+        lots = q_c("SELECT id, sl_no, supplier, challan, purchase_date, expiry_date, qty, COALESCE(claimed_qty,0) AS cq, claim_status "
+                   "FROM warranty_records WHERE factory_name=%s AND sl_no = ANY(%s)", (fac, sls))
+        if not lots:
+            return
+        ref = tx_date.date() if isinstance(tx_date, datetime) else (tx_date if isinstance(tx_date, date) else local_now().date())
+        prior = {}
+        for r in q_c("SELECT sl_no, date FROM transactions WHERE factory_name=%s AND sl_no = ANY(%s) AND trans_type = ANY(%s)",
+                     (fac, sls, list(ISSUE_TYPES))):
+            d = parse_date(r["date"])
+            if d:
+                prior.setdefault(int(r["sl_no"]), []).append(d.date())
+        for sl, name, size in items:
+            act = []
+            for lo in lots:
+                if int(lo["sl_no"]) != int(sl) or lo["claim_status"] in ("Recovered", "Rejected"):
+                    continue
+                p, e_ = parse_date(lo["purchase_date"]), parse_date(lo["expiry_date"])
+                if p and e_ and p.date() <= ref <= e_.date():
+                    act.append((p.date(), e_.date(), lo))
+            if not act:
+                continue
+            p, e_, lo = sorted(act, key=lambda x: x[1])[-1]
+            earlier = sorted(d for d in prior.get(int(sl), []) if p <= d <= ref)
+            left = (e_ - ref).days
+            head = (f"🛡 **{name} [{size or '-'}]** — Challan {lo.get('challan') or '-'} · «{lo.get('supplier') or '-'}» · "
+                    f"{float(lo['qty']):g} pcs ওয়ারেন্টিতে, শেষ {e_:%d-%b-%Y} ({left} দিন বাকি)")
+            if len(act) > 1:
+                head += f" · আরও {len(act) - 1}টি lot চালু"
+            if earlier:
+                st.warning(head + f"\n\n⚠️ এই item ওয়ারেন্টির মধ্যে আগেও {len(earlier)} বার ইস্যু হয়েছে (শেষ {earlier[-1]:%d-%b-%Y}). "
+                                  "এটা নষ্ট মালের replacement হলে **supplier-এর কাছে দাবি করুন** → 🛡 Warranty → 🚨 দাবির সুযোগ।")
+            else:
+                st.info(head + " — এটি ওয়ারেন্টির মালের প্রথম ইস্যু।")
+    except Exception as ex:
+        st.caption(f"⚠️ Warranty তথ্য লোড হয়নি ({ex}) — Issue-এ কোনো সমস্যা নেই।")
+
+
+def _wr_kpi_strip(w):
+    if w.empty:
+        st.markdown(_px_kpis([("মোট Warranty Lot", "0", "এখনো যোগ হয়নি", "#13367F"), ("চালু", "0", "", "#16A34A"),
+                              ("৩০ দিনে শেষ", "0", "", "#D99A06"), ("মেয়াদ শেষ", "0", "", "#64748B"),
+                              ("আদায় (৳)", "0", "", "#0F766E")]), unsafe_allow_html=True)
+        return
+    st_ = [_wr_status(c, d) for c, d in zip(w["claim_status"], w["days_left"])]
+    act = sum(1 for s in st_ if s in ("Active", "Expiring"))
+    soon = sum(1 for s in st_ if s == "Expiring")
+    exp = sum(1 for s in st_ if s == "Expired")
+    rec = float(w.loc[w["claim_status"] == "Recovered", "claim_amount"].fillna(0).sum())
+    dq = float(w["qty"].fillna(0).sum())
+    st.markdown(_px_kpis([("মোট Warranty Lot", f"{len(w):,}", f"মোট Qty {dq:g}", "#13367F"), ("চালু", f"{act:,}", "মেয়াদের মধ্যে", "#16A34A"),
+                          ("৩০ দিনে শেষ", f"{soon:,}", "দ্রুত যাচাই করুন", "#D99A06"), ("মেয়াদ শেষ", f"{exp:,}", "", "#64748B"),
+                          ("আদায় (৳)", f"{rec:,.0f}", "Recovered দাবি", "#0F766E")]), unsafe_allow_html=True)
+
+
+def _wr_view_add_challan(fac):
+    import hashlib
+    e = html_lib.escape
+    st.markdown(_px_band("➕ ওয়ারেন্টি যোগ", "Challan বাছুন → যে item-এ ওয়ারেন্টি আছে শুধু সেগুলো টিক → প্রতিটির মেয়াদ → সেভ"), unsafe_allow_html=True)
+    days_back = st.selectbox("কত দিন আগের Challan", [30, 90, 180, 365], index=1, key="wr_back2")
+    rows = q("""SELECT t.id, t.sl_no, t.date, COALESCE(t.qty,0) AS qty, COALESCE(t.supplier_name,'') AS supplier,
+                       COALESCE(t.challan_no,'') AS challan, COALESCE(NULLIF(t.item_name,''), i.item_name,'') AS item,
+                       COALESCE(i.size,'') AS size, COALESCE(NULLIF(t.prod_id,''), i.prod_id,'') AS code,
+                       (SELECT COUNT(*) FROM warranty_records w WHERE w.tx_id=t.id) AS has
+                FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                WHERE t.factory_name=%s AND t.trans_type='Supplier. Rec' ORDER BY t.id DESC LIMIT 1500""", (fac,))
+    cutoff = local_now().date() - timedelta(days=int(days_back))
+    groups = {}
+    for r in rows:
+        d = parse_date(r["date"])
+        if not d or d.date() < cutoff:
+            continue
+        groups.setdefault((r["supplier"], r["challan"], r["date"]), []).append(r)
+    opts = {}
+    for (sup, ch, dt), lines in groups.items():
+        pend = [x for x in lines if not x["has"]]
+        if not pend:
+            continue
+        done_n = len(lines) - len(pend)
+        lab = f"{dt} · Challan {ch or '—'} · {sup or '—'} · {len(lines)} আইটেম" + (f" · 🛡 {done_n}টিতে দেওয়া আছে" if done_n else "")
+        opts[lab] = (sup, ch, dt, lines, pend)
+    if not opts:
+        st.info("এই সময়ে ওয়ারেন্টি দেওয়ার মতো কোনো Supplier Receipt Challan নেই।")
+        return
+    pick = st.selectbox(f"Challan ({len(opts)}টি) — সার্চ করে বাছুন", ["— Challan বাছুন —"] + list(opts), key="wr_challan_pick")
+    if pick not in opts:
+        st.caption("Challan বাছলে তার সব আইটেম নিচে আসবে — তখন শুধু ওয়ারেন্টিযুক্তগুলো টিক দিন। বাকিগুলো যেমন আছে তেমনই থাকবে।")
+        return
+    sup, ch, dt, lines, pend = opts[pick]
+    st.markdown(f"<div class='rpx-wrap' style='padding:14px 18px'><b style='color:#0A1F4D;font-size:16px'>Challan {e(ch or '—')}</b> "
+                f"<span class='rpx-chip'>{e(sup or '—')}</span> <span class='rpx-chip'>📅 {e(dt)}</span> "
+                f"<span class='rpx-chip'>মোট {len(lines)} আইটেম</span> <span class='rpx-chip'>ওয়ারেন্টি বাকি {len(pend)}টি</span></div>",
+                unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1, 1, 2])
+    dval = int(c1.number_input("ডিফল্ট মেয়াদ", min_value=1, value=6, step=1, key="wr_dval"))
+    dunit = c2.selectbox("ডিফল্ট একক", ["মাস", "দিন"], key="wr_dunit")
+    allt = c3.checkbox("এই Challan-এর সব আইটেমেই ওয়ারেন্টি আছে (শুরুতে সব টিক)", key="wr_allt")
+    df = pd.DataFrame([{"Warranty": bool(allt), "Item": r["item"], "Size": r["size"] or "-", "Qty": float(r["qty"]),
+                        "Warranty Qty": float(r["qty"]), "মেয়াদ": dval, "একক": dunit, "Serial / নোট": ""} for r in pend])
+    gk = hashlib.md5(pick.encode("utf-8")).hexdigest()[:10]
+    st.caption("✅ শুধু যে item-এ supplier ওয়ারেন্টি দিয়েছে সেগুলো টিক দিন। প্রতি item-এর মেয়াদ / Warranty Qty / Serial আলাদা বদলানো যায়।")
+    ed = st.data_editor(df, key=f"wr_ed_{gk}_{dval}_{dunit}_{int(bool(allt))}", hide_index=True, use_container_width=True,
+                        disabled=["Item", "Size", "Qty"],
+                        column_config={"Warranty": st.column_config.CheckboxColumn("🛡 Warranty?", default=False),
+                                       "Qty": st.column_config.NumberColumn("Received Qty", format="%g"),
+                                       "Warranty Qty": st.column_config.NumberColumn("Warranty Qty", min_value=0.0, format="%g", help="Receive-এর কতটুকুতে ওয়ারেন্টি"),
+                                       "মেয়াদ": st.column_config.NumberColumn("মেয়াদ", min_value=1, step=1, format="%d"),
+                                       "একক": st.column_config.SelectboxColumn("একক", options=["মাস", "দিন"]),
+                                       "Serial / নোট": st.column_config.TextColumn("Serial / নোট")})
+    ticked = [i for i in range(len(ed)) if bool(ed.iloc[i]["Warranty"])]
+    st.markdown(f"<div class='rpx-s'>টিক করা: <b>{len(ticked)}</b> / {len(pend)} আইটেম</div>", unsafe_allow_html=True)
+    if st.button("💾 ওয়ারেন্টি সেভ করুন", type="primary", key="wr_save2", disabled=not ticked) and guard():
+        recs, errs = [], []
+        for i in ticked:
+            r, x = pend[i], ed.iloc[i]
+            try:
+                wq, val, unit = float(x["Warranty Qty"]), int(x["মেয়াদ"]), str(x["একক"])
+            except Exception:
+                errs.append(f"{r['item']}: মেয়াদ / Qty সংখ্যা দিন")
+                continue
+            if wq <= 0 or wq > float(r["qty"]) + 1e-9:
+                errs.append(f"{r['item']}: Warranty Qty ১ থেকে Received Qty ({float(r['qty']):g})-এর মধ্যে হতে হবে")
+                continue
+            if val < 1:
+                errs.append(f"{r['item']}: মেয়াদ ১ বা বেশি দিন")
+                continue
+            d0 = parse_date(r["date"]).date()
+            exp = _add_months(d0, val) if unit == "মাস" else d0 + timedelta(days=val)
+            recs.append({"sl": int(r["sl_no"]), "code": r["code"], "item": r["item"], "size": r["size"], "qty": wq,
+                         "supplier": r["supplier"], "challan": r["challan"], "tx_id": int(r["id"]), "pdate": r["date"],
+                         "days": (exp - d0).days, "expiry": exp.strftime(DATE_FMT), "notes": "",
+                         "serial": str(x["Serial / নোট"] or "").strip()})
+        if errs:
+            for m in errs:
+                st.error(m)
+        elif wr_add2(fac, recs):
+            done(f"✅ {len(recs)}টি আইটেমের ওয়ারেন্টি সেভ হয়েছে (Challan {ch or '—'})।")
+
+
+def _wr_claim_editor(w, key):
+    if st.session_state.get("role") in NEW_RO_ROLES:
+        return
+    wf = w[w["factory_name"] == FAC]
+    with st.expander("✏️ দাবির অবস্থা আপডেট করুন / মুছুন"):
+        if wf.empty:
+            st.info("এই Unit-এ রেকর্ড নেই।")
+            return
+        labs = {f"#{r['id']} · {r['item_name']} · {r['supplier'] or '-'} · Challan {r['challan'] or '-'} · শেষ {r['expiry_date']}": r
+                for _, r in wf.iterrows()}
+        pick = st.selectbox("Warranty Lot", list(labs), key=key + "p")
+        r = labs[pick]
+        k = f"{key}{int(r['id'])}"
+        a, b, c, d_ = st.columns(4)
+        st_ = a.selectbox("অবস্থা", WR_STATUSES, index=WR_STATUSES.index(r["claim_status"]) if r["claim_status"] in WR_STATUSES else 0, key=k + "s")
+        tq = float(r["qty"] or 0)
+        cq = b.number_input(f"দাবির Qty (মোট {tq:g})", min_value=0.0, max_value=max(tq, 0.0), step=1.0,
+                            value=min(float(r.get("claimed_qty") or 0), tq), key=k + "q")
+        amt = c.number_input("আদায় / দাবির টাকা (৳)", min_value=0.0, step=100.0, value=float(r["claim_amount"] or 0), key=k + "a")
+        nt = d_.text_input("নোট", value=r["claim_note"] or "", key=k + "n")
+        x1, x2 = st.columns(2)
+        if x1.button("💾 সেভ", key=k + "b") and guard():
+            if wr_set_claim_q(int(r["id"]), FAC, st_, local_now().strftime(DATE_FMT) if st_ != "Not claimed" else None, amt, nt.strip(), cq):
+                done("✅ আপডেট হয়েছে।")
+        if st.session_state.get("role") == "Store Manager" and x2.button("🗑 মুছুন", key=k + "d") and guard():
+            if wr_delete(int(r["id"]), FAC, pick):
+                done("✅ মোছা হয়েছে।")
+
+
+def _wr_view_claims2(units, w):
+    e = html_lib.escape
+    st.markdown(_px_band("🚨 দাবির সুযোগ", "ওয়ারেন্টির মধ্যে একই মাল আবার লেগেছে কিনা — supplier-এর কাছে দাবি করার তালিকা"), unsafe_allow_html=True)
+    if w.empty:
+        st.info("এখনো কোনো ওয়ারেন্টি রেকর্ড নেই — '➕ ওয়ারেন্টি যোগ' থেকে Challan বেছে শুরু করুন।")
+        return
+    cand = _wr_candidates(units, w)
+    open_c = cand[cand["দাবির অবস্থা"] == "Not claimed"] if not cand.empty else cand
+    stats = _wr_issue_stats(units, w)
+    rep = _wr_repeat_candidates(w, stats)
+    k = st.columns(3)
+    k[0].metric("🎯 নিশ্চিত (একই মেশিনে আবার)", len(open_c))
+    k[1].metric("🔎 সম্ভাব্য (দ্রুত re-issue)", len(rep))
+    k[2].metric("দাবির সম্ভাব্য টাকা", f"৳{float(open_c['দাবির সম্ভাব্য টাকা (৳)'].sum()) if not open_c.empty else 0:,.0f}")
+    st.markdown("**🎯 নিশ্চিত — একই মেশিনে একই মাল ওয়ারেন্টির মধ্যে আবার ইস্যু**")
+    if cand.empty:
+        st.success("এখন এমন কিছু পাওয়া যায়নি। (Maintenance মাল ইস্যুর সময় মেশিন বাছলে এটা নিজে নিজে ধরা পড়ে।)")
+    else:
+        view = cand.drop(columns=["wid"]).sort_values("দাবির অবস্থা", key=lambda s: s.eq("Not claimed").map({True: 0, False: 1}), kind="stable")
+        heads = list(view.columns)
+        num = {i for i, c in enumerate(heads) if "টাকা" in c or "দিনে" in c}
+        st.markdown(_wr_tbl(heads, [[e(str(v)) for v in rw] for rw in view.itertuples(index=False)], num=num), unsafe_allow_html=True)
+        export_buttons(view, "warranty_claim_candidates", "Warranty claim candidates")
+    st.markdown("**🔎 সম্ভাব্য — মেশিন ট্যাগ ছাড়া, একই item কাছাকাছি সময়ে আবার ইস্যু** (যাচাই করে দাবি করুন)")
+    if not rep:
+        st.success("এখন এমন কিছু পাওয়া যায়নি।")
+    else:
+        rows = []
+        for r, a, b in rep:
+            rows.append([f"<b>{e(str(r['item_name']))}</b> <span class='rpx-chip'>{e(str(r['size'] or '-'))}</span>", e(str(r["supplier"] or "-")),
+                         e(str(r["challan"] or "-")), f"{a:%d-%b-%Y}", f"{b:%d-%b-%Y}", f"{(b - a).days}", e(str(r["expiry_date"])),
+                         f"{int(r['days_left'])}"])
+        st.markdown(_wr_tbl(["Item", "Supplier", "Challan", "আগের ইস্যু", "আবার ইস্যু", "ব্যবধান (দিন)", "ওয়ারেন্টি শেষ", "বাকি (দিন)"], rows, num={5, 7}),
+                    unsafe_allow_html=True)
+        st.caption("এটা আন্দাজ: একই item ২ বার কাছাকাছি সময়ে ইস্যু হয়েছে। সত্যিই নষ্ট মালের replacement হলে নিচ থেকে দাবির অবস্থা 'Claimed' করুন।")
+    soon = w[(w["days_left"] >= 0) & (w["days_left"] <= 30) & (w["claim_status"] == "Not claimed")]
+    if not soon.empty:
+        st.markdown("**⏳ ৩০ দিনের মধ্যে ওয়ারেন্টি শেষ হবে**")
+        s = soon.sort_values("days_left")
+        st.markdown(_wr_tbl(["Item", "Supplier", "Challan", "শেষ তারিখ", "বাকি (দিন)"],
+                            [[f"<b>{e(str(r.item_name))}</b> <span class='rpx-chip'>{e(str(r.size or '-'))}</span>", e(str(r.supplier or '-')),
+                              e(str(r.challan or '-')), e(str(r.expiry_date)), f"{int(r.days_left)}"] for r in s.itertuples()], num={4}),
+                    unsafe_allow_html=True)
+    if len(units) == 1:
+        _wr_claim_editor(w, "wrc_")
+
+
+def _wr_view_lots(units, w):
+    e = html_lib.escape
+    st.markdown(_px_band("📦 Lot-ভিত্তিক ট্র্যাকিং", "কোন Challan-এর কোন item, কতটুকুতে ওয়ারেন্টি, ক্রয়ের পর কতবার ইস্যু হয়েছে"), unsafe_allow_html=True)
+    if w.empty:
+        st.info("কোনো রেকর্ড নেই।")
+        return
+    f = st.radio("দেখান", ["সব", "চালু", "শীঘ্রই শেষ (৩০ দিন)", "মেয়াদ শেষ", "দাবি করা / আদায়"], horizontal=True, key="wr_filter2")
+    w = w.copy()
+    w["stat"] = [_wr_status(c, d) for c, d in zip(w["claim_status"], w["days_left"])]
+    v = w
+    if f == "চালু":
+        v = w[w["stat"].isin(["Active", "Expiring"])]
+    elif f.startswith("শীঘ্রই"):
+        v = w[w["stat"] == "Expiring"]
+    elif f == "মেয়াদ শেষ":
+        v = w[w["stat"] == "Expired"]
+    elif f.startswith("দাবি"):
+        v = w[w["claim_status"] != "Not claimed"]
+    stats = _wr_issue_stats(units, v)
+    show_unit = len(units) > 1
+    heads = (["Unit"] if show_unit else []) + ["Item", "Challan", "Supplier", "Warranty Qty", "ক্রয়", "ওয়ারেন্টি শেষ", "বাকি (দিন)", "অবস্থা",
+                                               "ক্রয়ের পর ইস্যু", "দাবির Qty", "আদায় (৳)", "Serial / নোট"]
+    rows, export = [], []
+    for r in v.to_dict("records"):
+        s = stats.get(int(r["id"]), {})
+        dl = r["days_left"]
+        dl_html = "—" if pd.isna(dl) else (f"<span class='rpx-age' style='color:{'#B91C1C' if dl < 0 else ('#B45309' if dl <= 30 else '#166534')}'>{int(dl)}</span>")
+        iss = f"{s.get('n', 0)} বার · {s.get('q', 0):g} pcs" + (f" (শেষ {s['last']:%d-%b-%y})" if s.get("last") else "")
+        note = " ".join(x for x in (str(r.get("serial_no") or "").strip(), str(r.get("notes") or "").strip(), str(r.get("claim_note") or "").strip()) if x)
+        rows.append(([f"<span class='rpx-chip'>{e(short_fac(str(r['factory_name'])))}</span>"] if show_unit else [])
+                    + [f"<b>{e(str(r['item_name']))}</b> <span class='rpx-chip'>{e(str(r['size'] or '-'))}</span>", f"<span class='rpx-code'>{e(str(r['challan'] or '-'))}</span>",
+                       e(str(r["supplier"] or "-")), f"{float(r['qty'] or 0):g}", e(str(r["purchase_date"])), e(str(r["expiry_date"])), dl_html,
+                       _wr_pill(r["stat"]), e(iss), f"{float(r.get('claimed_qty') or 0):g}", f"{float(r['claim_amount'] or 0):,.0f}", e(note)])
+        export.append(([short_fac(str(r["factory_name"]))] if show_unit else [])
+                      + [r["item_name"], r["size"], r["challan"], r["supplier"], r["qty"], r["purchase_date"], r["expiry_date"],
+                         None if pd.isna(dl) else int(dl), r["stat"], s.get("n", 0), r.get("claimed_qty") or 0, r["claim_amount"], note])
+    st.markdown(_wr_tbl(heads, rows, num={i for i, h in enumerate(heads) if h in ("Warranty Qty", "বাকি (দিন)", "দাবির Qty", "আদায় (৳)")}),
+                unsafe_allow_html=True)
+    export_buttons(pd.DataFrame(export, columns=(["Unit"] if show_unit else []) + ["Item", "Size", "Challan", "Supplier", "Warranty Qty", "Purchase", "Expiry",
+                                                                                  "Days left", "Status", "Issues since purchase", "Claimed Qty", "Amount", "Note"]),
+                   "warranty_register", "Warranty register")
+    if len(units) == 1:
+        _wr_claim_editor(w, "wrl_")
+
+
+# ---------------- Requisition x Warranty check (import preview + Warranty tab) ----------------
+_WR_CARD_CSS = """<style>
+.wrc{border:1px solid #D9DEE8;border-left:6px solid var(--c);border-radius:14px;background:var(--b);padding:12px 16px;margin:8px 0;box-shadow:0 4px 14px rgba(10,31,77,.07)}
+.wrc-claim{--c:#B91C1C;--b:#FEF2F2}.wrc-watch{--c:#D99A06;--b:#FFFBEB}.wrc-expired{--c:#64748B;--b:#F8FAFC}
+.wrc-h{font-size:14.5px;color:#0A1F4D}.wrc-h b{font-weight:800}
+.wrc-chip{display:inline-block;padding:2px 9px;border-radius:8px;font-size:11.5px;font-weight:700;background:#EEF2F7;color:#334155;margin-left:4px}
+.wrc-badge{display:inline-block;padding:3px 11px;border-radius:99px;font-size:12px;font-weight:800;margin-left:6px;background:var(--c);color:#fff}
+.wrc ul{margin:7px 0 0 0;padding-left:20px;font-size:13px;color:#172033}.wrc li{margin:3px 0}
+.wrc .lot{font-size:12px;color:#51638A;margin-top:5px}
+</style>"""
+_WR_LEVEL = {"claim": "🎯 ওয়ারেন্টি দাবির সুযোগ", "watch": "🛡 ওয়ারেন্টিযুক্ত মাল", "expired": "ওয়ারেন্টি শেষ"}
+
+
+def ensure_wr_req_schema():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE requisition_tracking ADD COLUMN IF NOT EXISTS machine_id INTEGER")
+            cur.execute("ALTER TABLE requisition_tracking ADD COLUMN IF NOT EXISTS warranty_note TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def wr_req_schema():
+    wr_schema2()
+    if not st.session_state.get("_wr_req_schema_ready"):
+        run_once_per_process("wr_req_schema_v1", ensure_wr_req_schema)
+        st.session_state["_wr_req_schema_ready"] = True
+
+
+@tx
+def wr_tag_req_lines(fac, tags):
+    """tags: [(req_no, item, size, machine_id or None, note)] - remembers on the requisition line which machine it is for + the warranty finding."""
+    for req_no, item, size, mid, note in tags:
+        run("""UPDATE requisition_tracking SET machine_id=%s, warranty_note=%s
+               WHERE factory_name=%s AND req_no=%s AND LOWER(item_name)=LOWER(%s) AND COALESCE(size,'')=%s""",
+            (mid, note, fac, req_no, item, size or ""))
+    audit("WARRANTY_REQ_TAG", f"{fac}: {len(tags)} requisition line(s) tagged with warranty finding / machine")
+    return True
+
+
+def _wr_req_findings(fac, items, want_mid=None):
+    """items = [(key, sl_no, name, size, req_qty)] -> {key: {level, lines, lots, name, size, qty}}.
+    Only items that have a warranty lot are returned. want_mid = {key: machine_id the requisition is for}."""
+    wr_req_schema()
+    mc_schema()
+    want_mid = want_mid or {}
+    sls = sorted({int(x[1]) for x in items if x[1]})
+    if not sls:
+        return {}
+    lots_raw = q_c("SELECT id, sl_no, supplier, challan, purchase_date, expiry_date, qty, claim_status FROM warranty_records "
+                   "WHERE factory_name=%s AND sl_no = ANY(%s)", (fac, sls))
+    if not lots_raw:
+        return {}
+    today = local_now().date()
+    lots = {}
+    for lo in lots_raw:
+        p, e_ = parse_date(lo["purchase_date"]), parse_date(lo["expiry_date"])
+        if p and e_:
+            lots.setdefault(int(lo["sl_no"]), []).append((p.date(), e_.date(), lo))
+    if not lots:
+        return {}
+    mh = {}
+    for r in q_c("""SELECT t.sl_no, t.date, COALESCE(t.qty,0) AS qty, t.machine_id, m.mc_no, COALESCE(m.machine_no,'') AS machine_no,
+                           COALESCE(m.machine_name,'') AS machine_name
+                    FROM transactions t JOIN machines m ON m.id=t.machine_id
+                    WHERE t.factory_name=%s AND t.sl_no = ANY(%s) AND t.machine_id IS NOT NULL AND t.trans_type = ANY(%s)""",
+                 (fac, sorted(lots), list(ISSUE_TYPES))):
+        d = parse_date(r["date"])
+        if d:
+            mh.setdefault(int(r["sl_no"]), []).append((d.date(), r))
+    alld = {}
+    for r in q_c("SELECT sl_no, date FROM transactions WHERE factory_name=%s AND sl_no = ANY(%s) AND trans_type = ANY(%s)",
+                 (fac, sorted(lots), list(ISSUE_TYPES))):
+        d = parse_date(r["date"])
+        if d:
+            alld.setdefault(int(r["sl_no"]), []).append(d.date())
+    stock = {int(r["sl_no"]): float(r["s"] or 0) for r in q_c(
+        "SELECT sl_no, COALESCE(current_stock,0) AS s FROM inventory WHERE factory_name=%s AND sl_no = ANY(%s)", (fac, sorted(lots)))}
+    out = {}
+    for key, sl, name, size, rq in items:
+        sl = int(sl or 0)
+        if sl not in lots:
+            continue
+        ls = sorted(lots[sl], key=lambda x: x[0])
+        act = [x for x in ls if x[1] >= today and x[2]["claim_status"] not in ("Recovered", "Rejected")]
+        txt_, level = [], "expired"
+        # 1) machine-wise issue that was inside a warranty that is still running -> claim
+        hits = {}
+        for d, r in sorted(mh.get(sl, []), key=lambda x: x[0]):
+            cand = [x for x in ls if x[0] <= d]
+            if not cand:
+                continue
+            lot = cand[-1]
+            if d <= lot[1] and lot[1] >= today and lot[2]["claim_status"] not in ("Recovered", "Rejected"):
+                hits[int(r["machine_id"])] = (d, r, lot)
+        for mid, (d, r, lot) in hits.items():
+            same = want_mid.get(key) == mid
+            txt_.append(("🎯 <b>একই মেশিনে আবার!</b> " if same else "") + f"{html_lib.escape(mc_label(r))} — এই মাল {d:%d-%b-%Y}-এ ইস্যু হয়েছিল ({float(r['qty']):g} pcs), "
+                        f"ওয়ারেন্টি {lot[1]:%d-%b-%Y} পর্যন্ত চালু (Challan {html_lib.escape(str(lot[2].get('challan') or '-'))} · "
+                        f"{html_lib.escape(str(lot[2].get('supplier') or '-'))}) → <b>নতুন কেনার আগে supplier-কে claim / replace চান</b>")
+        if hits:
+            level = "claim"
+        elif act:
+            level = "watch"
+        if act:
+            first_p = min(x[0] for x in act)
+            n_all = sum(1 for d in alld.get(sl, []) if d >= first_p)
+            n_tag = sum(1 for d, _ in mh.get(sl, []) if d >= first_p)
+            if n_all - n_tag > 0:
+                txt_.append(f"ওয়ারেন্টি শুরুর পর {n_all - n_tag} বার machine ট্যাগ ছাড়া ইস্যু হয়েছে — কোন মেশিনে গিয়েছিল জানা নেই, আগে যাচাই করুন")
+            if stock.get(sl, 0) > 0:
+                txt_.append(f"স্টোরে এখনো <b>{stock[sl]:g}</b> pcs stock আছে — নতুন requisition সত্যিই দরকার কিনা দেখুন")
+            if not txt_:
+                txt_.append("এই item-এর ওয়ারেন্টি চালু আছে — কোন মেশিনের জন্য ও কেন লাগছে জেনে নিন")
+        else:
+            last = ls[-1]
+            txt_.append(f"ওয়ারেন্টি শেষ ({last[1]:%d-%b-%Y}) — supplier-এর কাছে claim সম্ভব নয়")
+        lot_txt = " · ".join(f"Challan {x[2].get('challan') or '-'} ({float(x[2]['qty'] or 0):g} pcs, {x[0]:%d-%b-%y} → {x[1]:%d-%b-%y})" for x in ls[-3:])
+        out[key] = {"level": level, "lines": txt_, "lots": lot_txt, "name": name, "size": size, "qty": rq}
+    return out
+
+
+def _wr_findings_html(f):
+    e = html_lib.escape
+    return (f"<div class='wrc wrc-{f['level']}'><div class='wrc-h'><b>{e(str(f['name']))}</b>"
+            f"<span class='wrc-chip'>{e(str(f['size'] or '-'))}</span><span class='wrc-chip'>Req Qty {float(f['qty'] or 0):g}</span>"
+            f"<span class='wrc-badge'>{_WR_LEVEL[f['level']]}</span></div><ul>"
+            + "".join(f"<li>{x}</li>" for x in f["lines"]) + f"</ul><div class='lot'>Warranty lot: {e(f['lots'])}</div></div>")
+
+
+def _wr_req_import_box(fac, ok_rows):
+    """Called from the requisition import preview: warns about lines whose item carries a warranty and lets the store note which machine it is for."""
+    try:
+        items = []
+        for p in ok_rows:
+            if p.get("use_sl"):
+                sl = int(p["use_sl"])
+            else:
+                iv = find_inv_for_req(fac, p["code"], p["item"], p.get("size", ""))
+                sl = int(iv["sl_no"]) if iv else 0
+            if sl:
+                items.append((p["line"], sl, p["item"], p.get("size", ""), p["qty"]))
+        want = {k: st.session_state.get(f"wr_imp_mc_{k}") for k, *_ in items}
+        mcs = {}
+        fnd = _wr_req_findings(fac, items, {k: v for k, v in want.items() if v})
+        st.session_state["_wr_imp_tags"] = {}
+        if not fnd:
+            return
+        st.markdown(_WR_CARD_CSS, unsafe_allow_html=True)
+        st.markdown("**🛡 Warranty check — এই requisition-এর কিছু item আগে ওয়ারেন্টিতে কেনা হয়েছে**")
+        st.caption("কোন মেশিনের জন্য লাগছে বাছুন (ঐচ্ছিক) — একই মেশিনে আগে ইস্যু করা ওয়ারেন্টির মাল আবার চাইলে 🎯 দাবির সুযোগ হিসেবে ধরা পড়বে। "
+                   "বাছাই requisition line-এ সেভ হবে।")
+        machines = mc_list(fac)
+        labs = {mc_label(m): int(m["id"]) for m in machines}
+        for line, f in fnd.items():
+            st.markdown(_wr_findings_html(f), unsafe_allow_html=True)
+            NONE = "— কোন মেশিন জানা নেই / বাছছি না —"
+            if labs:
+                pick = st.selectbox(f"Line {line}: এটা কোন মেশিনের জন্য?", [NONE] + list(labs), key=f"wr_imp_mc_lbl_{line}")
+                st.session_state[f"wr_imp_mc_{line}"] = labs.get(pick)
+            note = re.sub(r"<[^>]+>", "", " | ".join(f["lines"]))[:380]
+            st.session_state["_wr_imp_tags"][line] = {"mid": labs.get(st.session_state.get(f"wr_imp_mc_lbl_{line}")) if labs else None, "note": note}
+    except Exception as ex:
+        st.caption(f"⚠️ Warranty check লোড হয়নি ({ex}) — import-এ কোনো সমস্যা নেই।")
+
+
+def _wr_after_import(fac, ok_rows):
+    try:
+        tg = st.session_state.get("_wr_imp_tags") or {}
+        tags = [(p["req_no"], p["item"], (p.get("size") or "").strip(), tg[p["line"]]["mid"], tg[p["line"]]["note"]) for p in ok_rows if p["line"] in tg]
+        if tags:
+            wr_tag_req_lines(fac, tags)
+    except Exception:
+        pass
+
+
+def _wr_view_reqcheck(fac):
+    st.markdown(_px_band("📥 Requisition Warranty Check", "পেন্ডিং requisition-এর কোন item ওয়ারেন্টিতে কেনা — কোন মেশিনে গিয়েছিল, দাবি করা যায় কিনা"), unsafe_allow_html=True)
+    st.markdown(_WR_CARD_CSS, unsafe_allow_html=True)
+    wr_req_schema()
+    rows = q_c("""SELECT id, req_no, req_date, department, item_name, COALESCE(size,'') AS size, COALESCE(req_qty,0) AS req_qty, COALESCE(prod_id,'') AS prod_id,
+                         machine_id, COALESCE(warranty_note,'') AS wn
+                  FROM requisition_tracking WHERE factory_name=%s AND COALESCE(actual_received_qty,0) < COALESCE(req_qty,0)
+                  ORDER BY id DESC LIMIT 400""", (fac,))
+    if not rows:
+        st.info("কোনো পেন্ডিং requisition নেই।")
+        return
+    inv = {r["prod_id"]: int(r["sl_no"]) for r in q_c("SELECT sl_no, prod_id FROM inventory WHERE factory_name=%s AND prod_id = ANY(%s)",
+                                                       (fac, sorted({r["prod_id"] for r in rows if r["prod_id"]})))}
+    items = [(int(r["id"]), inv.get(r["prod_id"], 0), r["item_name"], r["size"], r["req_qty"]) for r in rows if inv.get(r["prod_id"])]
+    want = {int(r["id"]): int(r["machine_id"]) for r in rows if r["machine_id"]}
+    fnd = _wr_req_findings(fac, items, want)
+    by = {int(r["id"]): r for r in rows}
+    if not fnd:
+        st.success("পেন্ডিং requisition-এর কোনো item-এ ওয়ারেন্টি পাওয়া যায়নি।")
+        return
+    order = {"claim": 0, "watch": 1, "expired": 2}
+    cnt = {k: sum(1 for f in fnd.values() if f["level"] == k) for k in order}
+    k = st.columns(3)
+    k[0].metric("🎯 দাবির সুযোগ", cnt["claim"])
+    k[1].metric("🛡 ওয়ারেন্টিযুক্ত", cnt["watch"])
+    k[2].metric("ওয়ারেন্টি শেষ", cnt["expired"])
+    for rid, f in sorted(fnd.items(), key=lambda kv: order[kv[1]["level"]]):
+        r = by[rid]
+        st.markdown(f"<div class='rpx-s' style='margin:10px 0 -2px'>Req <b>{html_lib.escape(str(r['req_no']))}</b> · {html_lib.escape(str(r['req_date']))} · "
+                    f"{html_lib.escape(str(r['department'] or ''))}</div>", unsafe_allow_html=True)
+        st.markdown(_wr_findings_html(f), unsafe_allow_html=True)
+        if r["machine_id"]:
+            try:
+                m = next((x for x in mc_list(fac, active_only=False) if int(x["id"]) == int(r["machine_id"])), None)
+                if m:
+                    st.caption(f"⚙️ Requisition-এ নোট করা মেশিন: {mc_label(m)}")
+            except Exception:
+                pass
+
+
+def tab_warranty():
+    st.markdown(_px_css("wrx"), unsafe_allow_html=True)
+    st.markdown(_px_hero("🛡", "ওয়ারেন্টি ট্র্যাকিং",
+                         "Challan থেকে শুধু ওয়ারেন্টিযুক্ত item বেছে মেয়াদ বসান — পরে একই item আবার Issue / Requisition হলে slip-এই দেখাবে ওয়ারেন্টি চালু কিনা, দাবি করা যায় কিনা"),
+                unsafe_allow_html=True)
+    try:
+        wr_schema2()
         mc_schema()
     except Exception as e:
         st.error(f"Warranty setup failed: {e}")
         return
     units = list(FACTORIES) if is_cons_view else [FAC]
-    t = lazy_tab_select(["🚨 দাবির সুযোগ", "➕ ওয়ারেন্টি যোগ", "📋 সব ওয়ারেন্টি"], "lz_wr")
-    if t == 0:
-        _wr_view_claims(units)
-    elif t == 1:
-        if is_cons_view:
+    with st.container(key="wrx_root"):
+        w = _wr_all(units)
+        _wr_kpi_strip(w)
+        with st.expander("ℹ️ এটা কীভাবে কাজ করে?"):
+            st.markdown(
+                "1. **Challan বাছুন** → ১০ item-এর Challan-এ ৩টায় ওয়ারেন্টি থাকলে শুধু ওই ৩টা টিক দিন; প্রতিটির আলাদা মেয়াদ, Warranty Qty ও Serial দিন।\n"
+                "2. প্রতিটি টিক-করা line একটি **Warranty Lot** (item + Challan + Qty + শেষ তারিখ) হয়ে যায়।\n"
+                "3. পরে ওই item **Requisition Issue / Quick Issue**-এ নিলে slip-এর নিচেই 🛡 বার্তা আসে: lot চালু কিনা, আর ওয়ারেন্টির মধ্যে আগে ইস্যু হয়ে থাকলে "
+                "⚠️ *'replacement হলে supplier-এর কাছে দাবি করুন'*।\n"
+                "4. **🚨 দাবির সুযোগ**-এ দুই ধরনের তালিকা: 🎯 নিশ্চিত (Maintenance মাল ইস্যুতে মেশিন বাছলে — একই মেশিনে আবার লাগলে) আর 🔎 সম্ভাব্য "
+                "(মেশিন ছাড়া, একই item কাছাকাছি সময়ে আবার ইস্যু)। দাবি করলে অবস্থা, দাবির Qty ও টাকা সেভ করুন।\n\n"
+                "5. **Requisition আমদানির সময়** (Import) কোনো line-এর item আগে ওয়ারেন্টিতে কেনা থাকলে সেখানেই 🛡 কার্ড আসে: কোন মেশিনে আগে ইস্যু হয়েছিল, ওয়ারেন্টি চালু কিনা, স্টোরে stock আছে কিনা। "
+                "কোন মেশিনের জন্য লাগছে বাছলে তা requisition line-এ সেভ হয়; পরে **📥 Requisition Check** ট্যাবে সব পেন্ডিং requisition-এর জন্য একসাথে দেখা যায়।\n\n"
+                "*সফটওয়্যার নিজে জানে না কোন মাল ফিজিক্যালি নষ্ট হয়েছে — তাই মেশিন ট্যাগ করলে নিশ্চিত ধরা পড়ে, না করলে সম্ভাব্য হিসেবে দেখায়; শেষ সিদ্ধান্ত আপনার।*")
+        t = lazy_tab_select(["🚨 দাবির সুযোগ", "➕ ওয়ারেন্টি যোগ (Challan)", "📦 Lot-ভিত্তিক ট্র্যাকিং", "📥 Requisition Check"], "lz_wr")
+        if t == 0:
+            _wr_view_claims2(units, w)
+        elif t == 1:
+            if is_cons_view:
+                st.info("ওপর থেকে একটি Factory বাছুন।")
+            else:
+                with st.container(key="wrx_entry"):
+                    _wr_view_add_challan(FAC)
+        elif t == 2:
+            _wr_view_lots(units, w)
+        elif is_cons_view:
             st.info("ওপর থেকে একটি Factory বাছুন।")
         else:
-            _wr_view_add(FAC)
-    else:
-        _wr_view_all(units, not is_cons_view)
+            _wr_view_reqcheck(FAC)
 
 
 # ============================================================
