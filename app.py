@@ -16615,6 +16615,174 @@ _QI_CSS = '''<style>
 </style>'''
 
 
+# ====================================================================================================
+# 📝 Quick Issue - Notes / Problem Board (under 📋 Issue Summary)
+# Store officer writes a problem (requisition can't be entered, item missing, wrong rate ...). Next day it is marked
+# Solved (kept as history) or removed. Separate table - no stock / transaction data is touched.
+# ====================================================================================================
+QN_KINDS = ["⚠️ Item entry hocche na", "🧾 Requisition somossha", "📦 Stock / Rate somossha", "💬 Onno note"]
+
+_QN_CSS = """<style>
+.qn-h{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:14px 0 8px 0;padding:10px 12px;border-radius:12px;
+  background:linear-gradient(135deg,#FFF7E6,#FFEFD2);border:1px solid #F6D3A2;color:#9A3412;font-weight:800;font-size:.92rem}
+.qn-badge{background:#EA580C;color:#fff;border-radius:999px;padding:2px 10px;font-size:.74rem;font-weight:800;white-space:nowrap}
+.qn-badge.ok{background:#16A34A}
+.qn-card{border:1px solid #F6D3A2;border-left:5px solid #F59E0B;background:#FFFBF2;border-radius:10px;padding:8px 10px;margin:6px 0 2px 0}
+.qn-card.old{border-color:#F3B5B5;border-left-color:#DC2626;background:#FEF2F2}
+.qn-card.solved{border-color:#BFE5CC;border-left-color:#16A34A;background:#F2FBF5}
+.qn-top{display:flex;justify-content:space-between;gap:6px;font-size:.74rem;font-weight:700}
+.qn-kind{color:#9A3412}.qn-card.old .qn-kind{color:#B42318}.qn-card.solved .qn-kind{color:#166534}
+.qn-age{color:#7C5A1E;white-space:nowrap}.qn-card.old .qn-age{color:#B42318}
+.qn-txt{color:#1F2937;font-size:.84rem;margin:4px 0;line-height:1.35;word-break:break-word}
+.qn-card.solved .qn-txt{color:#4B5563;text-decoration:line-through}
+.qn-meta{color:#6B7280;font-size:.7rem}
+.qn-sr{display:inline-block;background:#EFE9FF;color:#4C1D95;border:1px solid #D4C6FA;border-radius:6px;padding:0 6px;font-weight:800;font-size:.72rem;margin-right:4px}
+.qn-empty{color:#166534;background:#F2FBF5;border:1px dashed #BFE5CC;border-radius:10px;padding:8px 10px;font-size:.8rem;text-align:center}
+</style>"""
+
+
+def ensure_qn_schema():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS qi_notes (id SERIAL PRIMARY KEY, factory_name TEXT, sr_no TEXT DEFAULT '',
+                           kind TEXT DEFAULT '', note TEXT, status TEXT DEFAULT 'Open', created_by TEXT, created_at TEXT, created_on DATE,
+                           solved_by TEXT DEFAULT '', solved_at TEXT DEFAULT '')""")
+            cur.execute("CREATE INDEX IF NOT EXISTS ix_qi_notes_fac ON qi_notes(factory_name, status)")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def qn_schema():
+    if not st.session_state.get("_qn_schema_v1"):
+        run_once_per_process("qn_v1", ensure_qn_schema)
+        st.session_state["_qn_schema_v1"] = True
+
+
+@tx
+def qn_add(fac, sr, kind, text):
+    _n = local_now()
+    r = run("""INSERT INTO qi_notes (factory_name, sr_no, kind, note, status, created_by, created_at, created_on)
+               VALUES (%s,%s,%s,%s,'Open',%s,%s,%s) RETURNING id""",
+            (fac, sr, kind, text, st.session_state.get("user", ""), _n.strftime("%d-%b-%Y %I:%M %p"), _n.date()))
+    audit("QI_NOTE_ADD", f"{fac}: [QN#{r[0][0]}] {kind} | SR {sr or '-'} | {text[:150]}")
+    return True
+
+
+@tx
+def qn_set_status(nid, fac, status):
+    if status == "Solved":
+        run("UPDATE qi_notes SET status='Solved', solved_by=%s, solved_at=%s WHERE id=%s AND factory_name=%s",
+            (st.session_state.get("user", ""), local_now().strftime("%d-%b-%Y %I:%M %p"), int(nid), fac))
+        audit("QI_NOTE_SOLVED", f"{fac}: [QN#{nid}] marked Solved")
+    else:
+        run("UPDATE qi_notes SET status='Open', solved_by='', solved_at='' WHERE id=%s AND factory_name=%s", (int(nid), fac))
+        audit("QI_NOTE_REOPEN", f"{fac}: [QN#{nid}] re-opened")
+    return True
+
+
+@tx
+def qn_delete(nid, fac):
+    r = run("SELECT kind, sr_no, note FROM qi_notes WHERE id=%s AND factory_name=%s", (int(nid), fac))
+    run("DELETE FROM qi_notes WHERE id=%s AND factory_name=%s", (int(nid), fac))
+    audit("QI_NOTE_DELETE", f"{fac}: [QN#{nid}] removed" + (f" ({r[0][0]} | SR {r[0][1] or '-'} | {str(r[0][2])[:100]})" if r else ""))
+    return True
+
+
+def _qn_act(kind, nid, fac):
+    """Button callback (runs before the rerun, so the list below is always fresh)."""
+    if not guard():
+        return
+    if kind == "solve":
+        ok = qn_set_status(nid, fac, "Solved")
+        msg = "✅ Somossha Solved hishebe mark kora holo."
+    elif kind == "reopen":
+        ok = qn_set_status(nid, fac, "Open")
+        msg = "↩ Note abar Open kora holo."
+    else:
+        ok = qn_delete(nid, fac)
+        msg = "🗑 Note remove kora holo."
+    if ok:
+        st.session_state["qn_flash"] = msg
+
+
+def _qn_age(d):
+    try:
+        n = (local_now().date() - d).days
+    except Exception:
+        return "", 0
+    return ("Aaj" if n <= 0 else ("Gotokal" if n == 1 else f"{n} din dhore")), max(n, 0)
+
+
+def _qn_card(r, solved=False):
+    age, n = _qn_age(r["created_on"])
+    cls = "solved" if solved else ("old" if n >= 2 else "")
+    sr = f"<span class='qn-sr'>SR {_html.escape(r['sr_no'])}</span>" if r["sr_no"] else ""
+    txt = _html.escape(r["note"]).replace("\n", "<br>")
+    meta = f"{sr}{_html.escape(r['created_by'])} · {_html.escape(r['created_at'])}"
+    if solved:
+        meta += f"<br>✅ Solved: {_html.escape(r['solved_by'])} · {_html.escape(r['solved_at'])}"
+    return (f"<div class='qn-card {cls}'><div class='qn-top'><span class='qn-kind'>{_html.escape(r['kind'])}</span>"
+            f"<span class='qn-age'>{'' if solved else age}</span></div><div class='qn-txt'>{txt}</div><div class='qn-meta'>{meta}</div></div>")
+
+
+def _qn_panel(fac, can_write, cur_sr=""):
+    """Notes / Problem Board shown under the Issue Summary (Quick Issue, right column)."""
+    qn_schema()
+    st.markdown(_QN_CSS, unsafe_allow_html=True)
+    hdr = st.empty()
+    _fl = st.session_state.pop("qn_flash", "")
+    if _fl:
+        st.success(_fl)
+    if can_write:
+        with st.expander("➕ Notun note / somossha likhun", expanded=False):
+            with st.form(f"qn_form_{fac}", clear_on_submit=True):
+                kind = st.selectbox("Dhoron", QN_KINDS, key=f"qn_kind_{fac}")
+                sr = st.text_input("SR No. (thakle)", value=cur_sr, key=f"qn_sr_{fac}", placeholder="e.g. 1745")
+                text = st.text_area("Ki somossha / note", key=f"qn_txt_{fac}", height=90,
+                                    placeholder="e.g. SR 1745-er item entry hocche na - system-e item paoa jacche na")
+                go = st.form_submit_button("💾 Note save korun", use_container_width=True)
+            if go:
+                if len((text or "").strip()) < 3:
+                    st.error("Note-e kichu likhun.")
+                elif guard():
+                    if qn_add(fac, (sr or "").strip(), kind, text.strip()):
+                        st.session_state["qn_flash"] = "📝 Note save hoyeche - porer din Solved hole mark/remove korben."
+    df = qdf_c("""SELECT id, COALESCE(sr_no,'') AS sr_no, COALESCE(kind,'') AS kind, COALESCE(note,'') AS note,
+                         COALESCE(status,'Open') AS status, COALESCE(created_by,'') AS created_by, COALESCE(created_at,'') AS created_at,
+                         created_on, COALESCE(solved_by,'') AS solved_by, COALESCE(solved_at,'') AS solved_at
+                  FROM qi_notes WHERE factory_name=%s ORDER BY id DESC LIMIT 300""", (fac,))
+    op = df[df["status"] == "Open"] if len(df) else df
+    sv = df[df["status"] == "Solved"] if len(df) else df
+    hdr.markdown(f"<div class='qn-h'><span>📝 Notes / Problem Board</span>"
+                 + (f"<span class='qn-badge'>{len(op)} open</span>" if len(op) else "<span class='qn-badge ok'>0 open</span>") + "</div>",
+                 unsafe_allow_html=True)
+    if st.session_state.get("qn_flash") and not _fl:      # added in this run (form was processed after the flash check)
+        st.success(st.session_state.pop("qn_flash"))
+    if not len(op):
+        st.markdown("<div class='qn-empty'>✔ Kono open somossha nei</div>", unsafe_allow_html=True)
+    for _, r in op.head(20).iterrows():
+        st.markdown(_qn_card(r), unsafe_allow_html=True)
+        if can_write:
+            b1, b2 = st.columns(2)
+            b1.button("✅ Solved", key=f"qn_s_{r['id']}", on_click=_qn_act, args=("solve", int(r["id"]), fac), use_container_width=True)
+            b2.button("🗑 Remove", key=f"qn_d_{r['id']}", on_click=_qn_act, args=("del", int(r["id"]), fac), use_container_width=True)
+    if len(op) > 20:
+        st.caption(f"+ aro {len(op) - 20} ti open note ache (puroni gulo age Solved / Remove korun).")
+    if len(sv):
+        with st.expander(f"✅ Solved ({len(sv)})", expanded=False):
+            for _, r in sv.head(10).iterrows():
+                st.markdown(_qn_card(r, solved=True), unsafe_allow_html=True)
+                if can_write:
+                    b1, b2 = st.columns(2)
+                    b1.button("↩ Abar open", key=f"qn_o_{r['id']}", on_click=_qn_act, args=("reopen", int(r["id"]), fac), use_container_width=True)
+                    b2.button("🗑 Remove", key=f"qn_x_{r['id']}", on_click=_qn_act, args=("del", int(r["id"]), fac), use_container_width=True)
+            if len(sv) > 10:
+                st.caption(f"Shesh 10 ti dekhano hocche (mot {len(sv)}).")
+
+
 @_frag
 def _ri_quick_form():
     """⚡ Quick Issue: the unit's regular items are already on screen - the officer types only the qty of what he issues."""
@@ -16952,6 +17120,11 @@ def _ri_quick_form():
     if _qi_confirm_dialog is None and _pc and _pc.get("gen") == gen:      # very old Streamlit (no dialog): same summary, inline
         with st.container(border=True):
             _qi_confirm_body(_pc)
+    with colR:                                  # 📝 Notes / Problem Board under the Issue Summary
+        try:
+            _qn_panel(fac, can_write, sr_no)
+        except Exception as _e:
+            st.caption(f"Notes board load hoy ni: {_e}")
 
 
 def _ri_form():
