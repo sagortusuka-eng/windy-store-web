@@ -1082,6 +1082,14 @@ def tx(fn):
         if st.session_state.get("role") in NEW_RO_ROLES and fn.__name__ not in _RO_TX_ALLOW:
             st.error("এই role শুধু দেখতে পারে — কোনো তথ্য যোগ / বদল / মোছা যাবে না।")
             return None
+        if fn.__name__ not in _RO_TX_ALLOW:                      # Settings -> Access Control: page made view-only for this user
+            try:
+                _vo = acl_page_view_only()
+            except Exception:
+                _vo = False
+            if _vo:
+                st.error("👁 এই page আপনার জন্য শুধু দেখার (View only) — কোনো তথ্য যোগ / বদল / মোছা যাবে না।")
+                return None
         conn = get_conn()
         try:
             res = fn(*a, **k)
@@ -1707,6 +1715,100 @@ NEW_RO_ROLES = ("Maintenance", "Admin", "Accounts")
 _RO_TX_ALLOW = ("create_login_session", "save_session_factory", "end_login_session", "log_event", "change_password",
                 "request_password_reset", "register_user")
 REG_ROLE_CHOICES = {"Store Officer": "Store Officer", "Maintenance": "Maintenance", "Audit": "Auditor", "Admin": "Admin", "Accounts": "Accounts"}
+
+
+# ============================================================
+#  ACCESS CONTROL  (Settings -> Access Control)
+#  Who can open which page, and whether a page is view-only for them.
+#  Rules are stored in access_rules; with no rule saved everything behaves exactly as before
+#  (write roles = full access, view-only roles = view only, Guest = view only).
+#  A rule can only HIDE a page or make it VIEW-ONLY - it never gives a view-only role write rights.
+# ============================================================
+ACL_SETTINGS_ROUTE = "⚙️ Settings"
+ACL_EDIT_CENTER_ROUTE = "🛠️ Edit Center (A–Z)"
+ACL_ROLES = ["Store Officer", "Executive", "Auditor", "Maintenance", "Admin", "Accounts", "Guest"]    # Store Manager is always full access
+ACL_LABEL = {"edit": "✅ Full access", "view": "👁 View only", "none": "⛔ No access"}
+ACL_FROM = {v: k for k, v in ACL_LABEL.items()}
+_ACL_RUN = {}          # per-run cache (the script is re-executed on every interaction, so this is rebuilt each time)
+
+
+def ensure_acl_schema():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS access_rules (id SERIAL PRIMARY KEY, scope TEXT, subject TEXT, route TEXT, level TEXT,
+                           updated_by TEXT, updated_at TEXT, UNIQUE(scope, subject, route))""")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS department TEXT DEFAULT ''")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Active'")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TEXT")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def acl_schema():
+    if not st.session_state.get("_acl_ready_v1"):
+        run_once_per_process("acl_v1", ensure_acl_schema)
+        st.session_state["_acl_ready_v1"] = True
+
+
+def _acl_role():
+    return (st.session_state.get("role") or "Guest") if st.session_state.get("user") else "Guest"
+
+
+def _acl_rules():
+    if "rules" not in _ACL_RUN:
+        rules = {}
+        try:
+            acl_schema()
+            for r in q_c("SELECT scope, subject, route, level FROM access_rules"):
+                rules[(r["scope"], r["subject"], r["route"])] = r["level"]
+        except Exception:
+            rules = {}
+        _ACL_RUN["rules"] = rules
+    return _ACL_RUN["rules"]
+
+
+def acl_base_level(route, role):
+    """What the app has always allowed (no rule saved)."""
+    if route in (ACL_SETTINGS_ROUTE, ACL_EDIT_CENTER_ROUTE):
+        return "edit" if role == "Store Manager" else "none"
+    return "view" if (role in READ_ONLY_ROLES or role == "Guest") else "edit"
+
+
+def acl_level(route, role=None, user=None):
+    """'edit' | 'view' | 'none' for a page. role=None -> the signed-in user (user rule first, then role rule, then the default)."""
+    if role is None:
+        role = _acl_role()
+        user = st.session_state.get("user") if st.session_state.get("user") else None
+    if role == "Store Manager":
+        return "edit"
+    base = acl_base_level(route, role)
+    if route in (ACL_SETTINGS_ROUTE, ACL_EDIT_CENTER_ROUTE):
+        return base
+    rules = _acl_rules()
+    lv = rules.get(("user", user, route)) if user else None
+    if lv is None:
+        lv = rules.get(("role", role, route))
+    if lv not in ("edit", "view", "none"):
+        lv = base
+    if lv == "edit" and base == "view":
+        lv = "view"                                  # a view-only role can never be raised to write by a rule
+    if lv == "none" and TAB_NAMES and route == TAB_NAMES[0]:
+        lv = "view"                                  # the Dashboard always opens
+    return lv
+
+
+def acl_page_view_only(route=None):
+    """True only when a Settings rule turned a normally-writable page into view-only for this user (existing role rules stay as they were)."""
+    route = route or st.session_state.get(NAV_KEY)
+    if not route or route in (ACL_SETTINGS_ROUTE, ACL_EDIT_CENTER_ROUTE):
+        return False
+    role = _acl_role()
+    return acl_level(route) == "view" and acl_base_level(route, role) == "edit"
+
+
 
 
 @tx
@@ -2633,6 +2735,14 @@ def guard(write=True):
     if write and st.session_state.get("role") in READ_ONLY_ROLES:
         st.error(f"{st.session_state.get('role')} role read-only — shudhu dekhte parben, edit / delete korte parben na.")
         return False
+    if write:
+        try:
+            _vo = acl_page_view_only()
+        except Exception:
+            _vo = False
+        if _vo:
+            st.error("👁 এই page আপনার জন্য শুধু দেখার (View only) — Store Manager Settings → Access Control থেকে বদলাতে পারেন।")
+            return False
     if write and "CONSOLIDATED" in FAC:
         st.error("CONSOLIDATED view-te edit kora jabe na. Specific factory select korun.")
         return False
@@ -28765,6 +28875,11 @@ if NAV_ITEM_JOURNEY not in TAB_NAMES:   # must be registered BEFORE the guard be
 NAV_EDIT_CENTER = "🛠️ Edit Center (A–Z)"
 if NAV_EDIT_CENTER not in TAB_NAMES:    # registered right after Item Journey -> its renderer is appended right after tab_item_journey
     TAB_NAMES.append(NAV_EDIT_CENTER)
+NAV_ASSET = "🏷 Asset Items"
+if NAV_ASSET not in TAB_NAMES:          # must be registered BEFORE the guard below (else a click on it is reset to Dashboard); renderer is appended right after tab_edit_center
+    TAB_NAMES.append(NAV_ASSET)
+if ACL_SETTINGS_ROUTE not in TAB_NAMES:  # Settings: registered right after Asset Items -> its renderer (tab_settings) is appended right after tab_asset
+    TAB_NAMES.append(ACL_SETTINGS_ROUTE)
 if st.session_state.get(NAV_KEY) not in TAB_NAMES:
     st.session_state[NAV_KEY] = TAB_NAMES[0]  # Dashboard is the first page for new sessions.
 
@@ -29766,6 +29881,1410 @@ def tab_edit_center():
     (_ec_items, _ec_stock, _ec_requisition, _ec_gate_pass, _ec_hold_bill)[sec]()
 
 
+# ============================================================
+#  ASSET ITEMS  -  physical receiving + Company-ERP issue TRACKING  (ADDITIVE: own tables, own page)
+#  This software never issues Asset Items. Company ERP does. Here we only (1) record what was received in the factory and
+#  (2) record / import what Company ERP says it issued, so the difference (ERP pending) is always visible for audit.
+#  USD and BDT are never added together: every total is shown per currency.
+# ============================================================
+AS_SYM = {"BDT": "৳", "USD": "$"}
+AS_BADGE = {"Pending": "🔴 Pending", "Partially Issued": "🟠 Partially Issued", "Fully Issued": "🟢 Fully Issued"}
+_AS_CSS = """<style>
+.mcx-kpi.green{background:linear-gradient(135deg,#047857 0%,#34D399 100%)}
+.mcx-kpi.sky{background:linear-gradient(135deg,#0369A1 0%,#38BDF8 100%)}
+.mcx-kpi.red{background:linear-gradient(135deg,#B91C1C 0%,#F87171 100%)}
+.mcx-kpi .v.sm{font-size:19px;line-height:1.3}
+.as-note{background:#EEF4FF;border:1px solid #C7D7FB;border-radius:12px;padding:10px 14px;font-size:13px;color:#1E3A8A;margin:6px 0 12px}
+.as-warn{background:#FFF7E6;border:1px solid #F6D58E;border-radius:12px;padding:10px 14px;font-size:13px;color:#7A4B00;margin:6px 0 12px}
+.as-src{display:inline-block;border-radius:99px;padding:1px 9px;font-size:11.5px;font-weight:800}
+.as-src.man{background:#E0F2FE;color:#075985}.as-src.imp{background:#FCE7F3;color:#9D174D}
+</style>"""
+
+
+def ensure_asset_schema():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS asset_receipts (id SERIAL PRIMARY KEY, factory_name TEXT, sl_no INTEGER,
+                           item_name TEXT, description TEXT DEFAULT '', qty DOUBLE PRECISION DEFAULT 0, unit_rate DOUBLE PRECISION DEFAULT 0,
+                           currency TEXT DEFAULT 'BDT', total_value DOUBLE PRECISION DEFAULT 0, received_date DATE, supplier TEXT DEFAULT '',
+                           invoice_no TEXT DEFAULT '', purchase_ref TEXT DEFAULT '', remarks TEXT DEFAULT '', resp_section TEXT DEFAULT '',
+                           resp_dept TEXT DEFAULT '', created_by TEXT, created_at TEXT)""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS asset_erp_issues (id SERIAL PRIMARY KEY, receipt_id INTEGER, factory_name TEXT,
+                           issued_qty DOUBLE PRECISION DEFAULT 0, issue_date DATE, erp_ref TEXT DEFAULT '', erp_voucher TEXT DEFAULT '',
+                           erp_section TEXT DEFAULT '', erp_dept TEXT DEFAULT '', erp_location TEXT DEFAULT '', remarks TEXT DEFAULT '',
+                           source TEXT DEFAULT 'Manual', entered_by TEXT, entered_at TEXT)""")
+            cur.execute("CREATE INDEX IF NOT EXISTS ix_asset_rc_fac ON asset_receipts(factory_name, received_date)")
+            cur.execute("CREATE INDEX IF NOT EXISTS ix_asset_erp_rc ON asset_erp_issues(receipt_id)")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def asset_schema():
+    if not st.session_state.get("_asset_schema_v1"):
+        run_once_per_process("asset_v1", ensure_asset_schema)
+        st.session_state["_asset_schema_v1"] = True
+
+
+# ---------------------------------------------------------------- writes
+@tx
+def asset_add_receipt(fac, rec):
+    r = run("""INSERT INTO asset_receipts (factory_name, sl_no, item_name, description, qty, unit_rate, currency, total_value, received_date,
+                                          supplier, invoice_no, purchase_ref, remarks, resp_section, resp_dept, created_by, created_at)
+               VALUES (%s, (SELECT COALESCE(MAX(sl_no),0)+1 FROM asset_receipts WHERE factory_name=%s), %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               RETURNING id, sl_no""",
+            (fac, fac, rec["item"], rec["desc"], rec["qty"], rec["rate"], rec["cur"], round(rec["qty"] * rec["rate"], 2), rec["date"],
+             rec["supplier"], rec["invoice"], rec["pref"], rec["remarks"], rec["sec"], rec["dept"],
+             st.session_state.get("user", ""), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    rid, sl = int(r[0][0]), int(r[0][1])
+    audit("ASSET_RECEIPT_ADD", f"{fac}: [AR#{rid}] SL {sl} {rec['item']} - qty {rec['qty']:g} x {rec['rate']:g} {rec['cur']} = "
+                               f"{rec['qty'] * rec['rate']:,.2f} {rec['cur']} (supplier {rec['supplier'] or '-'}, invoice {rec['invoice'] or '-'})")
+    return sl
+
+
+@tx
+def asset_update_receipt(rid, fac, rec):
+    cur_ = run("SELECT COALESCE(SUM(issued_qty),0), COUNT(*) FROM asset_erp_issues WHERE receipt_id=%s", (rid,))[0]
+    old = run("SELECT currency, qty, unit_rate FROM asset_receipts WHERE id=%s AND factory_name=%s", (rid, fac))
+    if not old:
+        raise ValueError("Receipt not found")
+    if float(cur_[0]) > rec["qty"] + 1e-9:
+        raise ValueError(f"ERP-তে ইতিমধ্যে {float(cur_[0]):g} issue আছে — Received Qty তার চেয়ে কম করা যাবে না।")
+    if int(cur_[1]) and old[0][0] != rec["cur"]:
+        raise ValueError("ERP issue record থাকলে Currency বদলানো যাবে না।")
+    run("""UPDATE asset_receipts SET item_name=%s, description=%s, qty=%s, unit_rate=%s, currency=%s, total_value=%s, received_date=%s,
+                  supplier=%s, invoice_no=%s, purchase_ref=%s, remarks=%s, resp_section=%s, resp_dept=%s WHERE id=%s AND factory_name=%s""",
+        (rec["item"], rec["desc"], rec["qty"], rec["rate"], rec["cur"], round(rec["qty"] * rec["rate"], 2), rec["date"], rec["supplier"],
+         rec["invoice"], rec["pref"], rec["remarks"], rec["sec"], rec["dept"], rid, fac))
+    audit("ASSET_RECEIPT_EDIT", f"{fac}: [AR#{rid}] edited - was {float(old[0][1]):g} x {float(old[0][2]):g} {old[0][0]}, "
+                                f"now {rec['qty']:g} x {rec['rate']:g} {rec['cur']} ({rec['item']})")
+    return True
+
+
+@tx
+def asset_delete_receipt(rid, fac, label):
+    n = run("SELECT COUNT(*) FROM asset_erp_issues WHERE receipt_id=%s", (rid,))[0][0]
+    if n:
+        raise ValueError("ERP issue record আছে — আগে ERP record মুছুন।")
+    run("DELETE FROM asset_receipts WHERE id=%s AND factory_name=%s", (rid, fac))
+    audit("ASSET_RECEIPT_DELETE", f"{fac}: [AR#{rid}] deleted ({label})")
+    return True
+
+
+def _asset_erp_insert(fac, rid, rec, source):
+    row = run("""SELECT qty, item_name, sl_no, COALESCE((SELECT SUM(issued_qty) FROM asset_erp_issues WHERE receipt_id=%s),0)
+                 FROM asset_receipts WHERE id=%s AND factory_name=%s FOR UPDATE""", (rid, rid, fac))
+    if not row:
+        raise ValueError("Asset receipt পাওয়া যায়নি।")
+    qty, item, sl, issued = float(row[0][0]), row[0][1], row[0][2], float(row[0][3])
+    if issued + rec["qty"] > qty + 1e-9:
+        raise ValueError(f"SL {sl} {item}: ERP issue ({issued + rec['qty']:g}) Received Qty ({qty:g})-এর বেশি হয়ে যাচ্ছে।")
+    run("""INSERT INTO asset_erp_issues (receipt_id, factory_name, issued_qty, issue_date, erp_ref, erp_voucher, erp_section, erp_dept,
+                                       erp_location, remarks, source, entered_by, entered_at)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (rid, fac, rec["qty"], rec["date"], rec["ref"], rec["voucher"], rec["sec"], rec["dept"], rec["loc"], rec["remarks"], source,
+         st.session_state.get("user", ""), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    audit("ASSET_ERP_ISSUE", f"{fac}: [AR#{rid}] SL {sl} {item} - ERP issued {rec['qty']:g} on {rec['date']} (ERP ref {rec['ref'] or '-'}, "
+                             f"voucher {rec['voucher'] or '-'}, section {rec['sec'] or '-'}) [{source}]")
+
+
+@tx
+def asset_add_erp(fac, rid, rec):
+    _asset_erp_insert(fac, rid, rec, "Manual")
+    return True
+
+
+@tx
+def asset_import_erp(fac, rows, source):
+    for rid, rec in rows:
+        _asset_erp_insert(fac, rid, rec, source)
+    return len(rows)
+
+
+@tx
+def asset_delete_erp(eid, fac, label):
+    r = run("SELECT receipt_id FROM asset_erp_issues WHERE id=%s AND factory_name=%s", (eid, fac))
+    run("DELETE FROM asset_erp_issues WHERE id=%s AND factory_name=%s", (eid, fac))
+    audit("ASSET_ERP_DELETE", f"{fac}: [AR#{r[0][0] if r else '?'}] ERP record #{eid} deleted ({label})")
+    return True
+
+
+# ---------------------------------------------------------------- reads
+def _as_join(x):
+    return ", ".join(dict.fromkeys(str(v) for v in x if v))
+
+
+def _as_load(units):
+    """(receipts, erp_issues). Receipts carry ERP issued / pending qty + value and the automatic status."""
+    asset_schema()
+    u = (list(units),)
+    rc = qdf_c("""SELECT id, factory_name, sl_no, COALESCE(item_name,'') AS item_name, COALESCE(description,'') AS description,
+                         COALESCE(qty,0) AS qty, COALESCE(unit_rate,0) AS unit_rate, COALESCE(currency,'BDT') AS currency,
+                         COALESCE(total_value,0) AS total_value, received_date, COALESCE(supplier,'') AS supplier,
+                         COALESCE(invoice_no,'') AS invoice_no, COALESCE(purchase_ref,'') AS purchase_ref, COALESCE(remarks,'') AS remarks,
+                         COALESCE(resp_section,'') AS resp_section, COALESCE(resp_dept,'') AS resp_dept,
+                         COALESCE(created_by,'') AS created_by, COALESCE(created_at,'') AS created_at
+                  FROM asset_receipts WHERE factory_name = ANY(%s) ORDER BY received_date DESC, id DESC""", u)
+    iss = qdf_c("""SELECT id, receipt_id, factory_name, COALESCE(issued_qty,0) AS issued_qty, issue_date, COALESCE(erp_ref,'') AS erp_ref,
+                          COALESCE(erp_voucher,'') AS erp_voucher, COALESCE(erp_section,'') AS erp_section, COALESCE(erp_dept,'') AS erp_dept,
+                          COALESCE(erp_location,'') AS erp_location, COALESCE(remarks,'') AS remarks, COALESCE(source,'Manual') AS source,
+                          COALESCE(entered_by,'') AS entered_by, COALESCE(entered_at,'') AS entered_at
+                   FROM asset_erp_issues WHERE factory_name = ANY(%s) ORDER BY issue_date, id""", u)
+    for c in ("qty", "unit_rate", "total_value"):
+        rc[c] = pd.to_numeric(rc[c], errors="coerce").fillna(0.0).astype(float)
+    iss["issued_qty"] = pd.to_numeric(iss["issued_qty"], errors="coerce").fillna(0.0).astype(float)
+    rc["received_date"] = pd.to_datetime(rc["received_date"], errors="coerce")
+    iss["issue_date"] = pd.to_datetime(iss["issue_date"], errors="coerce")
+    g = iss.groupby("receipt_id")
+    _mp = lambda ser: dict(ser.items())          # dict-based map: safe even when there is no ERP record at all (empty groupby)
+    rc["issued_qty"] = rc["id"].map(_mp(g["issued_qty"].sum())).fillna(0.0).astype(float)
+    rc["pending_qty"] = (rc["qty"] - rc["issued_qty"]).clip(lower=0.0)
+    rc["issued_value"] = rc["issued_qty"] * rc["unit_rate"]
+    rc["pending_value"] = rc["pending_qty"] * rc["unit_rate"]
+    rc["status"] = ["Pending" if i <= 1e-9 else ("Fully Issued" if i >= q - 1e-9 else "Partially Issued")
+                    for i, q in zip(rc["issued_qty"], rc["qty"])]
+    rc["last_issue"] = pd.to_datetime(rc["id"].map(_mp(g["issue_date"].max())), errors="coerce")
+    rc["erp_ref"] = rc["id"].map(_mp(g["erp_ref"].agg(_as_join))).fillna("")
+    rc["erp_section"] = rc["id"].map(_mp(g["erp_section"].agg(_as_join))).fillna("")
+    rc["erp_dept"] = rc["id"].map(_mp(g["erp_dept"].agg(_as_join))).fillna("")
+    rc["sec_show"] = [a or b for a, b in zip(rc["erp_section"], rc["resp_section"])]
+    rc["dept_show"] = [a or b for a, b in zip(rc["erp_dept"], rc["resp_dept"])]
+    rc["month"] = rc["received_date"].dt.to_period("M")
+    if len({*units}) > 1:
+        rc["sl_show"] = [f"{short_fac(f)}-{s}" for f, s in zip(rc["factory_name"], rc["sl_no"])]
+    else:
+        rc["sl_show"] = rc["sl_no"]
+    info = rc.set_index("id")
+    iss["item_name"] = iss["receipt_id"].map(info["item_name"]).fillna("")
+    iss["sl_show"] = iss["receipt_id"].map(info["sl_show"])
+    iss["currency"] = iss["receipt_id"].map(info["currency"]).fillna("BDT")
+    iss["unit_rate"] = iss["receipt_id"].map(info["unit_rate"]).fillna(0.0)
+    iss["value"] = iss["issued_qty"] * iss["unit_rate"]
+    return rc, iss
+
+
+def _as_fmt(v, cur):
+    v = float(v or 0)
+    return f"{AS_SYM.get(cur, cur)} {v:,.0f}" if abs(v - round(v)) < 0.005 else f"{AS_SYM.get(cur, cur)} {v:,.2f}"
+
+
+def _as_money_html(df, col):
+    """Per-currency totals, never mixed: '৳ 8,75,000' and/or '$ 1,200'."""
+    s = df.groupby("currency")[col].sum() if not df.empty else pd.Series(dtype=float)
+    parts = [_as_fmt(s[c], c) for c in ("BDT", "USD") if c in s.index and abs(float(s[c])) > 1e-9]
+    if not parts:
+        return '<div class="v">৳ 0</div>'
+    return f'<div class="v{" sm" if len(parts) > 1 else ""}">' + "<br>".join(parts) + "</div>"
+
+
+def _as_month_pick(rc, iss, key):
+    ms = set()
+    if not rc.empty:
+        ms |= set(rc["received_date"].dropna().dt.to_period("M"))
+    if not iss.empty:
+        ms |= set(iss["issue_date"].dropna().dt.to_period("M"))
+    months = sorted(ms, reverse=True)
+    labs = {p.strftime("%B %Y"): p for p in months}
+    opts = ["All months"] + list(labs)
+    cur = pd.Period(local_now().date(), "M").strftime("%B %Y")
+    default = cur if cur in labs else (list(labs)[0] if labs else "All months")
+    pick = st.selectbox("📅 Month / Year", opts, index=opts.index(default), key=key)
+    return (None if pick == "All months" else labs[pick]), pick
+
+
+def _as_pick(label, options, key, current="", host=None):
+    h = host or st
+    OTHER = "✍ Other (type)"
+    opts = ["— select —"] + [o for o in options if o] + [OTHER]
+    if current and current not in opts:
+        opts.insert(1, current)
+    v = h.selectbox(label, opts, index=opts.index(current) if current in opts else 0, key=key)
+    if v == OTHER:
+        return h.text_input(label + " — type", key=key + "_t").strip()
+    return "" if v == "— select —" else v
+
+
+def _as_head(title, sub, crumb):
+    st.markdown(f'<div class="mcx-head"><div><div class="mcx-crumb">Home &nbsp;›&nbsp; Asset Items &nbsp;›&nbsp; <b>{crumb}</b></div>'
+                f'<div class="mcx-title">{title}</div><div class="mcx-sub">{sub}</div></div></div>', unsafe_allow_html=True)
+
+
+def _as_table(rc):
+    """Standard Asset Item Details table (numeric columns + currency; status badge as text)."""
+    return pd.DataFrame({
+        "SL No.": rc["sl_show"], "Name of Item": rc["item_name"], "Received Qty": rc["qty"],
+        "Rate": [_as_fmt(r, c) for r, c in zip(rc["unit_rate"], rc["currency"])], "Currency": rc["currency"],
+        "Total Received Value": [_as_fmt(v, c) for v, c in zip(rc["total_value"], rc["currency"])],
+        "Received Date": rc["received_date"].dt.strftime(DATE_FMT).fillna("—"),
+        "ERP Issued Qty": rc["issued_qty"], "ERP Pending Qty": rc["pending_qty"],
+        "ERP Issue Date": rc["last_issue"].dt.strftime(DATE_FMT).fillna("—"),
+        "ERP Issue Status": rc["status"].map(AS_BADGE), "ERP Section": rc["erp_section"].replace("", "—"),
+        "ERP Department": rc["erp_dept"].replace("", "—"), "ERP Reference No.": rc["erp_ref"].replace("", "—")})
+
+
+def _as_select_table(tbl, key, rc, label_fn):
+    """Row click (or the box below) opens View Details. Returns the selected receipt row or None."""
+    sel = None
+    try:
+        ev = st.dataframe(tbl, hide_index=True, use_container_width=True, height=min(90 + 35 * len(tbl), 520),
+                          on_select="rerun", selection_mode="single-row", key=key)
+        rows = list(ev.selection.rows) if ev is not None and getattr(ev, "selection", None) else []
+        sel = rows[0] if rows else None
+    except TypeError:
+        st.dataframe(tbl, hide_index=True, use_container_width=True, height=min(90 + 35 * len(tbl), 520))
+    labs = {label_fn(r): i for i, r in enumerate(rc.itertuples())}
+    pick = st.selectbox("🔍 View Details — asset item", ["— select —"] + list(labs), key=key + "_pick")
+    if sel is None and pick in labs:
+        sel = labs[pick]
+    return rc.iloc[sel] if sel is not None and 0 <= sel < len(rc) else None
+
+
+# ---------------------------------------------------------------- View Details
+def _as_details(row, iss):
+    e = html_lib.escape
+    rid = int(row["id"])
+    badge = {"Pending": "off", "Fully Issued": "on", "Partially Issued": "off"}[row["status"]]
+    st.markdown(
+        f'<div class="mcx-det"><div><div class="no">{e(str(row["item_name"]))}<span class="mcx-st {badge}">{e(row["status"])}</span></div>'
+        f'<div class="nm">SL {e(str(row["sl_show"]))} · {e(row["description"] or "—")}</div>'
+        f'<div class="pr">RECEIVED · {row["received_date"]:%d-%b-%Y} · {e(row["supplier"] or "no supplier")} · invoice {e(row["invoice_no"] or "-")}</div></div>'
+        f'<div class="tt"><b>{_as_fmt(row["total_value"], row["currency"])}</b><span>Total received value ({row["currency"]})</span></div></div>',
+        unsafe_allow_html=True)
+    k = st.columns(5)
+    k[0].metric("Received Qty", f"{row['qty']:g}")
+    k[1].metric("ERP Issued Qty", f"{row['issued_qty']:g}")
+    k[2].metric("ERP Pending Qty", f"{row['pending_qty']:g}")
+    k[3].metric("ERP Issued Value", _as_fmt(row["issued_value"], row["currency"]))
+    k[4].metric("ERP Pending Value", _as_fmt(row["pending_value"], row["currency"]))
+    st.caption(f"Rate {_as_fmt(row['unit_rate'], row['currency'])} · Purchase ref: {row['purchase_ref'] or '-'} · Remarks: {row['remarks'] or '-'} · "
+               f"Responsible: {row['resp_section'] or '-'} / {row['resp_dept'] or '-'} · Entered by {row['created_by'] or '-'} ({row['created_at'] or '-'})")
+    mine = iss[iss["receipt_id"] == rid]
+    st.markdown('<div class="mcx-h">Company ERP issue records</div>', unsafe_allow_html=True)
+    if mine.empty:
+        st.info("এই asset এখনো Company ERP-তে issue হয়নি (ERP Pending)।")
+    else:
+        st.dataframe(pd.DataFrame({"ERP Issue Date": mine["issue_date"].dt.strftime(DATE_FMT), "ERP Issued Qty": mine["issued_qty"],
+                                   "ERP Reference": mine["erp_ref"], "Voucher / Document": mine["erp_voucher"],
+                                   "Section": mine["erp_section"], "Department": mine["erp_dept"], "Location": mine["erp_location"],
+                                   "Source": mine["source"].map(lambda s: "📥 " + s if str(s).startswith("Import") else "✍ " + str(s)),
+                                   "Entered by": mine["entered_by"], "Entered at": mine["entered_at"], "Remarks": mine["remarks"]}),
+                     hide_index=True, use_container_width=True, height=min(90 + 35 * len(mine), 300))
+    try:
+        au = qdf_c("""SELECT timestamp AS "When", username AS "Who", action_type AS "Action", details AS "Details" FROM audit_logs
+                      WHERE action_type LIKE 'ASSET%%' AND details LIKE %s ORDER BY id DESC LIMIT 60""", (f"%[AR#{rid}]%",))
+        if not au.empty:
+            with st.expander("🕑 Audit trail (who changed what, when)"):
+                st.dataframe(au, hide_index=True, use_container_width=True, height=min(90 + 35 * len(au), 320))
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------- Dashboard (Asset Item Report)
+def _as_filters(rc, iss, key):
+    """Month + item / section / department / status / currency. Returns (filtered receipts, filtered issues, month, month label)."""
+    per, plabel = _as_month_pick(rc, iss, key + "_m")
+    f1, f2, f3, f4, f5 = st.columns(5)
+    items = ["All"] + sorted({v for v in rc["item_name"] if v})
+    secs = ["All"] + sorted({s for v in rc["sec_show"] for s in str(v).split(", ") if s})
+    deps = ["All"] + sorted({s for v in rc["dept_show"] for s in str(v).split(", ") if s})
+    it = f1.selectbox("Item Name", items, key=key + "_i")
+    sc = f2.selectbox("Section", secs, key=key + "_s")
+    dp = f3.selectbox("Department", deps, key=key + "_d")
+    sx = f4.selectbox("ERP Issue Status", ["All", "Pending", "Partially Issued", "Fully Issued"], key=key + "_x")
+    cu = f5.selectbox("Currency", ["All", "BDT", "USD"], key=key + "_c")
+    d = rc
+    if per is not None:
+        d = d[d["month"] == per]
+    if it != "All":
+        d = d[d["item_name"] == it]
+    if sc != "All":
+        d = d[d["sec_show"].map(lambda v: sc in str(v).split(", "))]
+    if dp != "All":
+        d = d[d["dept_show"].map(lambda v: dp in str(v).split(", "))]
+    if sx != "All":
+        d = d[d["status"] == sx]
+    if cu != "All":
+        d = d[d["currency"] == cu]
+    return d, iss[iss["receipt_id"].isin(d["id"])], per, plabel
+
+
+def _as_trend(d, di, per, cur):
+    d = d[d["currency"] == cur]
+    di = di[di["currency"] == cur]
+    daily = per is not None
+    rec = d.dropna(subset=["received_date"]).assign(P=lambda x: x["received_date"].dt.normalize() if daily else x["received_date"].dt.to_period("M").dt.to_timestamp())
+    isu = di.dropna(subset=["issue_date"]).assign(P=lambda x: x["issue_date"].dt.normalize() if daily else x["issue_date"].dt.to_period("M").dt.to_timestamp())
+    a = rec.groupby("P")["total_value"].sum().rename("Received Value")
+    b = isu.groupby("P")["value"].sum().rename("ERP Issued Value")
+    t = pd.concat([a, b], axis=1).fillna(0.0).sort_index()
+    if t.empty:
+        st.caption("No data to chart.")
+        return
+    try:
+        import altair as alt
+        m = t.reset_index().melt("P", var_name="Series", value_name="Value")
+        m = m.rename(columns={"P": "Date"})
+        ch = alt.Chart(m).mark_line(point=True, strokeWidth=2.6, interpolate="monotone").encode(
+            x=alt.X("Date:T", title=None, axis=alt.Axis(format="%d %b" if daily else "%b %Y")),
+            y=alt.Y("Value:Q", title=f"Value ({AS_SYM[cur]})"),
+            color=alt.Color("Series:N", scale=alt.Scale(domain=["Received Value", "ERP Issued Value"], range=["#2563EB", "#16A34A"]),
+                            legend=alt.Legend(orient="top", title=None)),
+            tooltip=[alt.Tooltip("Date:T", format="%d %b %Y"), "Series:N", alt.Tooltip("Value:Q", format=",.0f")])
+        st.altair_chart(ch.properties(height=270).configure_view(strokeWidth=0).configure_axis(
+            grid=True, gridColor="#EEF2F7", domain=False, labelColor="#64748B", titleColor="#64748B"), use_container_width=True)
+    except Exception:
+        st.line_chart(t, height=270)
+
+
+def _as_breakdown(d, di, cur):
+    d = d[d["currency"] == cur]
+    di = di[(di["currency"] == cur) & di["receipt_id"].isin(d["id"])]
+    seg = [(s or "Section not entered", float(v)) for s, v in di.groupby("erp_section")["value"].sum().sort_values(ascending=False).items() if v > 0]
+    pend = float(d["pending_value"].sum())
+    if pend > 0:
+        seg.append(("Pending in ERP", pend))
+    tot = sum(v for _, v in seg)
+    if tot <= 0:
+        st.caption("No value to break down.")
+        return
+    pal = ["#2563EB", "#16A34A", "#F59E0B", "#8B5CF6", "#06B6D4", "#EC4899", "#84CC16", "#F97316", "#64748B"]
+    cols = [pal[i % 8] if n != "Pending in ERP" else "#DC2626" for i, (n, _) in enumerate(seg)]
+    try:
+        import altair as alt
+        sd = pd.DataFrame(seg, columns=["Part", "Value"])
+        st.altair_chart(alt.Chart(sd).mark_arc(innerRadius=52, outerRadius=88, stroke="#fff", strokeWidth=2).encode(
+            theta="Value:Q", color=alt.Color("Part:N", sort=list(sd["Part"]), legend=None,
+                                             scale=alt.Scale(domain=list(sd["Part"]), range=cols)),
+            tooltip=["Part:N", alt.Tooltip("Value:Q", format=",.0f")]).properties(height=190).configure_view(strokeWidth=0),
+            use_container_width=True)
+    except Exception:
+        pass
+    st.markdown('<div class="mcx-legbox">' + "".join(
+        f'<div class="mcx-leg"><i style="background:{cols[i]}"></i><div class="n">{html_lib.escape(n)}</div><div class="a">{_as_fmt(v, cur)}</div>'
+        f'<div class="p">{v / tot * 100:.1f}%</div></div>' for i, (n, v) in enumerate(seg))
+        + f'</div><div class="mcx-leg"><div class="n"><b>Total received ({cur})</b></div><div class="a">{_as_fmt(tot, cur)}</div><div class="p">100%</div></div>',
+        unsafe_allow_html=True)
+
+
+def _as_dashboard(rc, iss):
+    _as_head("Asset Item Report", "Received in factory vs issued in Company ERP — USD and BDT are always shown separately", "Asset Item Report")
+    if rc.empty:
+        st.info("এখনো কোনো Asset Item receive এন্ট্রি নেই — 📥 Receiving Entry ট্যাবে প্রথম এন্ট্রি দিন।")
+        return
+    d, di, per, plabel = _as_filters(rc, iss, "as_db")
+    if d.empty:
+        st.info("এই filter-এ কোনো asset item নেই।")
+        return
+    st.markdown(
+        '<div class="mcx-grid">'
+        f'<div class="mcx-kpi sky"><div class="mcx-ic">📦</div><div><div class="l">Total Asset Items Received</div><div class="v">{len(d):,}</div><div class="s">{html_lib.escape(plabel)}</div></div></div>'
+        f'<div class="mcx-kpi"><div class="mcx-ic">🔢</div><div><div class="l">Total Received Quantity</div><div class="v">{d["qty"].sum():,.0f}</div><div class="s">all items</div></div></div>'
+        f'<div class="mcx-kpi navy"><div class="mcx-ic">💰</div><div><div class="l">Total Received Value</div>{_as_money_html(d, "total_value")}<div class="s">per currency</div></div></div>'
+        f'<div class="mcx-kpi green"><div class="mcx-ic">✅</div><div><div class="l">Total ERP Issued Quantity</div><div class="v">{d["issued_qty"].sum():,.0f}</div><div class="s">recorded from Company ERP</div></div></div>'
+        f'<div class="mcx-kpi blue"><div class="mcx-ic">🧾</div><div><div class="l">Total ERP Issued Value</div>{_as_money_html(d, "issued_value")}<div class="s">per currency</div></div></div>'
+        f'<div class="mcx-kpi amber"><div class="mcx-ic">⏳</div><div><div class="l">Total ERP Pending Quantity</div><div class="v">{d["pending_qty"].sum():,.0f}</div><div class="s">{int((d["status"] != "Fully Issued").sum())} item(s) not fully issued</div></div></div>'
+        f'<div class="mcx-kpi red"><div class="mcx-ic">🚨</div><div><div class="l">Total ERP Pending Value</div>{_as_money_html(d, "pending_value")}<div class="s">still to issue in ERP</div></div></div></div>',
+        unsafe_allow_html=True)
+    curs = [c for c in ("BDT", "USD") if (d["currency"] == c).any()]
+    cur = curs[0]
+    if len(curs) > 1:
+        cur = st.radio("Chart currency", curs, horizontal=True, key="as_db_cur")
+    cT, cB = st.columns([1.5, 1])
+    with cT:
+        st.markdown(f'<div class="mcx-h">Asset Item Trend</div><div class="mcx-hs">Received value vs ERP issued value ({cur}) — {"daily" if per is not None else "monthly"}</div>', unsafe_allow_html=True)
+        _as_trend(d, di, per, cur)
+    with cB:
+        st.markdown(f'<div class="mcx-h">Asset Item Breakdown</div><div class="mcx-hs">Received value ({cur}): ERP section vs still pending</div>', unsafe_allow_html=True)
+        _as_breakdown(d, di, cur)
+    st.markdown('<div class="mcx-h" style="margin-top:14px">Asset Item Details</div>'
+                '<div class="mcx-hs">Row select করে বা নিচের box থেকে item বেছে View Details দেখুন। Section / Department filter শুধু যে item-এর ERP record (বা responsible section) মেলে সেগুলো দেখায়; qty / value পুরো item-এর।</div>',
+                unsafe_allow_html=True)
+    tbl = _as_table(d)
+    row = _as_select_table(tbl, "as_db_tbl", d, lambda r: f"SL {r.sl_show} · {r.item_name} · {r.received_date:%d-%b-%Y} · {r.status}")
+    ex = tbl.copy()
+    export_buttons(ex, "asset_item_details", f"Asset Item Details ({plabel})")
+    if row is not None:
+        st.markdown("---")
+        _as_details(row, iss)
+
+
+# ---------------------------------------------------------------- Receiving entry
+def _as_receiving_view(units, fac, is_mgr, rc, iss):
+    _as_head("Asset Item Receiving Entry", "Physical receiving in the factory. ERP issue is recorded separately (🔗 ERP Issue Tracking).", "Receiving Entry")
+    secs = _ri_section_names(fac) if not is_cons_view else []
+    if is_cons_view:
+        st.info("Entry দিতে ওপর থেকে একটি Factory (Unit) বাছুন। নিচে সব Unit-এর receive তালিকা দেখা যাচ্ছে।")
+    else:
+        gen = st.session_state.get("as_rc_gen", 0)
+        K = lambda n: f"as_rc_{n}_{gen}"
+        nxt = (int(rc["sl_no"].max()) if not rc.empty else 0) + 1
+        with st.container(border=True):
+            st.markdown(f'<div class="mcx-h">➕ New asset receiving · SL No. <b>{nxt}</b> (auto)</div>', unsafe_allow_html=True)
+            c1, c2 = st.columns([1.3, 1])
+            item = c1.text_input("Item Name *", key=K("item"))
+            supplier = c2.text_input("Supplier Name *", key=K("sup"))
+            desc = st.text_input("Item Description", key=K("desc"))
+            c3, c4, c5, c6 = st.columns([1, 1, 0.8, 1])
+            qty = c3.number_input("Received Quantity *", min_value=0.0, value=1.0, step=1.0, key=K("qty"))
+            rate = c4.number_input("Unit Rate *", min_value=0.0, value=0.0, step=1.0, key=K("rate"))
+            cur = c5.selectbox("Currency *", ["BDT", "USD"], key=K("cur"))
+            c6.metric("Total Received Value", _as_fmt(qty * rate, cur), help="Received Quantity × Unit Rate")
+            c7, c8, c9 = st.columns(3)
+            rdate = c7.date_input("Received Date *", value=local_now().date(), format="DD/MM/YYYY", key=K("date"))
+            inv = c8.text_input("Invoice / Challan Number *", key=K("inv"))
+            pref = c9.text_input("Purchase Reference", key=K("pref"))
+            c10, c11 = st.columns(2)
+            rsec = _as_pick("Responsible Section (optional)", secs, K("rsec"), host=c10)
+            rdept = _as_pick("Responsible Department (optional)", DEPARTMENTS, K("rdept"), host=c11)
+            rem = st.text_input("Remarks", key=K("rem"))
+            if st.button("💾 Save asset receiving", type="primary", key=K("save")) and guard():
+                err = ""
+                if not item.strip():
+                    err = "Item Name লিখুন।"
+                elif not supplier.strip():
+                    err = "Supplier Name লিখুন।"
+                elif qty <= 0:
+                    err = "Received Quantity ০-এর বেশি হতে হবে।"
+                elif rate <= 0:
+                    err = "Unit Rate ০-এর বেশি হতে হবে।"
+                elif not inv.strip():
+                    err = "Invoice / Challan Number লিখুন।"
+                elif not rc.empty and ((rc["factory_name"] == fac) & (rc["invoice_no"].str.lower() == inv.strip().lower())
+                                       & (rc["item_name"].str.lower() == item.strip().lower())
+                                       & (rc["supplier"].str.lower() == supplier.strip().lower())).any():
+                    err = "এই Invoice + Item + Supplier আগেই এন্ট্রি করা আছে।"
+                if err:
+                    st.error(err)
+                else:
+                    sl = asset_add_receipt(fac, {"item": item.strip(), "desc": desc.strip(), "qty": float(qty), "rate": float(rate), "cur": cur,
+                                                 "date": rdate, "supplier": supplier.strip(), "invoice": inv.strip(), "pref": pref.strip(),
+                                                 "remarks": rem.strip(), "sec": rsec, "dept": rdept})
+                    if sl:
+                        st.session_state["as_rc_gen"] = gen + 1
+                        done(f"✅ Asset receiving saved — SL {sl}: {_as_fmt(qty * rate, cur)}")
+    st.markdown('<div class="mcx-h" style="margin-top:14px">Received asset items</div>', unsafe_allow_html=True)
+    if rc.empty:
+        st.info("এখনো কোনো receive এন্ট্রি নেই।")
+        return
+    per, plabel = _as_month_pick(rc, iss, "as_rc_month")
+    d = rc if per is None else rc[rc["month"] == per]
+    if d.empty:
+        st.info("এই মাসে কোনো receive নেই।")
+        return
+    st.markdown(f'<div class="mcx-kpi navy" style="max-width:420px;margin-bottom:10px"><div class="mcx-ic">💰</div><div><div class="l">Total received · {html_lib.escape(plabel)}</div>'
+                f'{_as_money_html(d, "total_value")}<div class="s">{len(d)} item(s)</div></div></div>', unsafe_allow_html=True)
+    tbl = pd.DataFrame({"SL No.": d["sl_show"], "Item Name": d["item_name"], "Description": d["description"], "Received Qty": d["qty"],
+                        "Unit Rate": d["unit_rate"], "Currency": d["currency"], "Total Received Value": d["total_value"].round(2),
+                        "Received Date": d["received_date"].dt.strftime(DATE_FMT), "Supplier": d["supplier"], "Invoice / Challan": d["invoice_no"],
+                        "Purchase Ref": d["purchase_ref"], "ERP Status": d["status"].map(AS_BADGE), "Remarks": d["remarks"], "Entered by": d["created_by"]})
+    st.dataframe(tbl, hide_index=True, use_container_width=True, height=min(90 + 35 * len(tbl), 520))
+    export_buttons(tbl, "asset_receiving", f"Asset receiving ({plabel})")
+    if is_cons_view or not is_mgr:
+        return
+    mine = rc[rc["factory_name"] == fac]
+    if mine.empty:
+        return
+    with st.expander("✏️ Edit / 🗑 Delete a receiving entry (Store Manager)"):
+        labs = {f"SL {r.sl_no} · {r.item_name} · {r.qty:g} × {r.unit_rate:g} {r.currency} · {r.received_date:%d-%b-%Y}": r.id for r in mine.itertuples()}
+        pk = st.selectbox("Entry", list(labs), key="as_ed_pick")
+        r = mine[mine["id"] == labs[pk]].iloc[0]
+        rid = int(r["id"])
+        E = lambda n: f"as_ed_{n}_{rid}"
+        e1, e2 = st.columns([1.3, 1])
+        ni = e1.text_input("Item Name", value=r["item_name"], key=E("i"))
+        ns_ = e2.text_input("Supplier", value=r["supplier"], key=E("s"))
+        nd = st.text_input("Description", value=r["description"], key=E("d"))
+        e3, e4, e5 = st.columns(3)
+        nq = e3.number_input("Received Qty", min_value=0.0, value=float(r["qty"]), step=1.0, key=E("q"))
+        nr = e4.number_input("Unit Rate", min_value=0.0, value=float(r["unit_rate"]), step=1.0, key=E("r"))
+        nc = e5.selectbox("Currency", ["BDT", "USD"], index=0 if r["currency"] == "BDT" else 1, key=E("c"))
+        e6, e7, e8 = st.columns(3)
+        ndt = e6.date_input("Received Date", value=r["received_date"].date() if pd.notna(r["received_date"]) else local_now().date(), format="DD/MM/YYYY", key=E("dt"))
+        nin = e7.text_input("Invoice / Challan", value=r["invoice_no"], key=E("in"))
+        npr = e8.text_input("Purchase Ref", value=r["purchase_ref"], key=E("pr"))
+        nrem = st.text_input("Remarks", value=r["remarks"], key=E("rm"))
+        b1, b2 = st.columns(2)
+        if b1.button("💾 Update entry", key=E("upd")) and guard():
+            if not ni.strip() or nq <= 0 or nr <= 0:
+                st.error("Item, Qty (>0) ও Rate (>0) লাগবে।")
+            elif asset_update_receipt(rid, fac, {"item": ni.strip(), "desc": nd.strip(), "qty": float(nq), "rate": float(nr), "cur": nc, "date": ndt,
+                                                 "supplier": ns_.strip(), "invoice": nin.strip(), "pref": npr.strip(), "remarks": nrem.strip(),
+                                                 "sec": r["resp_section"], "dept": r["resp_dept"]}):
+                done("✅ Entry updated.")
+        if b2.button("🗑 Delete entry", key=E("del")) and guard():
+            if asset_delete_receipt(rid, fac, f"SL {r['sl_no']} {r['item_name']}"):
+                done("✅ Entry deleted.")
+
+
+# ---------------------------------------------------------------- ERP issue tracking (record / import only)
+def _as_norm(c):
+    return re.sub(r"[^a-z0-9]", "", str(c).lower())
+
+
+_AS_IMP = {"sl": {"slno", "sl", "serial", "serialno", "slnumber"}, "item": {"itemname", "item", "assetitem", "assetitemname", "name", "nameofitem"},
+           "qty": {"issuedqty", "erpissuedqty", "issuedquantity", "erpissuedquantity", "qty", "quantity"},
+           "date": {"issuedate", "erpissuedate", "date"},
+           "ref": {"erpref", "erpreference", "erpreferencenumber", "reference", "referenceno", "refno", "companyerpreferencenumber"},
+           "voucher": {"voucher", "erpvoucher", "vouchernumber", "document", "documentnumber", "erpvoucherdocumentnumber", "voucherno"},
+           "sec": {"section", "erpsection"}, "dept": {"department", "dept", "erpdepartment"}, "loc": {"location", "erplocation"},
+           "remarks": {"remarks", "erpremarks", "remark"}}
+
+
+def _as_parse_import(up, rc_f):
+    """Validate an uploaded ERP file. Returns (preview df, [(receipt_id, rec)] of valid rows)."""
+    raw = pd.read_csv(up, dtype=str, keep_default_na=False) if up.name.lower().endswith(".csv") else pd.read_excel(up, dtype=str).fillna("")
+    cmap = {}
+    for c in raw.columns:
+        n = _as_norm(c)
+        for k, names in _AS_IMP.items():
+            if n in names and k not in cmap:
+                cmap[k] = c
+    if "qty" not in cmap or ("sl" not in cmap and "item" not in cmap):
+        raise ValueError("File-এ অন্তত 'SL No' (বা Item Name) এবং 'Issued Qty' column লাগবে।")
+    pend = {int(r.id): float(r.pending_qty) for r in rc_f.itertuples()}
+    out, ok = [], []
+    for i, r in raw.iterrows():
+        g = lambda k: str(r[cmap[k]]).strip() if k in cmap else ""
+        msg, rid = "", None
+        if g("sl"):
+            m = rc_f[rc_f["sl_no"].astype(str) == str(int(float(g("sl")))) if re.fullmatch(r"\d+(\.0+)?", g("sl")) else rc_f["sl_no"] < 0]
+            if len(m) == 1:
+                rid = int(m.iloc[0]["id"])
+            else:
+                msg = f"SL No '{g('sl')}' পাওয়া যায়নি"
+        elif g("item"):
+            m = rc_f[(rc_f["item_name"].str.lower() == g("item").lower()) & (rc_f["status"] != "Fully Issued")]
+            if len(m) == 1:
+                rid = int(m.iloc[0]["id"])
+            else:
+                msg = "Item name ঠিক একটি open asset-এর সাথে মেলেনি — SL No ব্যবহার করুন"
+        try:
+            qv = float(g("qty").replace(",", ""))
+        except ValueError:
+            qv = 0.0
+        dt = parse_date(g("date")) if g("date") else None
+        if not msg and qv <= 0:
+            msg = "Issued Qty ০-এর বেশি হতে হবে"
+        if not msg and dt is None:
+            msg = "Issue Date পড়া যায়নি (DD-MM-YYYY / DD-Mon-YYYY)"
+        if not msg and not (g("ref") or g("voucher")):
+            msg = "ERP Reference বা Voucher নম্বর লাগবে"
+        if not msg and qv > pend.get(rid, 0.0) + 1e-9:
+            msg = f"Pending qty ({pend.get(rid, 0.0):g}) এর চেয়ে বেশি"
+        if not msg:
+            pend[rid] -= qv
+            ok.append((rid, {"qty": qv, "date": dt.date(), "ref": g("ref"), "voucher": g("voucher"), "sec": g("sec"), "dept": g("dept"),
+                             "loc": g("loc"), "remarks": g("remarks")}))
+        out.append({"Row": i + 2, "SL No": g("sl"), "Item": g("item"), "Issued Qty": g("qty"), "Issue Date": g("date"), "ERP Ref": g("ref"),
+                    "Voucher": g("voucher"), "Check": "✅ OK" if not msg else "❌ " + msg})
+    return pd.DataFrame(out), ok
+
+
+def _as_erp_view(units, fac, is_mgr, rc, iss):
+    _as_head("Company ERP Issue Tracking", "Record what Company ERP has issued. No stock issue is done in this software.", "ERP Issue Tracking")
+    st.markdown('<div class="as-note">ℹ️ Asset Item <b>এই software থেকে issue হয় না</b> — Company ERP-তে হয়। এখানে শুধু ERP-র issue তথ্য <b>রেকর্ড / import</b> করা হয়; '
+                'ERP-র সাথে কোনো automatic sync নেই। প্রতিটি ERP record-এ <b>Manual / Import</b> চিহ্ন, কে ও কখন দিয়েছে তা থাকে।</div>', unsafe_allow_html=True)
+    if rc.empty:
+        st.info("আগে 📥 Receiving Entry-তে asset receive এন্ট্রি দিন।")
+        return
+    only_open = st.radio("Show", ["Not fully issued", "All"], horizontal=True, key="as_erp_show", label_visibility="collapsed")
+    d = rc if only_open == "All" else rc[rc["status"] != "Fully Issued"]
+    term = st.text_input("🔍 Search (item / ERP ref / invoice)", key="as_erp_search")
+    if term:
+        t = term.lower()
+        d = d[d.apply(lambda r: t in f"{r['item_name']} {r['erp_ref']} {r['invoice_no']} {r['supplier']}".lower(), axis=1)]
+    if d.empty:
+        st.success("🎉 কোনো pending asset নেই।" if only_open != "All" else "কোনো asset পাওয়া যায়নি।")
+    else:
+        tbl = pd.DataFrame({"SL No.": d["sl_show"], "Asset Item": d["item_name"], "Received Qty": d["qty"], "ERP Issued Qty": d["issued_qty"],
+                            "ERP Pending Qty": d["pending_qty"], "ERP Issue Status": d["status"].map(AS_BADGE),
+                            "ERP Issue Date": d["last_issue"].dt.strftime(DATE_FMT).fillna("—"), "ERP Reference": d["erp_ref"].replace("", "—"),
+                            "ERP Section": d["erp_section"].replace("", "—"), "ERP Department": d["erp_dept"].replace("", "—"),
+                            "Currency": d["currency"]})
+        st.dataframe(tbl, hide_index=True, use_container_width=True, height=min(90 + 35 * len(tbl), 420))
+        export_buttons(tbl, "asset_erp_tracking", "Company ERP issue tracking")
+    if is_cons_view:
+        st.info("ERP issue রেকর্ড করতে ওপর থেকে একটি Factory (Unit) বাছুন।")
+        return
+    mine = rc[(rc["factory_name"] == fac) & (rc["status"] != "Fully Issued")]
+    secs = _ri_section_names(fac)
+    with st.container(border=True):
+        st.markdown('<div class="mcx-h">✍ Record a Company ERP issue (manual)</div>', unsafe_allow_html=True)
+        if mine.empty:
+            st.success("এই Unit-এর সব asset ERP-তে fully issued।")
+        else:
+            gen = st.session_state.get("as_erp_gen", 0)
+            labs = {f"SL {r.sl_no} · {r.item_name} · recv {r.qty:g} · ERP issued {r.issued_qty:g} · pending {r.pending_qty:g} {r.currency}": r for r in mine.itertuples()}
+            pk = st.selectbox("Asset item *", ["— select asset item —"] + list(labs), key=f"as_erp_pick_{gen}")
+            r = labs.get(pk)
+            if r is not None:
+                K = lambda n: f"as_erp_{n}_{gen}_{r.id}"
+                c1, c2, c3 = st.columns(3)
+                iq = c1.number_input("ERP Issued Quantity *", min_value=0.0, max_value=float(r.pending_qty), value=float(r.pending_qty), step=1.0, key=K("q"))
+                idt = c2.date_input("ERP Issue Date *", value=local_now().date(), format="DD/MM/YYYY", key=K("d"))
+                new_pend = float(r.pending_qty) - iq
+                stt = "Fully Issued" if new_pend <= 1e-9 else ("Partially Issued" if r.issued_qty + iq > 1e-9 else "Pending")
+                c3.metric("Pending after this", f"{new_pend:g}", delta=AS_BADGE[stt], delta_color="off")
+                c4, c5 = st.columns(2)
+                ref = c4.text_input("Company ERP Reference Number *", key=K("ref"))
+                vou = c5.text_input("ERP Voucher / Document Number", key=K("vou"))
+                c6, c7, c8 = st.columns(3)
+                esec = _as_pick("ERP Section", secs, K("sec"), host=c6)
+                edep = _as_pick("ERP Department", DEPARTMENTS, K("dep"), host=c7)
+                eloc = c8.text_input("ERP Location", key=K("loc"))
+                erem = st.text_input("ERP Remarks", key=K("rem"))
+                if st.button("💾 Save ERP issue record", type="primary", key=K("save")) and guard():
+                    iss_mine = iss[iss["receipt_id"] == r.id]
+                    err = ""
+                    if iq <= 0:
+                        err = "ERP Issued Quantity ০-এর বেশি হতে হবে।"
+                    elif not (ref.strip() or vou.strip()):
+                        err = "ERP Reference Number বা Voucher Number দিন।"
+                    elif not iss_mine.empty and ((iss_mine["erp_ref"].str.lower() == ref.strip().lower()) & (iss_mine["erp_voucher"].str.lower() == vou.strip().lower())).any():
+                        err = "এই ERP Reference + Voucher এই asset-এ আগেই এন্ট্রি করা আছে।"
+                    if err:
+                        st.error(err)
+                    elif asset_add_erp(fac, int(r.id), {"qty": float(iq), "date": idt, "ref": ref.strip(), "voucher": vou.strip(), "sec": esec,
+                                                       "dept": edep, "loc": eloc.strip(), "remarks": erem.strip()}):
+                        st.session_state["as_erp_gen"] = gen + 1
+                        done(f"✅ ERP issue recorded — {r.item_name}: {iq:g} ({AS_BADGE[stt]})")
+    with st.expander("📥 Import Company ERP issue records (Excel / CSV)"):
+        st.caption("Columns: **SL No** (বা Item Name), **Issued Qty**, **Issue Date**, **ERP Reference**, Voucher, Section, Department, Location, Remarks. "
+                   "File পড়ে আগে যাচাই দেখাবে; শুধু ✅ OK row import হয়। Import করা record-এ “Import: <file>” চিহ্ন থাকে।")
+        up = st.file_uploader("ERP file", type=["csv", "xlsx", "xls"], key="as_erp_file")
+        if up is not None:
+            try:
+                prev, ok = _as_parse_import(up, rc[rc["factory_name"] == fac])
+                st.dataframe(prev, hide_index=True, use_container_width=True, height=min(90 + 35 * len(prev), 360))
+                st.caption(f"{len(ok)} টি row ঠিক আছে, {len(prev) - len(ok)} টি row-তে সমস্যা (import হবে না)।")
+                if ok and st.button(f"📥 Import {len(ok)} valid ERP record(s)", key="as_erp_imp_btn") and guard():
+                    n = asset_import_erp(fac, ok, f"Import: {up.name}")
+                    if n:
+                        done(f"✅ {n} টি ERP record import হয়েছে।")
+            except Exception as ex:
+                st.error(f"File পড়া যায়নি: {ex}")
+    st.markdown('<div class="mcx-h" style="margin-top:14px">ERP record log</div>', unsafe_allow_html=True)
+    if iss.empty:
+        st.caption("এখনো কোনো ERP record নেই।")
+        return
+    lg = iss.sort_values("id", ascending=False)
+    log = pd.DataFrame({"ERP Date": lg["issue_date"].dt.strftime(DATE_FMT), "SL No.": lg["sl_show"], "Asset Item": lg["item_name"],
+                        "ERP Issued Qty": lg["issued_qty"], "ERP Reference": lg["erp_ref"], "Voucher / Document": lg["erp_voucher"],
+                        "Section": lg["erp_section"], "Department": lg["erp_dept"], "Location": lg["erp_location"],
+                        "Source": lg["source"].map(lambda s: "📥 " + s if str(s).startswith("Import") else "✍ Manual"),
+                        "Entered by": lg["entered_by"], "Entered at": lg["entered_at"]})
+    st.dataframe(log, hide_index=True, use_container_width=True, height=min(90 + 35 * len(log), 380))
+    export_buttons(log, "asset_erp_records", "Company ERP issue records")
+    if is_mgr:
+        with st.expander("🗑 ভুল ERP record মুছুন (Store Manager)"):
+            mine_i = lg[lg["factory_name"] == fac].head(200)
+            if mine_i.empty:
+                st.caption("এই Unit-এ কোনো ERP record নেই।")
+            else:
+                dl = {f"#{r.id} · SL {r.sl_show} · {r.item_name} · {r.issued_qty:g} · ref {r.erp_ref or r.erp_voucher or '-'}": r for r in mine_i.itertuples()}
+                dk = st.selectbox("ERP record", list(dl), key="as_erp_del_pick")
+                if st.button("🗑 Delete this ERP record", key="as_erp_del_btn") and guard():
+                    x = dl[dk]
+                    if asset_delete_erp(int(x.id), fac, f"{x.item_name} qty {x.issued_qty:g} ref {x.erp_ref or x.erp_voucher}"):
+                        done("✅ ERP record deleted.")
+
+
+# ---------------------------------------------------------------- reports
+def _as_pending_df(rc, per=None):
+    d = rc[rc["status"] != "Fully Issued"]
+    if per is not None:
+        d = d[d["month"] == per]
+    today = pd.Timestamp(local_now().date())
+    return d.assign(age=[(today - x).days if pd.notna(x) else None for x in d["received_date"]])
+
+
+def _as_pending_table(d):
+    resp = [f"{a or '—'} / {b or '—'}" for a, b in zip(d["sec_show"], d["dept_show"])]
+    return pd.DataFrame({"SL No.": d["sl_show"], "Item Name": d["item_name"], "Received Qty": d["qty"], "ERP Issued Qty": d["issued_qty"],
+                         "Pending Qty": d["pending_qty"], "Currency": d["currency"],
+                         "Pending Value": [_as_fmt(v, c) for v, c in zip(d["pending_value"], d["currency"])],
+                         "Received Date": d["received_date"].dt.strftime(DATE_FMT), "Days since received": d["age"],
+                         "ERP Status": d["status"].map(AS_BADGE), "Responsible Section / Department": resp})
+
+
+def _as_pending_view(rc, iss):
+    _as_head("Monthly ERP Pending Report", "Assets received in the factory that are not yet fully issued in Company ERP", "ERP Pending")
+    per, plabel = _as_month_pick(rc, iss, "as_pd_m")
+    d = _as_pending_df(rc, per)
+    if d.empty:
+        st.success(f"{plabel}: কোনো ERP pending asset নেই 🎉")
+        return
+    old = int(pd.to_numeric(d["age"], errors="coerce").max() or 0)
+    st.markdown('<div class="mcx-grid">'
+                f'<div class="mcx-kpi red"><div class="mcx-ic">🚨</div><div><div class="l">ERP Pending Value</div>{_as_money_html(d, "pending_value")}<div class="s">{html_lib.escape(plabel)}</div></div></div>'
+                f'<div class="mcx-kpi amber"><div class="mcx-ic">⏳</div><div><div class="l">Items not fully issued</div><div class="v">{len(d)}</div><div class="s">{int((d["status"] == "Pending").sum())} pending · {int((d["status"] == "Partially Issued").sum())} partial</div></div></div>'
+                f'<div class="mcx-kpi navy"><div class="mcx-ic">🔢</div><div><div class="l">Pending Quantity</div><div class="v">{d["pending_qty"].sum():,.0f}</div><div class="s">of {d["qty"].sum():,.0f} received</div></div></div>'
+                f'<div class="mcx-kpi"><div class="mcx-ic">📅</div><div><div class="l">Oldest pending</div><div class="v">{old} days</div><div class="s">since received</div></div></div></div>',
+                unsafe_allow_html=True)
+    t = _as_pending_table(d.sort_values("age", ascending=False))
+    st.dataframe(t, hide_index=True, use_container_width=True, height=min(90 + 35 * len(t), 520))
+    sec = d.assign(S=d["sec_show"].replace("", "Not assigned")).groupby(["S", "currency"]).agg(Items=("id", "count"), Qty=("pending_qty", "sum"), Val=("pending_value", "sum")).reset_index()
+    st.markdown('<div class="mcx-h">Pending by responsible section</div>', unsafe_allow_html=True)
+    st.dataframe(pd.DataFrame({"Section": sec["S"], "Currency": sec["currency"], "Items": sec["Items"], "Pending Qty": sec["Qty"],
+                               "Pending Value": [_as_fmt(v, c) for v, c in zip(sec["Val"], sec["currency"])]}), hide_index=True, use_container_width=True)
+    export_buttons(t, "asset_erp_pending", f"ERP pending ({plabel})")
+
+
+def _as_recon_view(rc, iss):
+    _as_head("Monthly Reconciliation", "Physical store received records vs Company ERP issued vs ERP pending", "Reconciliation")
+    st.markdown('<div class="as-warn">⚠️ Physical installation / use মানে ERP issue সম্পন্ন — এটা ধরা হয় না। এখানে শুধু ERP-তে রেকর্ড করা issue গোনা হয়।</div>', unsafe_allow_html=True)
+    if rc.empty:
+        st.info("এখনো কোনো asset receive এন্ট্রি নেই।")
+        return
+    per, plabel = _as_month_pick(rc, iss, "as_rcn_m")
+    d = rc if per is None else rc[rc["month"] == per]
+    if d.empty:
+        st.info("এই মাসে কোনো receive নেই।")
+        return
+    g = d.groupby([d["month"].astype(str), "item_name", "currency"]).agg(
+        RQ=("qty", "sum"), RV=("total_value", "sum"), IQ=("issued_qty", "sum"), IV=("issued_value", "sum"),
+        PQ=("pending_qty", "sum"), PV=("pending_value", "sum"), N=("id", "count"), Full=("status", lambda s: int((s == "Fully Issued").sum())),
+        Pend=("status", lambda s: int((s == "Pending").sum()))).reset_index()
+    g["Result"] = ["🟢 Fully issued" if f == n else ("🔴 Pending in ERP" if p == n else "🟠 Partially issued") for f, p, n in zip(g["Full"], g["Pend"], g["N"])]
+    c = st.columns(4)
+    c[0].metric("🟢 Fully issued", int((g["Result"] == "🟢 Fully issued").sum()))
+    c[1].metric("🟠 Partially issued", int((g["Result"] == "🟠 Partially issued").sum()))
+    c[2].metric("🔴 Pending in ERP", int((g["Result"] == "🔴 Pending in ERP").sum()))
+    c[3].metric("Quantity differences", int((g["PQ"] > 1e-9).sum()))
+    st.markdown('<div class="mcx-h">Item-wise & month-wise reconciliation</div>', unsafe_allow_html=True)
+    t = pd.DataFrame({"Month": g["month"], "Item": g["item_name"], "Currency": g["currency"], "Store Received Qty": g["RQ"],
+                      "Store Received Value": g["RV"].round(2), "ERP Issued Qty": g["IQ"], "ERP Issued Value": g["IV"].round(2),
+                      "ERP Pending Qty": g["PQ"], "ERP Pending Value": g["PV"].round(2), "Qty Difference": (g["RQ"] - g["IQ"]),
+                      "Value Difference": (g["RV"] - g["IV"]).round(2), "Result": g["Result"]})
+    t = t.sort_values(["Month", "Item"], ascending=[False, True])
+    st.dataframe(t, hide_index=True, use_container_width=True, height=min(90 + 35 * len(t), 520))
+    export_buttons(t, "asset_reconciliation", f"Asset reconciliation ({plabel})")
+    # month summary: received in month vs ERP posted in month (by ERP issue date)
+    st.markdown('<div class="mcx-h">Month-wise summary (per currency)</div><div class="mcx-hs">ERP posted = ERP issue date অনুযায়ী ওই মাসে ERP-তে যা issue হয়েছে (যেকোনো মাসের receive-এর জন্য)।</div>', unsafe_allow_html=True)
+    rm = rc.groupby([rc["month"].astype(str), "currency"]).agg(Rec=("total_value", "sum"), Iss=("issued_value", "sum"), Pend=("pending_value", "sum")).reset_index()
+    ipm = (iss.dropna(subset=["issue_date"]).groupby([iss["issue_date"].dt.to_period("M").astype(str), "currency"])["value"].sum()
+           .reset_index().rename(columns={"issue_date": "month", "value": "Posted"}))
+    rm = rm.merge(ipm, left_on=["month", "currency"], right_on=["month", "currency"], how="outer").fillna(0.0).sort_values("month", ascending=False)
+    ms = pd.DataFrame({"Month": rm["month"], "Currency": rm["currency"], "Received in month": rm["Rec"].round(2),
+                       "ERP issued (of that month's receipts)": rm["Iss"].round(2), "ERP pending (of that month's receipts)": rm["Pend"].round(2),
+                       "ERP posted in month (by ERP date)": rm["Posted"].round(2), "Value Difference": (rm["Rec"] - rm["Iss"]).round(2)})
+    st.dataframe(ms, hide_index=True, use_container_width=True, height=min(90 + 35 * len(ms), 360))
+    export_buttons(ms, "asset_reconciliation_months", "Asset reconciliation month-wise")
+
+
+def _as_reports_view(rc, iss):
+    _as_head("Asset Reports & Ledger", "Monthly receiving, ERP issue, ERP pending, item ledger and section-wise reports", "Reports & Ledger")
+    rep = st.radio("Report", ["Monthly Asset Receiving", "Monthly ERP Issue", "Monthly ERP Pending", "Asset Item Ledger", "Section-wise"],
+                   horizontal=True, key="as_rep_pick", label_visibility="collapsed")
+    if rc.empty:
+        st.info("এখনো কোনো asset receive এন্ট্রি নেই।")
+        return
+    per, plabel = _as_month_pick(rc, iss, "as_rep_m")
+    if rep == "Monthly Asset Receiving":
+        d = rc if per is None else rc[rc["month"] == per]
+        t = pd.DataFrame({"SL No.": d["sl_show"], "Item Name": d["item_name"], "Description": d["description"], "Received Qty": d["qty"],
+                          "Unit Rate": d["unit_rate"], "Currency": d["currency"], "Total Received Value": d["total_value"].round(2),
+                          "Received Date": d["received_date"].dt.strftime(DATE_FMT), "Supplier": d["supplier"], "Invoice / Challan": d["invoice_no"],
+                          "Purchase Ref": d["purchase_ref"], "Remarks": d["remarks"]})
+        st.markdown(f'<div class="mcx-kpi navy" style="max-width:420px"><div class="mcx-ic">💰</div><div><div class="l">Total received · {html_lib.escape(plabel)}</div>{_as_money_html(d, "total_value")}<div class="s">{len(d)} item(s)</div></div></div>', unsafe_allow_html=True)
+        name = "asset_monthly_receiving"
+    elif rep == "Monthly ERP Issue":
+        d = iss if per is None else iss[iss["issue_date"].dt.to_period("M") == per]
+        t = pd.DataFrame({"ERP Issue Date": d["issue_date"].dt.strftime(DATE_FMT), "SL No.": d["sl_show"], "Item Name": d["item_name"],
+                          "ERP Issued Qty": d["issued_qty"], "Currency": d["currency"], "ERP Issued Value": d["value"].round(2),
+                          "ERP Reference": d["erp_ref"], "Voucher / Document": d["erp_voucher"], "Section": d["erp_section"],
+                          "Department": d["erp_dept"], "Location": d["erp_location"], "Source": d["source"], "Entered by": d["entered_by"],
+                          "Entered at": d["entered_at"], "Remarks": d["remarks"]})
+        st.markdown(f'<div class="mcx-kpi blue" style="max-width:420px"><div class="mcx-ic">🧾</div><div><div class="l">ERP issued · {html_lib.escape(plabel)}</div>{_as_money_html(d.assign(currency=d["currency"]), "value")}<div class="s">{len(d)} ERP record(s)</div></div></div>', unsafe_allow_html=True)
+        name = "asset_monthly_erp_issue"
+    elif rep == "Monthly ERP Pending":
+        t = _as_pending_table(_as_pending_df(rc, per))
+        name = "asset_monthly_erp_pending"
+    elif rep == "Asset Item Ledger":
+        items = ["All items"] + sorted({v for v in rc["item_name"] if v})
+        it = st.selectbox("Item", items, key="as_led_item")
+        d = rc if it == "All items" else rc[rc["item_name"] == it]
+        ev = []
+        for r in d.itertuples():
+            ev.append((r.received_date, 0, r.id, r.sl_show, r.item_name, "Received (store)", r.qty, 0.0, r.invoice_no or r.purchase_ref, r.currency, r.total_value))
+        for r in iss[iss["receipt_id"].isin(d["id"])].itertuples():
+            ev.append((r.issue_date, 1, r.receipt_id, r.sl_show, r.item_name, "ERP issue", 0.0, r.issued_qty, r.erp_ref or r.erp_voucher, r.currency, r.value))
+        ev.sort(key=lambda x: (str(x[4]), x[2], x[0] if pd.notna(x[0]) else pd.Timestamp.max, x[1]))
+        bal, rows = {}, []
+        for dt_, _o, rid, sl, item, typ, rq, iq, ref, cur_, val in ev:
+            bal[rid] = bal.get(rid, 0.0) + rq - iq
+            if per is None or (pd.notna(dt_) and dt_.to_period("M") == per):
+                rows.append({"Date": dt_.strftime(DATE_FMT) if pd.notna(dt_) else "—", "SL No.": sl, "Item": item, "Entry": typ, "Received Qty": rq or None,
+                             "ERP Issued Qty": iq or None, "Pending balance (ERP)": bal[rid], "Currency": cur_, "Value": round(val, 2), "Reference": ref})
+        t = pd.DataFrame(rows)
+        name = "asset_item_ledger"
+    else:
+        isu = iss if per is None else iss[iss["issue_date"].dt.to_period("M") == per]
+        a = isu.assign(S=isu["erp_section"].replace("", "Not entered")).groupby(["S", "currency"]).agg(
+            Items=("receipt_id", "nunique"), Qty=("issued_qty", "sum"), Val=("value", "sum")).reset_index()
+        pdg = _as_pending_df(rc, per)
+        b = pdg.assign(S=pdg["sec_show"].replace("", "Not assigned")).groupby(["S", "currency"]).agg(PQ=("pending_qty", "sum"), PV=("pending_value", "sum")).reset_index()
+        m = a.merge(b, on=["S", "currency"], how="outer").fillna(0.0).sort_values("Val", ascending=False)
+        t = pd.DataFrame({"Section": m["S"], "Currency": m["currency"], "Items issued in ERP": m["Items"].astype(int), "ERP Issued Qty": m["Qty"],
+                          "ERP Issued Value": m["Val"].round(2), "Pending Qty (responsible section)": m["PQ"], "Pending Value (responsible section)": m["PV"].round(2)})
+        name = "asset_section_wise"
+    if t is None or t.empty:
+        st.info(f"{plabel}: এই report-এ কোনো তথ্য নেই।")
+        return
+    st.dataframe(t, hide_index=True, use_container_width=True, height=min(90 + 35 * len(t), 560))
+    export_buttons(t, name, f"{rep} ({plabel})")
+
+
+def tab_asset():
+    st.markdown(_MC_CSS + _AS_CSS, unsafe_allow_html=True)
+    try:
+        asset_schema()
+        units = list(FACTORIES) if is_cons_view else [FAC]
+        rc, iss = _as_load(units)
+    except Exception as ex:
+        st.error(f"Asset Items load করা যায়নি: {ex}")
+        return
+    is_mgr = st.session_state.get("role") == "Store Manager"
+    labels = ["📊 Asset Item Report", "📥 Receiving Entry", "🔗 ERP Issue Tracking", "⏳ ERP Pending", "⚖️ Reconciliation", "📚 Reports & Ledger"]
+    t = lazy_tab_select(labels, "lz_as")
+    if t == 0:
+        _as_dashboard(rc, iss)
+    elif t == 1:
+        _as_receiving_view(units, FAC, is_mgr, rc, iss)
+    elif t == 2:
+        _as_erp_view(units, FAC, is_mgr, rc, iss)
+    elif t == 3:
+        _as_pending_view(rc, iss)
+    elif t == 4:
+        _as_recon_view(rc, iss)
+    else:
+        _as_reports_view(rc, iss)
+
+
+# ============================================================
+#  SETTINGS  (Store Manager only): users, approvals, access control, activity log
+# ============================================================
+NAV_SETTINGS = ACL_SETTINGS_ROUTE
+ST_DEPTS = ["Store", "Accounts", "Audit", "Maintenance", "Admin, HR & Compliance", "Warehouse", "Lab", "Management", "Other"]
+ST_ROLES = ["Store Officer", "Executive", "Auditor", "Maintenance", "Admin", "Accounts", "Store Manager"]
+ST_ROLE_GUIDE = [
+    ("Store Manager", "সব page + Settings + Edit Center", "সব কিছু (add / edit / delete / approve)", "সব Unit", "User approve, Access Control, Backup / Restore, Fresh Start"),
+    ("Store Officer", "Access Control অনুযায়ী", "হ্যাঁ — add / edit", "Login-এর পর একটি Unit lock হয়", "দৈনিক store entry, issue, receive"),
+    ("Executive", "Access Control অনুযায়ী", "হ্যাঁ — add / edit", "সব Unit", "Management-level কাজ, Audit approved qty দিতে পারে"),
+    ("Auditor (Audit)", "Access Control অনুযায়ী", "না — শুধু দেখা", "সব Unit", "Audit / verification-এর জন্য read-only"),
+    ("Maintenance", "Access Control অনুযায়ী", "না — শুধু দেখা", "সব Unit", "Machine cost, repair, stock দেখা"),
+    ("Admin", "Access Control অনুযায়ী", "না — শুধু দেখা", "সব Unit", "Admin / HR / Compliance department-এর দেখার জন্য"),
+    ("Accounts", "Access Control অনুযায়ী", "না — শুধু দেখা", "সব Unit", "Budget, ledger, cost report দেখা"),
+    ("Guest (login ছাড়া)", "Access Control অনুযায়ী (default: দেখা)", "না", "—", "Sign in না করা visitor"),
+]
+_ST_CSS = """<style>
+.st-b{display:inline-block;border-radius:99px;padding:2px 10px;font-size:11.5px;font-weight:800}
+.st-b.ok{background:#DCFCE7;color:#166534}.st-b.pd{background:#FEF3C7;color:#92400E}.st-b.off{background:#FEE2E2;color:#991B1B}
+.st-step{display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-bottom:1px solid #EEF2F7;font-size:13.5px;color:#172033}
+.st-step .n{width:26px;height:26px;border-radius:50%;background:#0F766E;color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;flex:none;font-size:13px}
+.st-step small{display:block;color:#64748B;font-size:12.5px;margin-top:1px}
+.st-deny{background:#fff;border:1px solid #FECACA;border-radius:18px;padding:34px 26px;text-align:center;box-shadow:0 6px 18px rgba(15,23,42,.06);margin:20px auto;max-width:560px}
+.st-deny .i{font-size:42px}.st-deny b{display:block;font-size:19px;color:#991B1B;margin:6px 0 4px}.st-deny span{color:#64748B;font-size:13.5px}
+.st-vo{background:#FFF7E6;border:1px solid #F6D58E;border-radius:12px;padding:8px 14px;font-size:13px;color:#7A4B00;margin:0 0 10px}
+</style>"""
+
+
+# ---------------------------------------------------------------- writes
+@tx
+def settings_create_user(username, full, dept, role, pw):
+    if q("SELECT 1 AS x FROM users WHERE LOWER(username)=LOWER(%s)", (username,)):
+        raise ValueError("এই username আগেই আছে।")
+    run("INSERT INTO users (username, password, role, full_name, status, department, created_at) VALUES (%s,%s,%s,%s,'Active',%s,%s)",
+        (username, hash_password(pw), role, full, dept, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    audit("SETTINGS_USER_ADD", f"User {username} ({full}) created as {role}, dept {dept or '-'}")
+    return True
+
+
+@tx
+def settings_update_user(uid, uname, full, dept, role, status):
+    old = run("SELECT role, COALESCE(status,'Active'), COALESCE(department,''), COALESCE(full_name,'') FROM users WHERE id=%s", (uid,))
+    if not old:
+        raise ValueError("User পাওয়া যায়নি।")
+    o_role, o_status = old[0][0], old[0][1]
+    if o_role == "Store Manager" and (role != "Store Manager" or status != "Active"):
+        n = run("SELECT COUNT(*) FROM users WHERE role='Store Manager' AND COALESCE(status,'Active')='Active' AND id<>%s", (uid,))[0][0]
+        if int(n) < 1:
+            raise ValueError("এটাই শেষ active Store Manager — এর role / status বদলানো যাবে না।")
+    run("UPDATE users SET full_name=%s, department=%s, role=%s, status=%s WHERE id=%s", (full, dept, role, status, uid))
+    if role != o_role or status != "Active":
+        run("DELETE FROM login_sessions WHERE username=%s", (uname,))          # forces a fresh sign-in with the new role / status
+    audit("SETTINGS_USER_EDIT", f"{uname}: role {o_role} -> {role}, status {o_status} -> {status}, dept {old[0][2] or '-'} -> {dept or '-'}")
+    return True
+
+
+@tx
+def settings_approve(uid, uname, role, dept):
+    run("UPDATE users SET status='Active', role=%s, department=%s WHERE id=%s AND COALESCE(status,'Active')='Pending'", (role, dept, uid))
+    audit("APPROVE_USER", f"{uname} approved as {role}, dept {dept or '-'}")
+    return True
+
+
+@tx
+def settings_delete_user(uid, uname):
+    old = run("SELECT role FROM users WHERE id=%s", (uid,))
+    if old and old[0][0] == "Store Manager":
+        raise ValueError("Store Manager account মোছা যাবে না — আগে role বদলান।")
+    run("DELETE FROM login_sessions WHERE username=%s", (uname,))
+    run("DELETE FROM users WHERE id=%s", (uid,))
+    audit("SETTINGS_USER_DELETE", f"User {uname} deleted")
+    return True
+
+
+@tx
+def acl_save(scope, subject, changes):
+    """changes: {route: 'edit'|'view'|'none'|None}. None removes the rule (back to the default)."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    me = st.session_state.get("user", "")
+    n = 0
+    for route, lv in changes.items():
+        if lv is None:
+            run("DELETE FROM access_rules WHERE scope=%s AND subject=%s AND route=%s", (scope, subject, route))
+        else:
+            run("""INSERT INTO access_rules (scope, subject, route, level, updated_by, updated_at) VALUES (%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT (scope, subject, route) DO UPDATE SET level=EXCLUDED.level, updated_by=EXCLUDED.updated_by, updated_at=EXCLUDED.updated_at""",
+                (scope, subject, route, lv, me, now))
+        n += 1
+    summ = ", ".join(f"{r.split(' ', 1)[-1]}={lv or 'default'}" for r, lv in list(changes.items())[:12]) + (" …" if len(changes) > 12 else "")
+    audit("ACL_CHANGE", f"{scope} {subject}: {n} page rule(s) changed — {summ}")
+    return n
+
+
+@tx
+def acl_reset(scope, subject):
+    run("DELETE FROM access_rules WHERE scope=%s AND subject=%s", (scope, subject))
+    audit("ACL_RESET", f"{scope} {subject}: all page rules reset to default")
+    return True
+
+
+# ---------------------------------------------------------------- helpers
+def _st_pages():
+    """[(group, page label, route)] — every page that can be controlled (Dashboard, Edit Center and Settings are fixed)."""
+    fixed = {TAB_NAMES[0], ACL_EDIT_CENTER_ROUTE, ACL_SETTINGS_ROUTE}
+    rows, seen = [], set()
+    for g, pages in NAV_GROUPS:
+        for lbl, r in pages:
+            if r in TAB_NAMES and r not in seen and r not in fixed:
+                rows.append((g, lbl, r))
+                seen.add(r)
+    for r in TAB_NAMES:
+        if r not in seen and r not in fixed:
+            rows.append(("Other pages", r.split(" ", 1)[-1] if " " in r else r, r))
+            seen.add(r)
+    return rows
+
+
+def _st_users():
+    acl_schema()
+    u = qdf_c("""SELECT id, username, COALESCE(full_name,'') AS full_name, COALESCE(role,'') AS role, COALESCE(status,'Active') AS status,
+                        COALESCE(department,'') AS department, COALESCE(created_at,'') AS created_at FROM users ORDER BY id""")
+    try:
+        ll = qdf_c("SELECT username, MAX(timestamp) AS last_login FROM audit_logs WHERE action_type='LOGIN' GROUP BY username")
+        u["last_login"] = u["username"].map(dict(zip(ll["username"], ll["last_login"]))).fillna("")
+    except Exception:
+        u["last_login"] = ""
+    return u
+
+
+def _st_badge(s):
+    c = {"Active": "ok", "Pending": "pd"}.get(s, "off")
+    return f'<span class="st-b {c}">{html_lib.escape(s)}</span>'
+
+
+def _st_check_my_password(pw):
+    r = q("SELECT password FROM users WHERE username=%s", (st.session_state.get("user", ""),))
+    return bool(r) and verify_password(r[0]["password"], pw or "")
+
+
+def _st_dept_pick(label, key, current=""):
+    opts = ST_DEPTS if (not current or current in ST_DEPTS) else [current] + ST_DEPTS
+    v = st.selectbox(label, opts, index=opts.index(current) if current in opts else 0, key=key)
+    if v == "Other":
+        t = st.text_input(label + " — নাম লিখুন", value="" if current in ST_DEPTS else current, key=key + "_t").strip()
+        return t or "Other"
+    return v
+
+
+# ---------------------------------------------------------------- Overview
+def _st_overview(users):
+    e = html_lib.escape
+    act = int((users["status"] == "Active").sum()); pend = int((users["status"] == "Pending").sum())
+    dis = int(len(users) - act - pend)
+    try:
+        rs = int(q_c("SELECT COUNT(*) AS n FROM password_resets WHERE status='Pending'")[0]["n"] or 0)
+    except Exception:
+        rs = 0
+    rules = _acl_rules()
+    st.markdown(
+        '<div class="mcx-grid">'
+        f'<div class="mcx-kpi navy"><div class="mcx-ic">👥</div><div><div class="l">Total Users</div><div class="v">{len(users)}</div><div class="s">{act} active</div></div></div>'
+        f'<div class="mcx-kpi amber"><div class="mcx-ic">📝</div><div><div class="l">Pending Approval</div><div class="v">{pend + rs}</div><div class="s">{pend} registration · {rs} password reset</div></div></div>'
+        f'<div class="mcx-kpi rose"><div class="mcx-ic">⛔</div><div><div class="l">Disabled</div><div class="v">{dis}</div><div class="s">cannot sign in</div></div></div>'
+        f'<div class="mcx-kpi blue"><div class="mcx-ic">🔐</div><div><div class="l">Custom Access Rules</div><div class="v">{len(rules)}</div><div class="s">{"default access everywhere" if not rules else "page rules in force"}</div></div></div></div>',
+        unsafe_allow_html=True)
+    c1, c2 = st.columns([1, 1.35])
+    with c1:
+        st.markdown('<div class="mcx-h">🚀 Setup — কীভাবে শুরু করবেন</div><div class="mcx-hs">ক্রমানুসারে করলে সহজ</div>', unsafe_allow_html=True)
+        steps = [("Department-ওয়ালাদের Register করতে বলুন", "Sign in popup → Register (Accounts, Audit, Maintenance, Admin…)। অথবা 👥 Users থেকে নিজেই account খুলে দিন।"),
+                 ("📝 Approvals-এ approve করুন", "Role ও Department ঠিক করে Approve। ভুল হলে Reject।"),
+                 ("🔐 Access Control-এ page ঠিক করুন", "কোন role কোন page দেখবে / শুধু দেখবে / দেখবেই না — এখানে।"),
+                 ("দরকারে একজনের জন্য আলাদা rule", "Access Control → User exceptions।"),
+                 ("🧾 Activity Log দেখুন", "কে কখন login করল, কে কী বদলাল।")]
+        st.markdown("".join(f'<div class="st-step"><div class="n">{i}</div><div><b>{e(a)}</b><small>{e(b)}</small></div></div>' for i, (a, b) in enumerate(steps, 1)),
+                    unsafe_allow_html=True)
+    with c2:
+        st.markdown('<div class="mcx-h">👥 Role অনুযায়ী ব্যবহারকারী ও বর্তমান access</div><div class="mcx-hs">Access Control-এর সেটিং অনুযায়ী পেজ গণনা (Dashboard / Edit Center / Settings বাদে)</div>', unsafe_allow_html=True)
+        pages = _st_pages()
+        rows = []
+        for role in ["Store Manager"] + ACL_ROLES:
+            n_user = int(((users["role"] == role) & (users["status"] == "Active")).sum()) if role != "Guest" else None
+            lv = [acl_level(r, role, None) for _, _, r in pages]
+            rows.append({"Role": role if role != "Guest" else "Guest (login ছাড়া)", "Active users": n_user if n_user is not None else "—",
+                         "Full access": lv.count("edit"), "View only": lv.count("view"), "No access": lv.count("none")})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True, height=min(90 + 35 * len(rows), 340))
+    st.markdown('<div class="mcx-h" style="margin-top:12px">📘 Role guide — কোন role কী করতে পারে</div>'
+                '<div class="mcx-hs">Role ঠিক করে কাজের ক্ষমতা (add / edit আছে কিনা); Access Control ঠিক করে কোন page দেখা যাবে</div>', unsafe_allow_html=True)
+    st.dataframe(pd.DataFrame(ST_ROLE_GUIDE, columns=["Role", "কোন page দেখবে", "Data add / edit / delete", "Unit", "বিশেষ"]),
+                 hide_index=True, use_container_width=True, height=min(90 + 35 * len(ST_ROLE_GUIDE), 360))
+    st.markdown('<div class="as-note">💡 কোনো department-কে data <b>entry করতে</b> দিতে চাইলে তাকে <b>Store Officer</b> বা <b>Executive</b> role দিন, তারপর Access Control-এ তার দরকারি page-গুলো রেখে বাকি হাইড করুন। '
+                'যাদের শুধু রিপোর্ট দেখা দরকার (Accounts, Audit, Maintenance, Admin) তাদের view-only role-ই যথেষ্ট।</div>', unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------- Users
+def _st_users_view(users):
+    me = st.session_state.get("user", "")
+    st.markdown('<div class="mcx-h">👥 Users</div><div class="mcx-hs">সবার account, role, department ও status এক জায়গায়</div>', unsafe_allow_html=True)
+    f1, f2, f3 = st.columns([1.4, 1, 1])
+    term = f1.text_input("🔍 Search (username / name / department)", key="st_u_search")
+    rf = f2.selectbox("Role", ["All"] + ST_ROLES, key="st_u_role")
+    sf = f3.selectbox("Status", ["All", "Active", "Pending", "Disabled"], key="st_u_status")
+    d = users
+    if term:
+        t = term.lower()
+        d = d[d.apply(lambda r: t in f"{r['username']} {r['full_name']} {r['department']}".lower(), axis=1)]
+    if rf != "All":
+        d = d[d["role"] == rf]
+    if sf != "All":
+        d = d[d["status"] == sf] if sf != "Disabled" else d[~d["status"].isin(["Active", "Pending"])]
+    tbl = pd.DataFrame({"Username": d["username"], "Full name": d["full_name"], "Role": d["role"], "Department": d["department"].replace("", "—"),
+                        "Status": d["status"].map(lambda s: {"Active": "🟢 Active", "Pending": "🟡 Pending"}.get(s, "🔴 " + s)),
+                        "Last login": d["last_login"].replace("", "—"), "Created": d["created_at"].replace("", "—")})
+    st.dataframe(tbl, hide_index=True, use_container_width=True, height=min(90 + 35 * len(tbl), 420))
+    export_buttons(tbl, "users_list", "Users")
+
+    st.markdown('<div class="mcx-h" style="margin-top:14px">✏️ User edit</div>', unsafe_allow_html=True)
+    active = users[users["status"] != "Pending"]
+    if active.empty:
+        st.info("কোনো user নেই।")
+    else:
+        labs = {f"{r.username} — {r.full_name} ({r.role})": r for r in active.itertuples()}
+        pk = st.selectbox("User বাছুন", list(labs), key="st_u_pick")
+        r = labs[pk]
+        is_me = r.username == me
+        with st.container(border=True):
+            st.markdown(f'<b>{html_lib.escape(r.username)}</b> &nbsp;{_st_badge(r.status)}', unsafe_allow_html=True)
+            if is_me:
+                st.caption("এটা আপনার নিজের account — নিজের role / status বদলানো যাবে না।")
+            K = lambda n: f"st_u_{n}_{r.id}"
+            a1, a2 = st.columns(2)
+            full = a1.text_input("Full name", value=r.full_name, key=K("fn"))
+            with a2:
+                dept = _st_dept_pick("Department", K("dept"), r.department)
+            b1, b2 = st.columns(2)
+            ropts = ST_ROLES if r.role in ST_ROLES else [r.role] + ST_ROLES
+            role = b1.selectbox("Role", ropts, index=ropts.index(r.role), key=K("role"), disabled=is_me)
+            sopts = ["Active", "Disabled"]
+            status = b2.selectbox("Status", sopts, index=0 if r.status == "Active" else 1, key=K("status"), disabled=is_me,
+                                  help="Disabled হলে user আর sign in করতে পারবে না")
+            need_pw = role == "Store Manager" and r.role != "Store Manager"
+            mypw = st.text_input("🔐 আপনার (Manager) password — Store Manager role দিতে লাগবে", type="password", key=K("mypw")) if need_pw else ""
+            if st.button("💾 Save changes", type="primary", key=K("save")) and guard():
+                if not full.strip():
+                    st.error("Full name লিখুন।")
+                elif need_pw and not _st_check_my_password(mypw):
+                    st.error("আপনার password ঠিক নয়।")
+                elif settings_update_user(int(r.id), r.username, full.strip(), dept, role, status):
+                    done(f"✅ {r.username} updated." + (" (নতুন role পেতে user-কে আবার sign in করতে হবে)" if role != r.role else ""))
+            with st.expander("🔑 Temporary password দিন"):
+                np_ = st.text_input("New temporary password (min 8)", type="password", key=K("np"))
+                if st.button("Set password", key=K("npb")) and guard():
+                    if len(np_) < 8:
+                        st.error("কমপক্ষে ৮ character।")
+                    elif set_temp_password_direct(r.username, np_):
+                        done("✅ Password set — user-কে নিরাপদে জানান, login-এর পর বদলাতে বলুন।")
+            if not is_me and r.role != "Store Manager":
+                with st.expander("🗑 User মুছুন"):
+                    st.caption("ভুল account হলে মুছুন; কাউকে সাময়িক বন্ধ করতে চাইলে Status = Disabled দিন।")
+                    ok = st.checkbox(f"আমি {r.username}-কে মুছতে চাই", key=K("delck"))
+                    pw = st.text_input("আপনার password", type="password", key=K("delpw"))
+                    if st.button("🗑 Delete user", key=K("del")) and guard():
+                        if not ok:
+                            st.error("Tick দিন।")
+                        elif not _st_check_my_password(pw):
+                            st.error("আপনার password ঠিক নয়।")
+                        elif settings_delete_user(int(r.id), r.username):
+                            done(f"✅ {r.username} deleted.")
+    with st.expander("➕ নতুন user খুলুন (Manager নিজে)"):
+        n1, n2 = st.columns(2)
+        gen = st.session_state.get("st_nu_gen", 0)
+        K2 = lambda n: f"st_nu_{n}_{gen}"
+        un = n1.text_input("Username *", key=K2("un"))
+        fn = n2.text_input("Full name *", key=K2("fn"))
+        m1, m2 = st.columns(2)
+        nrole = m1.selectbox("Role *", [x for x in ST_ROLES if x != "Store Manager"], key=K2("role"))
+        with m2:
+            ndept = _st_dept_pick("Department", K2("dept"))
+        p1, p2 = st.columns(2)
+        pw1 = p1.text_input("Password * (min 8)", type="password", key=K2("p1"))
+        pw2 = p2.text_input("Confirm password *", type="password", key=K2("p2"))
+        if st.button("➕ Create user", type="primary", key=K2("go")) and guard():
+            if not re.fullmatch(r"[A-Za-z0-9_.\-]{3,32}", un.strip()):
+                st.error("Username ৩–৩২ অক্ষর: ইংরেজি অক্ষর, সংখ্যা, _ . - ।")
+            elif not fn.strip():
+                st.error("Full name লিখুন।")
+            elif len(pw1) < 8 or pw1 != pw2:
+                st.error("Password কমপক্ষে ৮ character এবং দুটো মিলতে হবে।")
+            elif settings_create_user(un.strip(), fn.strip(), ndept, nrole, pw1):
+                st.session_state["st_nu_gen"] = gen + 1
+                done(f"✅ User {un.strip()} created as {nrole}.")
+
+
+@tx
+def set_temp_password_direct(uname, new_pw):
+    run("UPDATE users SET password=%s WHERE username=%s", (hash_password(new_pw), uname))
+    audit("PASSWORD_RESET_DONE", f"Temporary password set for {uname} (by Settings)")
+    return True
+
+
+# ---------------------------------------------------------------- Approvals
+def _st_approvals_view(users):
+    pend = users[users["status"] == "Pending"]
+    try:
+        resets = q_c("SELECT id, username, requested_at FROM password_resets WHERE status='Pending' ORDER BY id")
+    except Exception:
+        resets = []
+    st.markdown('<div class="mcx-h">📝 New registrations</div><div class="mcx-hs">নতুন কেউ Register করলে এখানে আসে — role ও department ঠিক করে Approve করুন</div>', unsafe_allow_html=True)
+    if pend.empty:
+        st.success("কোনো pending registration নেই 🎉")
+    for r in pend.itertuples():
+        with st.container(border=True):
+            st.markdown(f'<b>{html_lib.escape(r.username)}</b> — {html_lib.escape(r.full_name)} &nbsp;{_st_badge("Pending")} '
+                        f'<span style="color:#64748B;font-size:12.5px">requested role: {html_lib.escape(r.role)} · {html_lib.escape(r.created_at)}</span>', unsafe_allow_html=True)
+            c1, c2, c3 = st.columns([1, 1, 1.2])
+            ro = [x for x in ST_ROLES if x != "Store Manager"]
+            role = c1.selectbox("Assign role", ro, index=ro.index(r.role) if r.role in ro else 0, key=f"st_ap_role_{r.id}")
+            with c2:
+                dept = _st_dept_pick("Department", f"st_ap_dept_{r.id}")
+            c3.write("")
+            if c3.button("✔ Approve", type="primary", key=f"st_ap_ok_{r.id}") and guard():
+                if settings_approve(int(r.id), r.username, role, dept):
+                    done(f"✅ {r.username} approved as {role}.")
+            if c3.button("✖ Reject", key=f"st_ap_no_{r.id}") and guard():
+                if reject_user(int(r.id), r.username):
+                    done(f"{r.username} rejected.")
+    st.markdown('<div class="mcx-h" style="margin-top:14px">🔑 Password reset requests</div>', unsafe_allow_html=True)
+    if not resets:
+        st.success("কোনো pending reset request নেই।")
+    for rr in resets:
+        with st.container(border=True):
+            st.markdown(f'<b>{html_lib.escape(rr["username"])}</b> <span style="color:#64748B;font-size:12.5px">requested {html_lib.escape(str(rr["requested_at"]))}</span>', unsafe_allow_html=True)
+            p = st.text_input("New temporary password (min 8)", type="password", key=f"st_rs_pw_{rr['id']}")
+            if st.button("Set temporary password", key=f"st_rs_go_{rr['id']}") and guard():
+                if len(p) < 8:
+                    st.error("কমপক্ষে ৮ character।")
+                elif set_temp_password(rr["id"], rr["username"], p):
+                    done("✅ Temporary password set — user-কে নিরাপদে জানান।")
+
+
+# ---------------------------------------------------------------- Access control
+def _st_role_opts(role):
+    return [ACL_LABEL["view"], ACL_LABEL["none"]] if (role in READ_ONLY_ROLES or role == "Guest") else [ACL_LABEL["edit"], ACL_LABEL["view"], ACL_LABEL["none"]]
+
+
+def _st_acl_view(users):
+    pages = _st_pages()
+    ver = st.session_state.get("st_acl_ver", 0)
+    st.markdown('<div class="mcx-h">🔐 Access Control</div><div class="mcx-hs">কোন role / user কোন page দেখবে, কোনটা শুধু দেখবে (view only), কোনটা একদম দেখবে না</div>', unsafe_allow_html=True)
+    st.markdown('<div class="as-note">ℹ️ Store Manager সব সময় সব page পায়। <b>Dashboard</b> সবাই দেখে; <b>Edit Center</b> ও <b>Settings</b> শুধু Store Manager। '
+                'Role-এ আগে থেকেই “শুধু দেখা” (Auditor, Maintenance, Admin, Accounts, Guest) থাকলে তাকে Full access দেওয়া যায় না — তাদের data entry দিতে চাইলে Users-এ role বদলে Store Officer / Executive করুন।</div>',
+                unsafe_allow_html=True)
+    mode = st.radio("কীসের জন্য", ["👥 Role অনুযায়ী (সবার জন্য)", "👤 একজন user-এর আলাদা rule (exception)"], horizontal=True, key="st_acl_mode", label_visibility="collapsed")
+    rules = _acl_rules()
+    if mode.startswith("👥"):
+        role = st.selectbox("Role বাছুন", ACL_ROLES, format_func=lambda x: "Guest (login ছাড়া)" if x == "Guest" else x, key="st_acl_role")
+        opts = _st_role_opts(role)
+        rows = [{"route": r, "Group": g, "Page": l, "Access": ACL_LABEL[acl_level(r, role, None)]} for g, l, r in pages]
+        df = pd.DataFrame(rows).set_index("route")
+        lv = [acl_level(r, role, None) for _, _, r in pages]
+        st.caption(f"{role}: Full {lv.count('edit')} · View only {lv.count('view')} · No access {lv.count('none')} (মোট {len(pages)} page)")
+        ed = st.data_editor(df, hide_index=True, use_container_width=True, disabled=["Group", "Page"], height=min(90 + 35 * len(df), 620),
+                            column_config={"Access": st.column_config.SelectboxColumn("Access", options=opts, required=True, width="medium"),
+                                           "Group": st.column_config.TextColumn("Menu group"), "Page": st.column_config.TextColumn("Page")},
+                            key=f"st_acl_ed_role_{role}_{ver}")
+        ch = {}
+        for route, lab in ed["Access"].items():
+            new = ACL_FROM.get(lab)
+            base = acl_base_level(route, role)
+            cur_rule = rules.get(("role", role, route))
+            if new is None:
+                continue
+            if new == base:
+                if cur_rule is not None:
+                    ch[route] = None
+            elif cur_rule != new:
+                ch[route] = new
+        c1, c2, c3 = st.columns([1, 1, 1.4])
+        if c1.button(f"💾 Save ({len(ch)} change)", type="primary", key=f"st_acl_save_{role}_{ver}", disabled=not ch) and guard():
+            if acl_save("role", role, ch):
+                st.session_state["st_acl_ver"] = ver + 1
+                done(f"✅ {role}: access saved.")
+        if c2.button("↩ Default-এ ফেরান", key=f"st_acl_rst_{role}_{ver}") and guard():
+            if acl_reset("role", role):
+                st.session_state["st_acl_ver"] = ver + 1
+                done(f"✅ {role}: default access.")
+        with st.expander("⚡ Bulk — একসাথে একটা group সেট করুন"):
+            groups = sorted({g for g, _, _ in pages}, key=[g for g, _, _ in pages].index)
+            b1, b2 = st.columns(2)
+            g = b1.selectbox("Menu group", ["সব group"] + groups, key=f"st_acl_bg_{role}")
+            lab = b2.selectbox("Access", opts, key=f"st_acl_bl_{role}")
+            if st.button("Apply", key=f"st_acl_bgo_{role}") and guard():
+                new = ACL_FROM[lab]
+                bch = {}
+                for gg, _, r in pages:
+                    if g != "সব group" and gg != g:
+                        continue
+                    base = acl_base_level(r, role)
+                    if new == base:
+                        if rules.get(("role", role, r)) is not None:
+                            bch[r] = None
+                    else:
+                        bch[r] = new
+                if bch and acl_save("role", role, bch):
+                    st.session_state["st_acl_ver"] = ver + 1
+                    done(f"✅ {role}: {g} → {lab}")
+    else:
+        cand = users[(users["status"] == "Active") & (users["role"] != "Store Manager")]
+        if cand.empty:
+            st.info("Exception দেওয়ার মতো কোনো active user নেই।")
+            return
+        labs = {f"{r.username} — {r.full_name} ({r.role})": r for r in cand.itertuples()}
+        uk = st.selectbox("User বাছুন", list(labs), key="st_acl_user")
+        u = labs[uk]
+        opts = [ACL_LABEL["edit"], ACL_LABEL["view"], ACL_LABEL["none"]] if u.role not in READ_ONLY_ROLES else [ACL_LABEL["view"], ACL_LABEL["none"]]
+        same = "↩ Role-এর মতোই"
+        rows = []
+        for g, l, r in pages:
+            role_lv = acl_level(r, u.role, None)
+            ur = rules.get(("user", u.username, r))
+            rows.append({"route": r, "Group": g, "Page": l, "Role setting": ACL_LABEL[role_lv], "This user": ACL_LABEL[acl_level(r, u.role, u.username)] if ur is not None else same})
+        df = pd.DataFrame(rows).set_index("route")
+        st.caption(f"{u.username} ({u.role}) — {sum(1 for x in rows if x['This user'] != same)}টি আলাদা rule আছে")
+        ed = st.data_editor(df, hide_index=True, use_container_width=True, disabled=["Group", "Page", "Role setting"], height=min(90 + 35 * len(df), 620),
+                            column_config={"This user": st.column_config.SelectboxColumn("This user", options=[same] + opts, required=True, width="medium")},
+                            key=f"st_acl_ed_user_{u.username}_{ver}")
+        ch = {}
+        for route, lab in ed["This user"].items():
+            cur_rule = rules.get(("user", u.username, route))
+            role_lv = acl_level(route, u.role, None)
+            if lab == same:
+                if cur_rule is not None:
+                    ch[route] = None
+            else:
+                new = ACL_FROM[lab]
+                if new == role_lv:
+                    if cur_rule is not None:
+                        ch[route] = None
+                elif cur_rule != new:
+                    ch[route] = new
+        c1, c2 = st.columns([1, 1])
+        if c1.button(f"💾 Save ({len(ch)} change)", type="primary", key=f"st_acl_usave_{u.username}_{ver}", disabled=not ch) and guard():
+            if acl_save("user", u.username, ch):
+                st.session_state["st_acl_ver"] = ver + 1
+                done(f"✅ {u.username}: user rule saved.")
+        if c2.button("↩ সব exception মুছুন", key=f"st_acl_urst_{u.username}_{ver}") and guard():
+            if acl_reset("user", u.username):
+                st.session_state["st_acl_ver"] = ver + 1
+                done(f"✅ {u.username}: role-এর মতো।")
+    st.caption("⏱ Page access সঙ্গে সঙ্গে কার্যকর হয়। Role বদলালে user-কে আবার sign in করতে হয়।")
+
+
+# ---------------------------------------------------------------- Activity
+def _st_activity_view():
+    st.markdown('<div class="mcx-h">🧾 Activity Log</div><div class="mcx-hs">Login, user ও access বদলের ইতিহাস — কে, কখন, কী</div>', unsafe_allow_html=True)
+    kinds = {"Login / Logout": ["LOGIN", "LOGOUT"], "Registration & approval": ["REGISTER_REQUEST", "APPROVE_USER", "REJECT_USER"],
+             "Password": ["PASSWORD_RESET_REQUEST", "PASSWORD_RESET_DONE", "PASSWORD_CHANGED"],
+             "User changes": ["SETTINGS_USER_ADD", "SETTINGS_USER_EDIT", "SETTINGS_USER_DELETE"], "Access changes": ["ACL_CHANGE", "ACL_RESET"]}
+    f1, f2, f3 = st.columns([1.4, 1, 1])
+    pick = f1.multiselect("Type", list(kinds), default=list(kinds), key="st_act_kind")
+    days = f2.selectbox("Period", ["Last 7 days", "Last 30 days", "Last 90 days", "All"], index=1, key="st_act_days")
+    who = f3.text_input("User / search", key="st_act_who")
+    acts = [a for k in pick for a in kinds[k]]
+    if not acts:
+        st.info("Type বাছুন।")
+        return
+    sql = "SELECT timestamp AS \"When\", username AS \"Who\", action_type AS \"Action\", details AS \"Details\" FROM audit_logs WHERE action_type = ANY(%s)"
+    params = [acts]
+    n = {"Last 7 days": 7, "Last 30 days": 30, "Last 90 days": 90}.get(days)
+    if n:
+        sql += " AND timestamp >= %s"
+        params.append((datetime.now() - timedelta(days=n)).strftime("%Y-%m-%d"))
+    sql += " ORDER BY id DESC LIMIT 1500"
+    d = qdf_c(sql, tuple(params))
+    if who:
+        t = who.lower()
+        d = d[d.apply(lambda r: t in f"{r['Who']} {r['Details']}".lower(), axis=1)]
+    st.dataframe(d, hide_index=True, use_container_width=True, height=min(90 + 35 * len(d), 520))
+    st.caption(f"{len(d)} record")
+    export_buttons(d, "settings_activity_log", "Activity log")
+
+
+# ---------------------------------------------------------------- page
+def tab_settings():
+    st.markdown(_MC_CSS + _AS_CSS + _ST_CSS, unsafe_allow_html=True)
+    if st.session_state.get("role") != "Store Manager" or not st.session_state.get("user"):
+        st.markdown('<div class="st-deny"><div class="i">🔒</div><b>Settings শুধু Store Manager-এর জন্য</b><span>Manager account দিয়ে sign in করুন।</span></div>', unsafe_allow_html=True)
+        return
+    st.markdown('<div class="mcx-head"><div><div class="mcx-crumb">Home &nbsp;›&nbsp; <b>Settings</b></div>'
+                '<div class="mcx-title">Settings & Access Control</div>'
+                '<div class="mcx-sub">কে কী দেখবে ও করবে — user, role, page access ও activity এক জায়গায়</div></div></div>', unsafe_allow_html=True)
+    try:
+        acl_schema()
+        users = _st_users()
+    except Exception as ex:
+        st.error(f"Settings load করা যায়নি: {ex}")
+        return
+    pend = int((users["status"] == "Pending").sum())
+    labels = ["🏠 Overview", "👥 Users", f"📝 Approvals{f' ({pend})' if pend else ''}", "🔐 Access Control", "🧾 Activity Log"]
+    t = lazy_tab_select(labels, "lz_set")
+    if t == 0:
+        _st_overview(users)
+    elif t == 1:
+        _st_users_view(users)
+    elif t == 2:
+        _st_approvals_view(users)
+    elif t == 3:
+        _st_acl_view(users)
+    else:
+        _st_activity_view()
+
+
+def render_access_denied(route):
+    st.markdown(_ST_CSS, unsafe_allow_html=True)
+    st.markdown('<div class="st-deny"><div class="i">⛔</div><b>এই page আপনার জন্য খোলা নেই</b>'
+                f'<span>“{html_lib.escape(str(route).split(" ", 1)[-1])}” দেখার অনুমতি নেই। প্রয়োজনে Store Manager-কে জানান।</span></div>', unsafe_allow_html=True)
+
+
+NAV_ASSET = "🏷 Asset Items"
+if NAV_ASSET not in TAB_NAMES:
+    TAB_NAMES.append(NAV_ASSET)
+
+
 # ---- Sidebar navigation: expandable grouped links (active group shows its pages). UI only: every choice writes the same NAV_KEY route
 #      value the old buttons wrote, so all route strings, shortcuts (e.g. ERP Audit card) and RENDERERS are unchanged.
 NAV_GROUPS = [
@@ -29781,6 +31300,7 @@ NAV_GROUPS = [
         ("Hold Bill in Store", NAV_HOLD_BILL),
         ("Warranty", NAV_WARRANTY),
         ("Scrap Register", NAV_SCRAP),
+        ("Asset Items", NAV_ASSET),
     ]),
     ("Inventory & Stock", [
         ("Inventory", "📦 Inventory"),
@@ -29813,6 +31333,7 @@ NAV_GROUPS = [
         ("Consumption Trend", NAV_TREND),
     ]),
 ]
+NAV_GROUPS.append(("Settings", [("Settings & Access Control", NAV_SETTINGS)]))      # shown to the Store Manager only (see acl_level)
 _NAV_GROUP_NAMES = [_g for _g, _p in NAV_GROUPS]
 _NAV_PAGES = {_g: dict(_p) for _g, _p in NAV_GROUPS}                       # group -> {visible label: route}
 _NAV_ROUTE_GROUP = {_r: _g for _g, _p in NAV_GROUPS for _l, _r in _p}      # route -> group
@@ -29939,16 +31460,18 @@ html body section[data-testid="stSidebar"] div[class*="st-key-sidebar_nav_"] but
     _open_grps = st.session_state["nav_open_groups"]
 
     for _gi, (_gname, _gpages) in enumerate(NAV_GROUPS):
+        # pages this user may open (Settings -> Access Control); Edit Center / Settings stay Store Manager only
+        _vis = [(_pi, _pl, _pr) for _pi, (_pl, _pr) in enumerate(_gpages)
+                if _pr in TAB_NAMES and not (_pr == NAV_EDIT_CENTER and st.session_state.get("role") != "Store Manager")
+                and acl_level(_pr) != "none"]
+        if not _vis:
+            continue
         _is_open = _gname in _open_grps
         st.button(f"`{_gi + 1:02d}` {_gname}",
                   key=f"sidebar_nav_g{_gi}_{'open' if _is_open else 'shut'}_{'act' if _gname == _cur_group else 'off'}",
                   on_click=_nav_toggle_group, args=(_gname,), use_container_width=True)
         if _is_open:
-            for _pi, (_plabel, _proute) in enumerate(_gpages):
-                if _proute not in TAB_NAMES:
-                    continue
-                if _proute == NAV_EDIT_CENTER and st.session_state.get("role") != "Store Manager":
-                    continue        # Edit Center: Store Manager only
+            for _pi, _plabel, _proute in _vis:
                 st.button(_plabel, key=f"sidebar_nav_p{_gi}_{_pi}",
                           type="primary" if _proute == _cur_route else "secondary",
                           on_click=_nav_go, args=(_proute,), use_container_width=True)
@@ -29983,7 +31506,7 @@ RENDERERS = [tab_dashboard, tab_transactions, tab_inventory, tab_stock_report, t
              tab_monthly_stock_check, tab_machine_cost, tab_shift_handover, tab_section_budget,
              tab_warranty, tab_scrap, tab_old_materials, tab_price_history, tab_item_audit,
              tab_unit_compare, tab_exec_summary, tab_mgmt_pack, tab_consumption_trend, tab_issued_stock_check,
-             tab_item_journey, tab_edit_center]
+             tab_item_journey, tab_edit_center, tab_asset, tab_settings]
 active_tab = st.session_state.get(NAV_KEY, TAB_NAMES[0])
 # --- tab switch: no stacked blank space at the top + always start at the top of the new page (CSS/JS only, no extra DB work) ---
 st.markdown("""<style>
@@ -30013,7 +31536,12 @@ if st.session_state.get("_scroll_top_route") != active_tab:
       }
     } catch (e) {}
     </script>""", height=0)
-RENDERERS[TAB_NAMES.index(active_tab)]()
+if acl_level(active_tab) == "none":                       # Settings -> Access Control: this page is not open for the signed-in user
+    render_access_denied(active_tab)
+else:
+    if acl_page_view_only(active_tab):
+        st.markdown(_ST_CSS + '<div class="st-vo">👁 এই page আপনার জন্য <b>শুধু দেখার (View only)</b> — কোনো তথ্য যোগ / বদল করা যাবে না।</div>', unsafe_allow_html=True)
+    RENDERERS[TAB_NAMES.index(active_tab)]()
 render_session_cookie_js()
 
 # Manager-only diagnostic: tells whether slowness comes from the database server / network or from the app itself.
