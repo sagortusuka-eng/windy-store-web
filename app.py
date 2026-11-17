@@ -1017,9 +1017,9 @@ def qdf(sql, params=None):
     return pd.DataFrame(rows, columns=cols)
 
 
-@st.cache_data(ttl=180, show_spinner=False, max_entries=128)
+@st.cache_data(ttl=900, show_spinner=False, max_entries=128)
 def _cached_rows(sql, params_t, ver):
-    """Read-only query result, cached for 3 min and dropped at once when any save commits (ver changes)."""
+    """Read-only query result, cached for 15 min and dropped at once when any save commits (ver changes)."""
     return fetch(sql, params_t)
 
 
@@ -2205,6 +2205,18 @@ def backup_zip():
     return buf.getvalue()
 
 
+def backup_download_button(label, file_name, key, prepare_label="📦 Backup toiri korun"):
+    """EGRESS FIX: backup_zip() reads EVERY table in full. It used to be passed straight into st.download_button(), which
+    runs it on every page rerun (every click / keystroke on that page = the whole database pulled from Supabase).
+    Now the backup is built only when the person presses the prepare button, then kept for the download button."""
+    ss_key = f"_bk_bytes_{key}"
+    if st.button(prepare_label, key=f"{key}_prep"):
+        with st.spinner("Backup toiri hocche..."):
+            st.session_state[ss_key] = backup_zip()
+    if st.session_state.get(ss_key):
+        st.download_button(label, st.session_state[ss_key], file_name, "application/zip", key=f"{key}_dl")
+
+
 def budget_bar_html(pct, label="Budget consumption"):
     """Dynamic bar: green below 70%, amber 70-85%, red above the alert limit."""
     width = min(max(pct, 0), 100)
@@ -3187,20 +3199,81 @@ def tab_dashboard():
         _tab_dashboard_body()
 
 
-def _tab_dashboard_body():
-    """Management dashboard: purchase, issue, inventory and budget using live database records."""
-    st.markdown(_dbp_hero(st.session_state.get("user") or "Store team", FAC, st.session_state.get("role")), unsafe_allow_html=True)
-    stamp = _dbp_addons_top()   # আজকের কাজ first; the other blocks follow the numbers below (see _dbp_addons_bottom)
-
-    transaction_rows = qdf_c(f"""SELECT t.factory_name, t.date, t.time, t.trans_type, t.qty, t.item_name,
+def _dash_flow(fac):
+    """Dashboard money-flow data as a SMALL summary (one row per factory / type / category / month) built inside the database.
+    It used to download EVERY purchase + issue row of all time on each dashboard load. Returns (summary_df, raw_rows_or_None);
+    raw rows only come back if the summary query is not possible (then the old row-by-row way is used, same numbers)."""
+    cols = ["factory_name", "trans_type", "category", "month", "qty", "amount", "n"]
+    fsql, fp = fw(fac, "t.")
+    if not st.session_state.get("_dash_flow_legacy"):
+        try:
+            df = qdf_c(f"""SELECT t.factory_name, t.trans_type, COALESCE(i.category,'Uncategorized') AS category,
+                                  COALESCE(to_char({_sql_date('btrim(t.date)')}, 'Mon-YYYY'), '') AS month,
+                                  SUM(COALESCE(t.qty,0)) AS qty,
+                                  SUM(COALESCE(t.qty,0) * COALESCE(i.unit_price,0)) AS amount,
+                                  COUNT(*) AS n
+                           FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                           WHERE t.trans_type IN ('Supplier. Rec','Issued','Internal Issue'){fsql}
+                           GROUP BY 1,2,3,4""", fp)
+            if df.empty:
+                return pd.DataFrame(columns=cols), None
+            for c in ("qty", "amount", "n"):
+                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+            return df[cols], None
+        except Exception:
+            st.session_state["_dash_flow_legacy"] = True      # odd date text in the data: do not retry the summary on every click
+    raw = qdf_c(f"""SELECT t.factory_name, t.date, t.time, t.trans_type, t.qty, t.item_name,
                        t.officer_name, COALESCE(t.supplier_name,'') AS supplier_name,
                        COALESCE(t.challan_no,'') AS challan_no,
                        COALESCE(i.category,'Uncategorized') AS category,
                        COALESCE(i.unit_price,0) AS unit_price
                 FROM transactions t
                 LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
-                WHERE t.trans_type IN ('Supplier. Rec','Issued','Internal Issue'){fw(FAC, 't.')[0]}
-                ORDER BY t.id DESC""", FP)
+                WHERE t.trans_type IN ('Supplier. Rec','Issued','Internal Issue'){fsql}
+                ORDER BY t.id DESC""", fp)
+    if raw.empty:
+        return pd.DataFrame(columns=cols), raw
+    raw["month"] = raw["date"].apply(lambda v: parse_date(v).strftime("%b-%Y") if parse_date(v) else "")
+    raw["qty"] = pd.to_numeric(raw["qty"], errors="coerce").fillna(0.0)
+    raw["unit_price"] = pd.to_numeric(raw["unit_price"], errors="coerce").fillna(0.0)
+    raw["amount"] = raw["qty"] * raw["unit_price"]
+    g = raw.groupby(["factory_name", "trans_type", "category", "month"], as_index=False).agg(
+        qty=("qty", "sum"), amount=("amount", "sum"), n=("qty", "size"))
+    return g[cols], raw
+
+
+def _dash_recent(kind, period, raw=None):
+    """The 8 newest purchase / issue lines of the chosen period (a LIMIT 8 query, not the whole history)."""
+    types = ("Supplier. Rec",) if kind == "purchase" else ISSUE_TYPES
+    cols = ["date", "item_name", "qty", "unit_price", "supplier_name", "officer_name", "trans_type"]
+    if raw is not None:
+        d = raw[raw["trans_type"].isin(types)]
+        if period != "All time":
+            d = d[d["month"] == period]
+        d = d.head(8)[cols].copy()
+    else:
+        fsql, fp = fw(FAC, "t.")
+        pcond, pp = "", []
+        if period != "All time":
+            pcond = f" AND to_char({_sql_date('btrim(t.date)')}, 'Mon-YYYY') = %s"
+            pp = [period]
+        d = qdf_c(f"""SELECT t.date, t.item_name, t.qty, COALESCE(i.unit_price,0) AS unit_price,
+                             COALESCE(t.supplier_name,'') AS supplier_name, t.officer_name, t.trans_type
+                      FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                      WHERE t.trans_type = ANY(%s){fsql}{pcond} ORDER BY t.id DESC LIMIT 8""",
+                  [list(types)] + list(fp) + pp)
+    d["qty"] = pd.to_numeric(d["qty"], errors="coerce").fillna(0.0)
+    d["unit_price"] = pd.to_numeric(d["unit_price"], errors="coerce").fillna(0.0)
+    d["amount"] = d["qty"] * d["unit_price"]
+    return d
+
+
+def _tab_dashboard_body():
+    """Management dashboard: purchase, issue, inventory and budget using live database records."""
+    st.markdown(_dbp_hero(st.session_state.get("user") or "Store team", FAC, st.session_state.get("role")), unsafe_allow_html=True)
+    stamp = _dbp_addons_top()   # আজকের কাজ first; the other blocks follow the numbers below (see _dbp_addons_bottom)
+
+    transaction_rows, _dash_raw = _dash_flow(FAC)      # small monthly summary (was: every transaction row of all time)
 
     budget_df = qdf_c(
         f"SELECT factory_name, department_name, category_name, COALESCE(allocated_budget,0) AS allocated_budget "
@@ -3208,19 +3281,6 @@ def _tab_dashboard_body():
     )
     inventory_total = int(q_c(f"SELECT COUNT(*) AS n FROM inventory WHERE 1=1{FSQL}", FP)[0]["n"] or 0)
     low_stock_total = int(q_c(f"SELECT COUNT(*) AS n FROM inventory WHERE COALESCE(current_stock,0)<=5{FSQL}", FP)[0]["n"] or 0)
-
-    if transaction_rows.empty:
-        transaction_rows = pd.DataFrame(columns=[
-            "factory_name", "date", "time", "trans_type", "qty", "item_name", "officer_name",
-            "supplier_name", "challan_no", "category", "unit_price"
-        ])
-    transaction_rows["parsed_date"] = transaction_rows["date"].apply(parse_date)
-    transaction_rows["month"] = transaction_rows["parsed_date"].apply(
-        lambda value: value.strftime("%b-%Y") if value else ""
-    )
-    transaction_rows["qty"] = pd.to_numeric(transaction_rows["qty"], errors="coerce").fillna(0.0)
-    transaction_rows["unit_price"] = pd.to_numeric(transaction_rows["unit_price"], errors="coerce").fillna(0.0)
-    transaction_rows["amount"] = transaction_rows["qty"] * transaction_rows["unit_price"]
 
     current_month = local_now().strftime("%b-%Y")
     available_months = sorted(
@@ -3250,8 +3310,8 @@ def _tab_dashboard_body():
     st.markdown(_DBX_CSS, unsafe_allow_html=True)
 
     # ---- Row 1: money flow in the selected period ----
-    n_pur = int(len(purchases))
-    n_iss = int(len(issues))
+    n_pur = int(purchases["n"].sum()) if not purchases.empty else 0
+    n_iss = int(issues["n"].sum()) if not issues.empty else 0
     st.markdown(f'<div class="dbx-sec">💹 Money flow · {html_lib.escape(str(period))}</div>', unsafe_allow_html=True)
     st.markdown('<div class="dbx-grid">'
                 + _dbx_card("🛒", "Purchase value", _dbx_tk(purchase_value), f"Qty {purchase_qty:,.0f} · {n_pur:,} receipt line(s)", "blue", f"৳ {purchase_value:,.2f}")
@@ -3486,7 +3546,7 @@ def _tab_dashboard_body():
             if purchases.empty:
                 st.info("No supplier receipts in this period.")
             else:
-                purchase_show = purchases.head(8)[
+                purchase_show = _dash_recent("purchase", period, _dash_raw)[
                     ["date", "item_name", "qty", "unit_price", "amount", "supplier_name", "officer_name"]
                 ].copy()
                 purchase_show.columns = ["Date", "Item", "Qty", "Unit price (৳)", "Value (৳)", "Supplier", "Officer"]
@@ -3496,7 +3556,7 @@ def _tab_dashboard_body():
             if issues.empty:
                 st.info("No issue transactions in this period.")
             else:
-                issue_show = issues.head(8)[
+                issue_show = _dash_recent("issue", period, _dash_raw)[
                     ["date", "item_name", "qty", "unit_price", "amount", "officer_name", "trans_type"]
                 ].copy()
                 issue_show.columns = ["Date", "Item", "Qty", "Unit price (৳)", "Value (৳)", "Officer", "Type"]
@@ -4533,8 +4593,7 @@ def inv_add_import_view():
             rows, skipped = build_import_rows(raw, cols)
             st.caption(f"File rows: {len(raw)} | Valid: {len(rows)} | Skipped: {skipped} | Zero balance items are saved too.")
             st.dataframe(pd.DataFrame(rows).head(200), hide_index=True, use_container_width=True)
-            st.download_button("💾 Download backup (all tables, CSV zip) before import", backup_zip(),
-                               "windy_backup.zip", "application/zip")
+            backup_download_button("💾 Download backup (all tables, CSV zip) before import", "windy_backup.zip", "open_imp_bk")
             if st.button("✅ Import now", type="primary", key="do_open_import"):
                 st_ = do_import_opening(FAC, rows)
                 if st_:
@@ -6316,8 +6375,10 @@ def _global_usage_90(ver, today_s):
     """Issued quantity per (factory, item) over the last 90 days. Looping over every issue row used to run on every click."""
     today = datetime.strptime(today_s, "%Y-%m-%d").date()
     usage_start = today - timedelta(days=90)
-    rows = q_c("""SELECT factory_name, sl_no, date, qty FROM transactions
-                  WHERE trans_type IN ('Issued','Internal Issue') AND factory_name = ANY(%s)""", (FACTORIES,))
+    _yrs = "(" + "|".join(str(y) for y in sorted({usage_start.year, today.year})) + ")"     # dates are text: keep only rows that mention the needed year(s)
+    rows = q_c("""SELECT factory_name, sl_no, date, SUM(COALESCE(qty,0)) AS qty FROM transactions
+                  WHERE trans_type IN ('Issued','Internal Issue') AND factory_name = ANY(%s) AND date ~ %s
+                  GROUP BY factory_name, sl_no, date""", (FACTORIES, _yrs))
     out = {}
     for row in rows:
         parsed = parse_date(row.get("date"))
@@ -6603,7 +6664,7 @@ def tab_global_inventory():
 
     with st.expander("Backup and restore · Store Manager only"):
         st.caption("Download a full backup before restore. Restore replaces all public table contents after validation.")
-        st.download_button("Download full database backup",backup_zip(),f"inventory_backup_{datetime.now():%Y%m%d_%H%M}.zip","application/zip",key="global_db_backup")
+        backup_download_button("Download full database backup", f"inventory_backup_{datetime.now():%Y%m%d_%H%M}.zip", "global_db_backup")
         upload=st.file_uploader("Upload a full backup ZIP",type=["zip"],key="global_restore_zip")
         if upload:
             try:
@@ -8918,7 +8979,10 @@ def compute_forecast(mi):
     use_mtd = l3_start >= cur_start        # no finished live month yet (first month): use running month so far
     l3_days = max(now.day, 1) if use_mtd else max((cur_start - l3_start).days, 1)
     cur_c, l3_c = {}, {}
-    for t in q_c(f"SELECT factory_name, sl_no, qty, date FROM transactions WHERE trans_type IN ('Issued','Internal Issue'){FSQL}", FP):
+    _yrs = "(" + "|".join(str(y) for y in range(l3_start.year, cy + 1)) + ")"        # dates are text: only rows that mention a needed year
+    for t in q_c(f"""SELECT factory_name, sl_no, SUM(COALESCE(qty,0)) AS qty, date FROM transactions
+                     WHERE trans_type IN ('Issued','Internal Issue'){FSQL} AND date ~ %s
+                     GROUP BY factory_name, sl_no, date""", list(FP) + [_yrs]):
         dt = parse_date(t["date"])
         if not dt:
             continue
@@ -11544,8 +11608,12 @@ def render_dashboard_addons():
 # ------------------------------------------------------------------
 #  4. Similar-name warning (Add New Item)
 # ------------------------------------------------------------------
-@st.cache_data(ttl=45, show_spinner=False)
 def _item_name_index(fac):
+    return _item_name_index_c(fac, _data_version())      # refreshed when something is saved, not every 45 seconds
+
+
+@st.cache_data(ttl=900, show_spinner=False, max_entries=8)
+def _item_name_index_c(fac, ver):
     rows = q("SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size, COALESCE(current_stock,0) AS stock "
              "FROM inventory WHERE factory_name=%s", (fac,))
     for r in rows:
