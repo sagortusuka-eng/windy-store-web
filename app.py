@@ -954,10 +954,134 @@ def run_once_per_process(name, fn):
         flags[name] = True
 
 
+# ---- SPEED (table-wise cache refresh): a save used to throw away EVERY cached read (users, settings, sections ...), so the
+# ---- page after each save re-read a dozen tables nobody touched. Now each cached read remembers which tables it uses and is
+# ---- dropped only when one of THOSE tables is written. Anything the code cannot classify with certainty (DDL, TRUNCATE, COPY,
+# ---- unknown / view names, other cursor types, SQL it cannot read) falls back to the old "any save refreshes it" rule.
+@st.cache_resource(show_spinner=False)
+def _ver_box():
+    return {"g": 0, "t": {}}
+
+
+@st.cache_resource(show_spinner=False)
+def _schema_box():
+    return {"known": None, "views": set(), "parse": {}}
+
+
+_SQL_WS = re.compile(r"\s+")
+_W_STMT = re.compile(r'\b(INSERT INTO|UPDATE|DELETE FROM)\s+(?:ONLY\s+)?(?:PUBLIC\.)?"?([A-Z_][A-Z0-9_$]*)"?')
+_READ_HEAD = ("SELECT", "SHOW", "SET", "BEGIN", "START", "RESET", "SAVEPOINT", "RELEASE", "ROLLBACK", "COMMIT", "LOCK", "EXPLAIN", "VALUES")
+
+
+def _classify_write(sql):
+    """-> None (reads only) | set of lower-case table names written | "ALL" (cannot tell for sure: refresh everything)."""
+    try:
+        u = _SQL_WS.sub(" ", str(sql)).strip().upper()
+        for ph in ("FOR UPDATE", "FOR NO KEY UPDATE", "FOR SHARE", "DO UPDATE", "DO NOTHING"):
+            u = u.replace(ph, " ")
+        tabs = set()
+        for st_ in [x.strip() for x in u.split(";") if x.strip()]:
+            head = st_.lstrip("( ").split(" ", 1)[0]
+            hits = _W_STMT.findall(st_)
+            if head in ("INSERT", "UPDATE", "DELETE"):
+                if not hits:
+                    return "ALL"
+                tabs.update(h[1].lower() for h in hits)
+            elif head == "WITH":
+                tabs.update(h[1].lower() for h in hits)          # a WITH that only reads has no hits
+            elif head in _READ_HEAD:
+                if head == "SELECT" and re.search(r"\bINTO\b", st_.split(" FROM ", 1)[0]):
+                    return "ALL"                                  # SELECT ... INTO creates a table
+            else:
+                return "ALL"                                      # TRUNCATE / ALTER / DROP / CREATE / COPY / CALL / ...
+        return tabs or None
+    except Exception:
+        return "ALL"
+
+
+class _TrackedCursor(psycopg2.extensions.cursor):
+    """Remembers which tables this transaction writes, so commit() can refresh only the cached reads that use them."""
+    def _note(self, sql):
+        try:
+            conn = self.connection
+            if isinstance(sql, (bytes, bytearray)):
+                sql = bytes(sql).decode("utf-8", "ignore")
+            elif not isinstance(sql, str):
+                sql = sql.as_string(self) if hasattr(sql, "as_string") else None
+            w = "ALL" if sql is None else _classify_write(sql)
+            if w is None:
+                return
+            if w == "ALL":
+                conn._pend_all = True
+                try:
+                    _schema_box()["known"] = None       # DDL may have added / dropped a table: re-read the table list next time
+                    _schema_box()["parse"].clear()
+                except Exception:
+                    pass
+            else:
+                pend = getattr(conn, "_pend_tables", None)
+                if pend is None:
+                    pend = conn._pend_tables = set()
+                pend.update(w)
+        except Exception:
+            try:
+                self.connection._pend_all = True
+            except Exception:
+                pass
+
+    def execute(self, sql, vars=None):
+        self._note(sql)
+        return super().execute(sql, vars)
+
+    def executemany(self, sql, vars_list):
+        self._note(sql)
+        return super().executemany(sql, vars_list)
+
+    def copy_expert(self, *a, **k):
+        self.connection._pend_all = True
+        return super().copy_expert(*a, **k)
+
+    def copy_from(self, *a, **k):
+        self.connection._pend_all = True
+        return super().copy_from(*a, **k)
+
+    def callproc(self, *a, **k):
+        self.connection._pend_all = True
+        return super().callproc(*a, **k)
+
+
+def _bump_tables(tables, all_):
+    try:
+        box = _ver_box()
+        if all_:
+            box["g"] += 1
+        for t in (tables or ()):
+            box["t"][t] = box["t"].get(t, 0) + 1
+    except Exception:
+        pass
+
+
 class _TrackedConnection(psycopg2.extensions.connection):
+    def cursor(self, *a, **k):
+        if "cursor_factory" not in k and len(a) < 2:
+            k["cursor_factory"] = _TrackedCursor
+        else:
+            self._pend_all = True        # some other cursor type: its writes are invisible to us, so be safe
+        return super().cursor(*a, **k)
+
+    def _clear_pending(self):
+        self._pend_tables = None
+        self._pend_all = False
+
+    def rollback(self):
+        super().rollback()
+        self._clear_pending()
+
     def commit(self):
         super().commit()
         _bump_data_version()
+        _bump_tables(getattr(self, "_pend_tables", None), getattr(self, "_pend_all", False))
+        self._clear_pending()
 
 
 @st.cache_resource(show_spinner=False)
@@ -1017,17 +1141,65 @@ def qdf(sql, params=None):
     return pd.DataFrame(rows, columns=cols)
 
 
-@st.cache_data(ttl=180, show_spinner=False, max_entries=128)
+@st.cache_data(ttl=900, show_spinner=False, max_entries=128)
 def _cached_rows(sql, params_t, ver):
-    """Read-only query result, cached for 3 min and dropped at once when any save commits (ver changes)."""
+    """Read-only query result, cached for 15 min and dropped at once when any save commits (ver changes)."""
     return fetch(sql, params_t)
 
 
+_OK_FUNCS = {"unnest", "generate_series"}
+
+
+def _read_tables(sql):
+    """Tables a read query uses, or None when that cannot be told for sure (then the old any-save refresh applies)."""
+    box = _schema_box()
+    hit = box["parse"].get(sql, 0)
+    if hit != 0:
+        return hit
+    res = None
+    try:
+        if box["known"] is None:
+            cols, rows = fetch("SELECT table_name, table_type FROM information_schema.tables WHERE table_schema='public'")
+            box["known"] = {r[0].lower() for r in rows if r[1] == "BASE TABLE"}
+            box["views"] = {r[0].lower() for r in rows if r[1] != "BASE TABLE"}
+        known, views = box["known"], box["views"]
+        low = _SQL_WS.sub(" ", sql).lower()
+        ctes = set(re.findall(r"(?:\bwith(?: recursive)?|,) ([a-z_][a-z0-9_]*) (?:\([^)]*\) )?as (?:not materialized |materialized )?\(", low))
+        ok = True
+        for m in re.finditer(r'\b(?:from|join) (?:only )?(?:public\.)?"?([a-z_][a-z0-9_$]*)"?( ?\()?', low):
+            name, fn_call = m.group(1), m.group(2)
+            if fn_call:
+                ok = ok and name in _OK_FUNCS
+            elif name not in known and name not in ctes:
+                ok = False
+        toks = set(re.findall(r"[a-z_][a-z0-9_$]*", low))
+        if ok and not (toks & views):
+            res = frozenset(toks & known)
+    except Exception:
+        res = None
+    if len(box["parse"]) > 2000:
+        box["parse"].clear()
+    box["parse"][sql] = res
+    return res
+
+
+def _scoped_ver(sql):
+    """Cache key part for a read: the versions of just the tables it uses (or the global save counter if unsure)."""
+    try:
+        tabs = _read_tables(sql)
+        if tabs:
+            box = _ver_box()
+            return ("t", box["g"], tuple((t, box["t"].get(t, 0)) for t in sorted(tabs)))
+    except Exception:
+        pass
+    return ("*", _data_version())
+
+
 def q_c(sql, params=None):
-    """Same as q(), but served from cache when nothing was saved since the last identical call."""
+    """Same as q(), but served from cache until a table this query uses is written."""
     if isinstance(params, dict):
         return q(sql, params)
-    cols, rows = _cached_rows(sql, tuple(params) if params else None, _data_version())
+    cols, rows = _cached_rows(sql, tuple(params) if params else None, _scoped_ver(sql))
     return [dict(zip(cols, r)) for r in rows]
 
 
@@ -1035,7 +1207,7 @@ def qdf_c(sql, params=None):
     """Same as qdf(), but served from cache when nothing was saved since the last identical call."""
     if isinstance(params, dict):
         return qdf(sql, params)
-    cols, rows = _cached_rows(sql, tuple(params) if params else None, _data_version())
+    cols, rows = _cached_rows(sql, tuple(params) if params else None, _scoped_ver(sql))
     return pd.DataFrame(rows, columns=cols)
 
 
@@ -2205,6 +2377,18 @@ def backup_zip():
     return buf.getvalue()
 
 
+def backup_download_button(label, file_name, key, prepare_label="📦 Backup toiri korun"):
+    """EGRESS FIX: backup_zip() reads EVERY table in full. It used to be passed straight into st.download_button(), which
+    runs it on every page rerun (every click / keystroke on that page = the whole database pulled from Supabase).
+    Now the backup is built only when the person presses the prepare button, then kept for the download button."""
+    ss_key = f"_bk_bytes_{key}"
+    if st.button(prepare_label, key=f"{key}_prep"):
+        with st.spinner("Backup toiri hocche..."):
+            st.session_state[ss_key] = backup_zip()
+    if st.session_state.get(ss_key):
+        st.download_button(label, st.session_state[ss_key], file_name, "application/zip", key=f"{key}_dl")
+
+
 def budget_bar_html(pct, label="Budget consumption"):
     """Dynamic bar: green below 70%, amber 70-85%, red above the alert limit."""
     width = min(max(pct, 0), 100)
@@ -3187,20 +3371,81 @@ def tab_dashboard():
         _tab_dashboard_body()
 
 
-def _tab_dashboard_body():
-    """Management dashboard: purchase, issue, inventory and budget using live database records."""
-    st.markdown(_dbp_hero(st.session_state.get("user") or "Store team", FAC, st.session_state.get("role")), unsafe_allow_html=True)
-    stamp = _dbp_addons_top()   # আজকের কাজ first; the other blocks follow the numbers below (see _dbp_addons_bottom)
-
-    transaction_rows = qdf_c(f"""SELECT t.factory_name, t.date, t.time, t.trans_type, t.qty, t.item_name,
+def _dash_flow(fac):
+    """Dashboard money-flow data as a SMALL summary (one row per factory / type / category / month) built inside the database.
+    It used to download EVERY purchase + issue row of all time on each dashboard load. Returns (summary_df, raw_rows_or_None);
+    raw rows only come back if the summary query is not possible (then the old row-by-row way is used, same numbers)."""
+    cols = ["factory_name", "trans_type", "category", "month", "qty", "amount", "n"]
+    fsql, fp = fw(fac, "t.")
+    if not st.session_state.get("_dash_flow_legacy"):
+        try:
+            df = qdf_c(f"""SELECT t.factory_name, t.trans_type, COALESCE(i.category,'Uncategorized') AS category,
+                                  COALESCE(to_char({_sql_date('btrim(t.date)')}, 'Mon-YYYY'), '') AS month,
+                                  SUM(COALESCE(t.qty,0)) AS qty,
+                                  SUM(COALESCE(t.qty,0) * COALESCE(i.unit_price,0)) AS amount,
+                                  COUNT(*) AS n
+                           FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                           WHERE t.trans_type IN ('Supplier. Rec','Issued','Internal Issue'){fsql}
+                           GROUP BY 1,2,3,4""", fp)
+            if df.empty:
+                return pd.DataFrame(columns=cols), None
+            for c in ("qty", "amount", "n"):
+                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+            return df[cols], None
+        except Exception:
+            st.session_state["_dash_flow_legacy"] = True      # odd date text in the data: do not retry the summary on every click
+    raw = qdf_c(f"""SELECT t.factory_name, t.date, t.time, t.trans_type, t.qty, t.item_name,
                        t.officer_name, COALESCE(t.supplier_name,'') AS supplier_name,
                        COALESCE(t.challan_no,'') AS challan_no,
                        COALESCE(i.category,'Uncategorized') AS category,
                        COALESCE(i.unit_price,0) AS unit_price
                 FROM transactions t
                 LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
-                WHERE t.trans_type IN ('Supplier. Rec','Issued','Internal Issue'){fw(FAC, 't.')[0]}
-                ORDER BY t.id DESC""", FP)
+                WHERE t.trans_type IN ('Supplier. Rec','Issued','Internal Issue'){fsql}
+                ORDER BY t.id DESC""", fp)
+    if raw.empty:
+        return pd.DataFrame(columns=cols), raw
+    raw["month"] = raw["date"].apply(lambda v: parse_date(v).strftime("%b-%Y") if parse_date(v) else "")
+    raw["qty"] = pd.to_numeric(raw["qty"], errors="coerce").fillna(0.0)
+    raw["unit_price"] = pd.to_numeric(raw["unit_price"], errors="coerce").fillna(0.0)
+    raw["amount"] = raw["qty"] * raw["unit_price"]
+    g = raw.groupby(["factory_name", "trans_type", "category", "month"], as_index=False).agg(
+        qty=("qty", "sum"), amount=("amount", "sum"), n=("qty", "size"))
+    return g[cols], raw
+
+
+def _dash_recent(kind, period, raw=None):
+    """The 8 newest purchase / issue lines of the chosen period (a LIMIT 8 query, not the whole history)."""
+    types = ("Supplier. Rec",) if kind == "purchase" else ISSUE_TYPES
+    cols = ["date", "item_name", "qty", "unit_price", "supplier_name", "officer_name", "trans_type"]
+    if raw is not None:
+        d = raw[raw["trans_type"].isin(types)]
+        if period != "All time":
+            d = d[d["month"] == period]
+        d = d.head(8)[cols].copy()
+    else:
+        fsql, fp = fw(FAC, "t.")
+        pcond, pp = "", []
+        if period != "All time":
+            pcond = f" AND to_char({_sql_date('btrim(t.date)')}, 'Mon-YYYY') = %s"
+            pp = [period]
+        d = qdf_c(f"""SELECT t.date, t.item_name, t.qty, COALESCE(i.unit_price,0) AS unit_price,
+                             COALESCE(t.supplier_name,'') AS supplier_name, t.officer_name, t.trans_type
+                      FROM transactions t LEFT JOIN inventory i ON i.sl_no=t.sl_no AND i.factory_name=t.factory_name
+                      WHERE t.trans_type = ANY(%s){fsql}{pcond} ORDER BY t.id DESC LIMIT 8""",
+                  [list(types)] + list(fp) + pp)
+    d["qty"] = pd.to_numeric(d["qty"], errors="coerce").fillna(0.0)
+    d["unit_price"] = pd.to_numeric(d["unit_price"], errors="coerce").fillna(0.0)
+    d["amount"] = d["qty"] * d["unit_price"]
+    return d
+
+
+def _tab_dashboard_body():
+    """Management dashboard: purchase, issue, inventory and budget using live database records."""
+    st.markdown(_dbp_hero(st.session_state.get("user") or "Store team", FAC, st.session_state.get("role")), unsafe_allow_html=True)
+    stamp = _dbp_addons_top()   # আজকের কাজ first; the other blocks follow the numbers below (see _dbp_addons_bottom)
+
+    transaction_rows, _dash_raw = _dash_flow(FAC)      # small monthly summary (was: every transaction row of all time)
 
     budget_df = qdf_c(
         f"SELECT factory_name, department_name, category_name, COALESCE(allocated_budget,0) AS allocated_budget "
@@ -3208,19 +3453,6 @@ def _tab_dashboard_body():
     )
     inventory_total = int(q_c(f"SELECT COUNT(*) AS n FROM inventory WHERE 1=1{FSQL}", FP)[0]["n"] or 0)
     low_stock_total = int(q_c(f"SELECT COUNT(*) AS n FROM inventory WHERE COALESCE(current_stock,0)<=5{FSQL}", FP)[0]["n"] or 0)
-
-    if transaction_rows.empty:
-        transaction_rows = pd.DataFrame(columns=[
-            "factory_name", "date", "time", "trans_type", "qty", "item_name", "officer_name",
-            "supplier_name", "challan_no", "category", "unit_price"
-        ])
-    transaction_rows["parsed_date"] = transaction_rows["date"].apply(parse_date)
-    transaction_rows["month"] = transaction_rows["parsed_date"].apply(
-        lambda value: value.strftime("%b-%Y") if value else ""
-    )
-    transaction_rows["qty"] = pd.to_numeric(transaction_rows["qty"], errors="coerce").fillna(0.0)
-    transaction_rows["unit_price"] = pd.to_numeric(transaction_rows["unit_price"], errors="coerce").fillna(0.0)
-    transaction_rows["amount"] = transaction_rows["qty"] * transaction_rows["unit_price"]
 
     current_month = local_now().strftime("%b-%Y")
     available_months = sorted(
@@ -3250,8 +3482,8 @@ def _tab_dashboard_body():
     st.markdown(_DBX_CSS, unsafe_allow_html=True)
 
     # ---- Row 1: money flow in the selected period ----
-    n_pur = int(len(purchases))
-    n_iss = int(len(issues))
+    n_pur = int(purchases["n"].sum()) if not purchases.empty else 0
+    n_iss = int(issues["n"].sum()) if not issues.empty else 0
     st.markdown(f'<div class="dbx-sec">💹 Money flow · {html_lib.escape(str(period))}</div>', unsafe_allow_html=True)
     st.markdown('<div class="dbx-grid">'
                 + _dbx_card("🛒", "Purchase value", _dbx_tk(purchase_value), f"Qty {purchase_qty:,.0f} · {n_pur:,} receipt line(s)", "blue", f"৳ {purchase_value:,.2f}")
@@ -3486,7 +3718,7 @@ def _tab_dashboard_body():
             if purchases.empty:
                 st.info("No supplier receipts in this period.")
             else:
-                purchase_show = purchases.head(8)[
+                purchase_show = _dash_recent("purchase", period, _dash_raw)[
                     ["date", "item_name", "qty", "unit_price", "amount", "supplier_name", "officer_name"]
                 ].copy()
                 purchase_show.columns = ["Date", "Item", "Qty", "Unit price (৳)", "Value (৳)", "Supplier", "Officer"]
@@ -3496,7 +3728,7 @@ def _tab_dashboard_body():
             if issues.empty:
                 st.info("No issue transactions in this period.")
             else:
-                issue_show = issues.head(8)[
+                issue_show = _dash_recent("issue", period, _dash_raw)[
                     ["date", "item_name", "qty", "unit_price", "amount", "officer_name", "trans_type"]
                 ].copy()
                 issue_show.columns = ["Date", "Item", "Qty", "Unit price (৳)", "Value (৳)", "Officer", "Type"]
@@ -4533,8 +4765,7 @@ def inv_add_import_view():
             rows, skipped = build_import_rows(raw, cols)
             st.caption(f"File rows: {len(raw)} | Valid: {len(rows)} | Skipped: {skipped} | Zero balance items are saved too.")
             st.dataframe(pd.DataFrame(rows).head(200), hide_index=True, use_container_width=True)
-            st.download_button("💾 Download backup (all tables, CSV zip) before import", backup_zip(),
-                               "windy_backup.zip", "application/zip")
+            backup_download_button("💾 Download backup (all tables, CSV zip) before import", "windy_backup.zip", "open_imp_bk")
             if st.button("✅ Import now", type="primary", key="do_open_import"):
                 st_ = do_import_opening(FAC, rows)
                 if st_:
@@ -6316,8 +6547,10 @@ def _global_usage_90(ver, today_s):
     """Issued quantity per (factory, item) over the last 90 days. Looping over every issue row used to run on every click."""
     today = datetime.strptime(today_s, "%Y-%m-%d").date()
     usage_start = today - timedelta(days=90)
-    rows = q_c("""SELECT factory_name, sl_no, date, qty FROM transactions
-                  WHERE trans_type IN ('Issued','Internal Issue') AND factory_name = ANY(%s)""", (FACTORIES,))
+    _yrs = "(" + "|".join(str(y) for y in sorted({usage_start.year, today.year})) + ")"     # dates are text: keep only rows that mention the needed year(s)
+    rows = q_c("""SELECT factory_name, sl_no, date, SUM(COALESCE(qty,0)) AS qty FROM transactions
+                  WHERE trans_type IN ('Issued','Internal Issue') AND factory_name = ANY(%s) AND date ~ %s
+                  GROUP BY factory_name, sl_no, date""", (FACTORIES, _yrs))
     out = {}
     for row in rows:
         parsed = parse_date(row.get("date"))
@@ -6603,7 +6836,7 @@ def tab_global_inventory():
 
     with st.expander("Backup and restore · Store Manager only"):
         st.caption("Download a full backup before restore. Restore replaces all public table contents after validation.")
-        st.download_button("Download full database backup",backup_zip(),f"inventory_backup_{datetime.now():%Y%m%d_%H%M}.zip","application/zip",key="global_db_backup")
+        backup_download_button("Download full database backup", f"inventory_backup_{datetime.now():%Y%m%d_%H%M}.zip", "global_db_backup")
         upload=st.file_uploader("Upload a full backup ZIP",type=["zip"],key="global_restore_zip")
         if upload:
             try:
@@ -6631,14 +6864,15 @@ def tab_global_inventory():
 # ============================================================
 #  TAB 4 - ISSUE LEDGER
 # ============================================================
-def tab_issue_ledger():
-    iss = qdf_c(f"""SELECT t.id, t.date, t.time, t.factory_name, t.item_name, COALESCE(i.size,'') AS size,
+_IL_COLS = """t.id, t.date, t.time, t.factory_name, t.item_name, COALESCE(i.size,'') AS size,
                   COALESCE(i.serial_no,'') AS serial_no, t.prod_id, t.sl_no, t.qty,
                   COALESCE(i.unit_price,0) AS unit_price, t.officer_name, t.trans_type, t.notes, t.verification_status,
                   COALESCE(t.po_pending_flag,'') AS po_flag, COALESCE(t.req_no,'') AS req_no,
-                  COALESCE(t.section,'') AS section
-                  FROM transactions t LEFT JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
-                  WHERE t.trans_type IN ('Issued','Internal Issue'){fw(FAC, 't.')[0]} ORDER BY t.id DESC""", FP)
+                  COALESCE(t.section,'') AS section"""
+
+
+def _il_prepare(iss):
+    """Extra columns the Issue Ledger tabs use (same maths as before)."""
     if not iss.empty:
         iss["total_value"] = iss.qty * iss.unit_price
         iss["type"] = iss.trans_type.map(lambda c: TRANS_LABELS.get(c, c))
@@ -6646,21 +6880,57 @@ def tab_issue_ledger():
         iss.loc[iss["po_flag"] == "Pending", "erp_status"] = "ERP PO Pending"   # tagged in Transactions / here
         iss.loc[iss["po_flag"] == "Done", "erp_status"] = "ERP Entry Done"
         iss["_dt"] = pd.to_datetime(iss["date"].apply(parse_date), errors="coerce")
+    else:                                   # keep the same columns when a filter matches nothing
+        iss["total_value"] = pd.Series(dtype="float64")
+        iss["type"] = pd.Series(dtype="object")
+        iss["erp_status"] = pd.Series(dtype="object")
+        iss["_dt"] = pd.Series(dtype="datetime64[ns]")
+    return iss
+
+
+def tab_issue_ledger():
+    # SPEED / EGRESS: the page used to download EVERY issue line of all time and filter it in Python. Now the search, month, year
+    # and date-range filters run inside the database, so only the lines you asked for travel. If the database cannot read some
+    # odd date text, it falls back (once per session) to the old load-everything way - same numbers either way.
+    fsql, fp = fw(FAC, "t.")
+    _dcol = _sql_date("btrim(t.date)")
+    legacy = bool(st.session_state.get("_il_legacy"))
+    years, total, iss_all = [], 0, None
+    if not legacy:
+        try:
+            ys = qdf_c(f"""SELECT to_char({_dcol}, 'YYYY') AS y, COUNT(*) AS n FROM transactions t
+                           WHERE t.trans_type IN ('Issued','Internal Issue'){fsql} GROUP BY 1""", fp)
+            total = int(pd.to_numeric(ys["n"]).sum()) if not ys.empty else 0
+            years = sorted({int(y) for y in ys["y"].dropna()}, reverse=True)
+        except Exception:
+            st.session_state["_il_legacy"] = True
+            legacy = True
+    if legacy:
+        iss_all = _il_prepare(qdf_c(f"""SELECT {_IL_COLS}
+                  FROM transactions t LEFT JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
+                  WHERE t.trans_type IN ('Issued','Internal Issue'){fsql} ORDER BY t.id DESC""", fp))
+        total = len(iss_all)
+        years = sorted({int(y) for y in iss_all["_dt"].dt.year.dropna()}, reverse=True) if total else []
 
     st.markdown('<div class="section-title">Search & Filter Issues</div>', unsafe_allow_html=True)
-    if iss.empty:
+    if total == 0:
         st.info("Issue record nei.")
-        st.dataframe(iss, hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(columns=["id", "date", "time", "factory_name", "item_name", "size", "serial_no", "prod_id", "sl_no", "qty",
+                                           "unit_price", "officer_name", "trans_type", "notes", "verification_status"]),
+                     hide_index=True, use_container_width=True)
         return
 
     month_names = list(calendar.month_name)[1:]
-    years = sorted({int(y) for y in iss["_dt"].dt.year.dropna()}, reverse=True)
+    _today = local_now().date()
+    _yopts = ["All"] + [str(y) for y in years]
+    _mon_def = _today.month if str(_today.year) in _yopts else 0       # opens on the current month; pick "All" for the full history
+    _yr_def = _yopts.index(str(_today.year)) if str(_today.year) in _yopts else 0
     with st.container(border=True):
         f1, f2, f3 = st.columns([3, 1, 1])
         term = f1.text_input("🔍 Search (Item Name / Serial No / ERP Code / SL No / Officer / Factory)", key="il_search",
                              placeholder="e.g. Spherical Roller Bearing, KW-001 ...")
-        mon = f2.selectbox("Month", ["All"] + month_names, key="il_month")
-        yr = f3.selectbox("Year", ["All"] + [str(y) for y in years], key="il_year")
+        mon = f2.selectbox("Month", ["All"] + month_names, index=_mon_def, key="il_month")
+        yr = f3.selectbox("Year", _yopts, index=_yr_def, key="il_year")
         use_rng = st.checkbox("Use exact date range (From - To)", key="il_use_rng")
         d_from = d_to = None
         if use_rng:
@@ -6668,21 +6938,45 @@ def tab_issue_ledger():
             d_from = r1.date_input("From", value=date.today().replace(day=1), key="il_from")
             d_to = r2.date_input("To", value=date.today(), key="il_to")
 
-    view = iss
     t = term.strip().lower()
-    if t:
-        scols = ["item_name", "serial_no", "prod_id", "size", "officer_name", "factory_name", "notes", "req_no", "section"]
-        m = view[scols].fillna("").astype(str).apply(lambda c: c.str.lower().str.contains(t, regex=False)).any(axis=1)
-        view = view[m | (view["sl_no"].astype(str).str.strip() == t)]
-    if mon != "All":
-        view = view[view["_dt"].dt.month == month_names.index(mon) + 1]
-    if yr != "All":
-        view = view[view["_dt"].dt.year == int(yr)]
-    if use_rng:
-        if d_from > d_to:
-            st.error("'From' date 'To' date-er age hote hobe.")
-        else:
+    if use_rng and d_from > d_to:
+        st.error("'From' date 'To' date-er age hote hobe.")
+    if legacy:
+        view = iss_all
+        if t:
+            scols = ["item_name", "serial_no", "prod_id", "size", "officer_name", "factory_name", "notes", "req_no", "section"]
+            m = view[scols].fillna("").astype(str).apply(lambda c: c.str.lower().str.contains(t, regex=False)).any(axis=1)
+            view = view[m | (view["sl_no"].astype(str).str.strip() == t)]
+        if mon != "All":
+            view = view[view["_dt"].dt.month == month_names.index(mon) + 1]
+        if yr != "All":
+            view = view[view["_dt"].dt.year == int(yr)]
+        if use_rng and d_from <= d_to:
             view = view[(view["_dt"] >= pd.Timestamp(d_from)) & (view["_dt"] < pd.Timestamp(d_to) + pd.Timedelta(days=1))]
+    else:
+        conds, par = [], []
+        if t:
+            _sc = ["t.item_name", "i.serial_no", "t.prod_id", "i.size", "t.officer_name", "t.factory_name", "t.notes", "t.req_no", "t.section"]
+            _hit = " OR ".join(f"POSITION(%s IN LOWER(COALESCE({c}::text,''))) > 0" for c in _sc)
+            conds.append(f"(({_hit}) OR TRIM(t.sl_no::text) = %s)")
+            par += [t] * len(_sc) + [t]
+        if mon != "All":
+            conds.append(f"EXTRACT(MONTH FROM {_dcol}) = %s")
+            par.append(month_names.index(mon) + 1)
+        if yr != "All":
+            conds.append(f"EXTRACT(YEAR FROM {_dcol}) = %s")
+            par.append(int(yr))
+        if use_rng and d_from <= d_to:
+            conds.append(f"{_dcol} BETWEEN %s AND %s")
+            par += [d_from, d_to]
+        try:
+            view = _il_prepare(qdf_c(f"""SELECT {_IL_COLS}
+                  FROM transactions t LEFT JOIN inventory i ON t.sl_no=i.sl_no AND t.factory_name=i.factory_name
+                  WHERE t.trans_type IN ('Issued','Internal Issue'){fsql}{''.join(' AND ' + c for c in conds)}
+                  ORDER BY t.id DESC""", list(fp) + par))
+        except Exception:
+            st.session_state["_il_legacy"] = True
+            st.rerun()
 
     mc = st.columns(5)
     mc[0].metric("Total Issued Qty", f"{view.qty.sum():g}")
@@ -6976,24 +7270,27 @@ def transfer_items(t):
 
 @tx
 def delete_transfer(t, reverse):
+    run_once_per_process("transfer_erp_columns", ensure_transfer_erp_columns)
+    _was = run("SELECT COALESCE(erp_status,'Pending') AS s, COALESCE(erp_ref,'') AS r, COALESCE(erp_done_date,'') AS d "
+               "FROM inter_factory_transfers WHERE id=%s", (t["id"],))
+    if _was and _was[0][0] == "Done":      # already entered in ERP: leave a note so the mismatch shows up in the ERP tracker
+        run("""INSERT INTO erp_transfer_deleted (transfer_ref, source_factory, dest_factory, prod_id, item_name, qty, transfer_date,
+                      erp_ref, erp_done_date, deleted_by, deleted_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (t["transfer_ref"], t["source_factory"], t["dest_factory"], t.get("prod_id") or "", t["item_name"],
+             float(t["qty"] or 0), t.get("transfer_date") or "", _was[0][1], _was[0][2],
+             st.session_state.get("user") or "SYSTEM", local_now().strftime("%d-%b-%Y %I:%M %p")))
     if reverse:
         src, dest = transfer_items(t)
         run("UPDATE inventory SET current_stock=current_stock-%s WHERE sl_no=%s AND factory_name=%s", (t["qty"], dest["sl_no"], t["dest_factory"]))
         run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (t["qty"], src["sl_no"], t["source_factory"]))
     run("DELETE FROM inter_factory_transfers WHERE id=%s", (t["id"],))
-    _erp = ""
-    try:
-        if t.get("erp_status") == "Done":
-            _erp = f" [WAS ERP DONE - ERP ref {t.get('erp_ref') or '-'}, ERP qty {t.get('erp_qty')}: ERP-te o thik korun]"
-    except Exception:
-        pass
-    audit("DELETE_TRANSFER", f"Deleted transfer {t['transfer_ref']}" + (" (balance reversed)" if reverse else " (record only)") + _erp)
+    audit("DELETE_TRANSFER", f"Deleted transfer {t['transfer_ref']}" + (" (balance reversed)" if reverse else " (record only)"))
     return True
 
 
 @tx
 def edit_transfer(t, new_qty, date_s, time_s, notes):
-    run_once_per_process("transfer_erp_v1", ensure_transfer_erp_columns)
     delta = new_qty - float(t["qty"])
     if abs(delta) > 1e-9:
         src, dest = transfer_items(t)
@@ -7002,8 +7299,7 @@ def edit_transfer(t, new_qty, date_s, time_s, notes):
             return False
         run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (delta, dest["sl_no"], t["dest_factory"]))
         run("UPDATE inventory SET current_stock=current_stock-%s WHERE sl_no=%s AND factory_name=%s", (delta, src["sl_no"], t["source_factory"]))
-    run("""UPDATE inter_factory_transfers SET qty=%s, transfer_date=%s, transfer_time=%s, notes=%s,
-                 erp_changed=CASE WHEN COALESCE(erp_status,'Pending')='Done' THEN 'Yes' ELSE COALESCE(erp_changed,'') END WHERE id=%s""",
+    run("UPDATE inter_factory_transfers SET qty=%s, transfer_date=%s, transfer_time=%s, notes=%s WHERE id=%s",
         (new_qty, date_s, time_s, notes, t["id"]))
     audit("EDIT_TRANSFER", f"Transfer {t['transfer_ref']}: qty {t['qty']} -> {new_qty}")
     return True
@@ -7022,219 +7318,328 @@ def ensure_transfer_size_column():
 
 
 def ensure_transfer_erp_columns():
-    """ERP entry tracking columns on inter_factory_transfers (idempotent). Old rows start as 'Pending'."""
-    ensure_transfer_size_column()
+    """ERP entry tracking for transfers (additive only): status / ref / who / when / what-was-entered columns + a small note table."""
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            for ddl in ("erp_status TEXT DEFAULT 'Pending'", "erp_ref TEXT DEFAULT ''", "erp_done_by TEXT DEFAULT ''",
-                        "erp_done_at TEXT DEFAULT ''", "erp_qty REAL", "erp_changed TEXT DEFAULT ''"):
-                cur.execute(f"ALTER TABLE inter_factory_transfers ADD COLUMN IF NOT EXISTS {ddl}")
+            cur.execute("""ALTER TABLE inter_factory_transfers
+                           ADD COLUMN IF NOT EXISTS erp_status TEXT DEFAULT 'Pending',
+                           ADD COLUMN IF NOT EXISTS erp_ref TEXT,
+                           ADD COLUMN IF NOT EXISTS erp_done_date TEXT,
+                           ADD COLUMN IF NOT EXISTS erp_done_by TEXT,
+                           ADD COLUMN IF NOT EXISTS erp_snap_qty REAL,
+                           ADD COLUMN IF NOT EXISTS erp_snap_date TEXT""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS erp_transfer_deleted (
+                           id SERIAL PRIMARY KEY, transfer_ref TEXT, source_factory TEXT, dest_factory TEXT, prod_id TEXT,
+                           item_name TEXT, qty REAL, transfer_date TEXT, erp_ref TEXT, erp_done_date TEXT,
+                           deleted_by TEXT, deleted_at TEXT, acked_by TEXT, acked_at TEXT)""")
         conn.commit()
     except Exception:
         conn.rollback()
         raise
 
 
-@tx
-def tf_erp_mark(refs, erp_ref):
-    """Mark transfers as entered in the company ERP. Also re-confirms a Done transfer that was edited afterwards."""
-    n = 0
-    for ref in refs:
-        r = run("""UPDATE inter_factory_transfers SET erp_status='Done', erp_ref=%s, erp_done_by=%s, erp_done_at=%s, erp_qty=qty, erp_changed=''
-                   WHERE transfer_ref=%s AND (COALESCE(erp_status,'Pending')<>'Done' OR COALESCE(erp_changed,'')='Yes'
-                                              OR ABS(COALESCE(qty,0)-COALESCE(erp_qty,0))>0.000001)
-                   RETURNING transfer_ref""",
-                (erp_ref, st.session_state.get("user", ""), local_now().strftime("%d-%b-%Y %I:%M %p"), ref))
-        n += len(r or [])
-    audit("TRANSFER_ERP_DONE", f"{n} transfer(s) marked ERP Done (ERP ref {erp_ref or '-'}): {', '.join(refs[:15])}{' ...' if len(refs) > 15 else ''}")
-    return n
+_ERP_SEL = """id, transfer_ref, source_factory, dest_factory, COALESCE(prod_id,'') AS prod_id, item_name, qty,
+              COALESCE(transfer_date,'') AS transfer_date, COALESCE(initiated_by,'') AS initiated_by,
+              COALESCE(erp_status,'Pending') AS erp_status, COALESCE(erp_ref,'') AS erp_ref,
+              COALESCE(erp_done_date,'') AS erp_done_date, COALESCE(erp_done_by,'') AS erp_done_by,
+              erp_snap_qty, COALESCE(erp_snap_date,'') AS erp_snap_date"""
 
 
-@tx
-def tf_erp_undo(refs):
-    n = 0
-    for ref in refs:
-        r = run("""UPDATE inter_factory_transfers SET erp_status='Pending', erp_ref='', erp_done_by='', erp_done_at='', erp_qty=NULL, erp_changed=''
-                   WHERE transfer_ref=%s AND COALESCE(erp_status,'Pending')='Done' RETURNING transfer_ref""", (ref,))
-        n += len(r or [])
-    audit("TRANSFER_ERP_UNDO", f"{n} transfer(s) moved back to ERP Pending: {', '.join(refs[:15])}{' ...' if len(refs) > 15 else ''}")
-    return n
+def _erp_scope():
+    if not FAC or "CONSOLIDATED" in FAC:
+        return "", ()
+    return " AND (source_factory=%s OR dest_factory=%s)", (FAC, FAC)
 
 
-def tf_erp_df(fac):
-    run_once_per_process("transfer_erp_v1", ensure_transfer_erp_columns)
-    sql = """SELECT id, transfer_ref, COALESCE(transfer_date,'') AS transfer_date, COALESCE(transfer_time,'') AS transfer_time,
-                    COALESCE(source_factory,'') AS source_factory, COALESCE(dest_factory,'') AS dest_factory, COALESCE(prod_id,'') AS code,
-                    COALESCE(item_name,'') AS item_name, COALESCE(size,'') AS size, COALESCE(qty,0) AS qty,
-                    COALESCE(erp_status,'Pending') AS erp_status, COALESCE(erp_ref,'') AS erp_ref, COALESCE(erp_done_by,'') AS erp_done_by,
-                    COALESCE(erp_done_at,'') AS erp_done_at, erp_qty, COALESCE(erp_changed,'') AS erp_changed
-             FROM inter_factory_transfers"""
-    if not fac or "CONSOLIDATED" in fac:
-        df = qdf_c(sql + " ORDER BY id DESC")
-    else:
-        df = qdf_c(sql + " WHERE source_factory=%s OR dest_factory=%s ORDER BY id DESC", (fac, fac))
-    if df.empty:
-        return df
-    df["_dt"] = df["transfer_date"].map(lambda s: (parse_date(s) or pd.NaT))
-    df["_dt"] = pd.to_datetime(df["_dt"], errors="coerce")
-    df["days"] = (pd.Timestamp(local_now().date()) - df["_dt"]).dt.days
-    df["is_done"] = df["erp_status"] == "Done"
-    df["changed"] = df["is_done"] & ((df["erp_changed"] == "Yes") | ((pd.to_numeric(df["qty"], errors="coerce").fillna(0)
-                                                                       - pd.to_numeric(df["erp_qty"], errors="coerce").fillna(0)).abs() > 1e-6))
-    if fac and "CONSOLIDATED" not in fac:
-        df["dir"] = df["dest_factory"].map(lambda x: "⬇ IN" if x == fac else "⬆ OUT")
-    else:
-        df["dir"] = ""
+def _erp_prepare(df):
+    """Adds: snap_qty, changed (edited after ERP Done), pending_days. Pure pandas - no extra database calls."""
+    df = df.copy()
+    df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0.0)
+    df["transfer_date"] = df["transfer_date"].fillna("")
+    df["erp_snap_date"] = df["erp_snap_date"].fillna("")
+    df["snap_qty"] = pd.to_numeric(df["erp_snap_qty"], errors="coerce").fillna(df["qty"])
+    done = df["erp_status"].eq("Done")
+    qty_changed = (df["qty"] - df["snap_qty"]).abs() > 1e-9
+    date_changed = (df["erp_snap_date"] != "") & (df["erp_snap_date"] != df["transfer_date"])
+    df["changed"] = done & (qty_changed | date_changed)
+    today = local_now().date()
+
+    def _days(row):
+        if row["erp_status"] == "Done":
+            return None
+        d = parse_date(row["transfer_date"])
+        return max((today - d.date()).days, 0) if d else None
+    days = df.apply(_days, axis=1) if len(df) else pd.Series(dtype="float64")
+    df["pending_days"] = pd.to_numeric(days, errors="coerce")
     return df
 
 
-_TFE_CSS = """<style>
-.tfe-k{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:6px 0 12px 0}
-@media(max-width:800px){.tfe-k{grid-template-columns:repeat(2,minmax(0,1fr))}}
-.tfe-c{border-radius:14px;padding:12px 14px;color:#fff;box-shadow:0 2px 8px rgba(15,23,42,.10)}
-.tfe-c b{display:block;font-size:1.5rem;line-height:1.15}.tfe-c span{font-size:.78rem;font-weight:700;opacity:.95}.tfe-c i{display:block;font-style:normal;font-size:.72rem;opacity:.9;margin-top:2px}
-.tfe-c.p{background:linear-gradient(135deg,#DC2626,#F87171)}.tfe-c.o{background:linear-gradient(135deg,#B45309,#F59E0B)}
-.tfe-c.d{background:linear-gradient(135deg,#15803D,#4ADE80)}.tfe-c.w{background:linear-gradient(135deg,#7C3AED,#A78BFA)}
-.tfe-how{background:#F4F8FF;border:1px solid #D3E1F5;border-radius:10px;padding:8px 12px;font-size:.8rem;color:#17325F;margin-bottom:8px}
-</style>"""
+@tx
+def erp_mark_done(ids, refs, only_pending=True):
+    """Marks the given transfer lines ERP Done (one statement). A blank ref keeps the old one (re-confirm after a change)."""
+    run_once_per_process("transfer_erp_columns", ensure_transfer_erp_columns)
+    user = st.session_state.get("user") or "SYSTEM"
+    guard = " AND COALESCE(t.erp_status,'Pending')<>'Done'" if only_pending else ""
+    rows = run(f"""UPDATE inter_factory_transfers t
+                   SET erp_status='Done', erp_ref=COALESCE(NULLIF(v.ref,''), t.erp_ref, ''), erp_done_date=%s, erp_done_by=%s,
+                       erp_snap_qty=t.qty, erp_snap_date=t.transfer_date
+                   FROM (SELECT unnest(%s::int[]) AS id, unnest(%s::text[]) AS ref) v
+                   WHERE t.id=v.id{guard} RETURNING t.transfer_ref, COALESCE(t.erp_ref,'')""",
+               (local_now().strftime(DATE_FMT), user, ids, refs)) or []
+    if rows:
+        audit("ERP_DONE", f"{len(rows)} transfer(s) marked ERP Done: " + "; ".join(f"{r[0]}->{r[1]}" for r in rows)[:600])
+    return len(rows)
 
 
-def _tf_cols(v, extra=()):
-    out = pd.DataFrame({"Transfer Ref": v["transfer_ref"], "Date": v["transfer_date"], "Item": v["item_name"], "Size": v["size"],
-                        "Code": v["code"], "Qty": v["qty"], "From": v["source_factory"].map(short_fac), "To": v["dest_factory"].map(short_fac)})
-    if v["dir"].astype(bool).any():
-        out.insert(1, "Dir", v["dir"])
-    for lab, col in extra:
-        out[lab] = v[col]
-    return out
+@tx
+def erp_undo(ids):
+    rows = run("""UPDATE inter_factory_transfers SET erp_status='Pending', erp_ref='', erp_done_date='', erp_done_by='',
+                         erp_snap_qty=NULL, erp_snap_date=''
+                  WHERE id = ANY(%s) RETURNING transfer_ref""", (ids,)) or []
+    if rows:
+        audit("ERP_UNDO", f"{len(rows)} transfer(s) set back to ERP Pending: " + ", ".join(r[0] for r in rows)[:500])
+    return len(rows)
 
 
-@_frag
-def tf_erp_view():
-    """🔌 ERP Entry Tracking: which inter-unit transfers are already entered in the company ERP and which are still pending."""
-    fac = FAC
-    can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
-    st.markdown(_TFE_CSS, unsafe_allow_html=True)
-    df = tf_erp_df(fac)
-    if df.empty:
-        st.info("Kono transfer nei.")
+@tx
+def erp_ack_deleted(ids):
+    run("UPDATE erp_transfer_deleted SET acked_by=%s, acked_at=%s WHERE id = ANY(%s)",
+        (st.session_state.get("user") or "SYSTEM", local_now().strftime("%d-%b-%Y %I:%M %p"), ids))
+    audit("ERP_DELETED_ACK", f"{len(ids)} deleted-after-ERP note(s) acknowledged")
+    return len(ids)
+
+
+@tx
+def erp_legacy_done(cutoff_date, scope_sql, scope_par):
+    """One-time helper: transfers made before tracking started count as already entered in ERP."""
+    dcol = _sql_date("btrim(transfer_date)")
+    rows = run(f"""UPDATE inter_factory_transfers
+                   SET erp_status='Done', erp_ref='Tracking-er age', erp_done_date=%s, erp_done_by=%s,
+                       erp_snap_qty=qty, erp_snap_date=transfer_date
+                   WHERE COALESCE(erp_status,'Pending')<>'Done' AND {dcol} <= %s{scope_sql}
+                   RETURNING id""",
+               (local_now().strftime(DATE_FMT), st.session_state.get("user") or "SYSTEM", cutoff_date) + tuple(scope_par)) or []
+    audit("ERP_LEGACY_DONE", f"{len(rows)} old transfer(s) up to {cutoff_date:%d-%b-%Y} marked ERP Done (before tracking)")
+    return len(rows)
+
+
+def _erp_style_status(df, col):
+    def c(v):
+        v = str(v)
+        if v.startswith("⚠"):
+            return "background-color:#FEF3C7;color:#92400E;font-weight:600"
+        if v.startswith("🔴"):
+            return "background-color:#FEE2E2;color:#991B1B;font-weight:600"
+        if v.startswith("✅"):
+            return "background-color:#DCFCE7;color:#166534;font-weight:600"
+        return ""
+    try:
+        return df.style.map(c, subset=[col])
+    except AttributeError:
+        return df.style.applymap(c, subset=[col])
+
+
+def _erp_status_text(prep):
+    txt = pd.Series("🔴 ERP Pending", index=prep.index)
+    txt[prep["erp_status"].eq("Done")] = "✅ ERP Done"
+    txt[prep["changed"]] = "⚠ ERP-r por bodlano hoyeche, abar dekhun"
+    return txt
+
+
+def _erp_tracker():
+    """Pending report, tick-to-Done, edited/deleted-after-ERP warnings and item-wise software-vs-ERP check."""
+    sc, sp = _erp_scope()
+    allt = qdf_c(f"SELECT {_ERP_SEL} FROM inter_factory_transfers WHERE 1=1{sc} ORDER BY id DESC", tuple(sp) or None)
+    dele = qdf_c(f"""SELECT id, transfer_ref, source_factory, dest_factory, prod_id, item_name, qty, transfer_date, erp_ref,
+                            erp_done_date, deleted_by, deleted_at FROM erp_transfer_deleted
+                     WHERE COALESCE(acked_by,'')=''{sc} ORDER BY id DESC""", tuple(sp) or None)
+    st.markdown('<div class="section-title">🧾 ERP Entry Tracker</div>', unsafe_allow_html=True)
+    if allt.empty:
+        st.caption("Transfer nei.")
         return
-    pend, dn = df[~df["is_done"]], df[df["is_done"]]
-    chg = df[df["changed"]]
-    oldest = int(pend["days"].max()) if len(pend) and pend["days"].notna().any() else 0
-    st.markdown(
-        "<div class='tfe-how'>Officer ERP software-e transfer entry korle ekhane tick diye <b>ERP Done</b> korben. "
-        "Notun transfer nijei <b>Pending</b> hoye ashe - tarikh dhore na, protita transfer line alada track hoy. "
-        "Done-er por qty/tarikh bodlale <b>⚠ Changed</b> dekhay.</div>"
-        "<div class='tfe-k'>"
-        f"<div class='tfe-c p'><span>🔴 ERP Pending</span><b>{len(pend)}</b><i>Qty {pend['qty'].sum():g}</i></div>"
-        f"<div class='tfe-c o'><span>⏳ Shobcheye purono pending</span><b>{oldest}</b><i>din dhore</i></div>"
-        f"<div class='tfe-c d'><span>✅ ERP Done</span><b>{len(dn)}</b><i>Qty {dn['qty'].sum():g}</i></div>"
-        f"<div class='tfe-c w'><span>⚠ Done-er por bodlano</span><b>{len(chg)}</b><i>abar mil korte hobe</i></div></div>",
-        unsafe_allow_html=True)
-    mode = st.radio("tfe_mode", ["🔴 ERP Pending", "✅ ERP Done", "⚠ Done-er por bodlano", "📊 Item-wise hishab"], horizontal=True,
-                    key="tfe_mode", label_visibility="collapsed")
-    if mode == "🔴 ERP Pending":
-        term = st.text_input("🔍 Search (ref / item / code / unit)", key="tfe_search")
-        v = pend.sort_values(["_dt", "id"], ascending=[True, True])
-        if term:
-            tt = _tf_cols(v, [("Pending (din)", "days")])
-            v = v[tt.astype(str).apply(lambda c: c.str.contains(term, case=False, regex=False)).any(axis=1).values]
-        if v.empty:
-            st.success("✅ Kono ERP Pending transfer nei - shob entry hoye geche.")
+    prep = _erp_prepare(allt)
+    pend = prep[prep["erp_status"] != "Done"].copy()
+    chg = prep[prep["changed"]].copy()
+    n_alert = len(chg) + len(dele)
+    tab_p, tab_c, tab_m = st.tabs([f"🔴 Pending Report ({len(pend)})", f"⚠ ERP-r por bodlano ({n_alert})", "⚖ Item-wise mil"])
+    gen = st.session_state.setdefault("erp_gen", 0)
+    scope_key = abs(hash((FAC or "", tuple(prep["id"].tolist())))) % 10**8
+    tick_hint = "ERP-te entry shesh kora line-gulo tick diye 'ERP Done' korun."
+
+    # ---------------- pending report + tick ----------------
+    with tab_p:
+        if pend.empty:
+            st.success("✅ Shob transfer-er ERP entry hoye geche - kono pending nei.")
         else:
-            tbl = _tf_cols(v, [("Pending (din)", "days")])
-            export_buttons(tbl, "transfer_erp_pending", "Transfer - ERP entry Pending")
-            if can_write:
-                sel_all = st.checkbox("Shob select korun", key="tfe_all")
-                ed = tbl.copy()
-                ed.insert(0, "✔ ERP Done", bool(sel_all))
-                cfg = {"✔ ERP Done": st.column_config.CheckboxColumn("✔ ERP Done", help="ERP-te entry hole tick din")}
-                out = st.data_editor(ed, hide_index=True, use_container_width=True, height=min(520, 60 + 35 * len(ed)), column_config=cfg,
-                                     disabled=[c for c in ed.columns if c != "✔ ERP Done"],
-                                     key=f"tfe_ed_{int(bool(sel_all))}_{abs(hash(term)) % 100000}_{len(ed)}")
-                refs = out.loc[out["✔ ERP Done"], "Transfer Ref"].tolist()
-                c1, c2 = st.columns([2, 1.4])
-                erp_ref = c1.text_input("ERP ref / GRN no. (optional)", key="tfe_ref", placeholder="e.g. GRN-2026-0415")
-                c2.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-                if c2.button(f"✅ ERP Done mark korun ({len(refs)})", type="primary", key="tfe_mark", disabled=not refs, use_container_width=True):
-                    if guard():
-                        n = tf_erp_mark(refs, (erp_ref or "").strip())
-                        if n is not None:
-                            done(f"✅ {n} ti transfer ERP Done hishebe mark kora holo.")
+            pend = pend.sort_values(["pending_days", "id"], ascending=[False, True], na_position="last")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("ERP Pending line", len(pend))
+            m2.metric("Pending total qty", f"{pend['qty'].sum():,.2f}".rstrip("0").rstrip("."))
+            oldest = pend["pending_days"].dropna()
+            m3.metric("Shobcheye purono (din)", int(oldest.max()) if len(oldest) else 0)
+            rep_df = pd.DataFrame({
+                "Transfer Ref": pend["transfer_ref"], "Date": pend["transfer_date"], "Code": pend["prod_id"], "Item": pend["item_name"],
+                "Qty": pend["qty"], "From": pend["source_factory"], "To": pend["dest_factory"],
+                "Pending Din": pend["pending_days"].astype("Int64"), "Initiated By": pend["initiated_by"]})
+            st.caption("Ekhane shudhu ERP-te ekhono na dhoka transfer ache. " + tick_hint)
+            sel_all = st.checkbox("Shob line tick korun", key=f"erp_selall_{gen}")
+            ed_in = rep_df.copy()
+            ed_in.insert(0, "✔", bool(sel_all))
+            ed_in["ERP Ref/GRN (line-wise, optional)"] = ""
+            ed = st.data_editor(
+                ed_in, hide_index=True, use_container_width=True, height=min(90 + 35 * len(ed_in), 520),
+                key=f"erp_tick_{gen}_{scope_key}_{int(sel_all)}",
+                disabled=[c for c in ed_in.columns if c not in ("✔", "ERP Ref/GRN (line-wise, optional)")],
+                column_config={"✔": st.column_config.CheckboxColumn("✔ ERP Done", default=False),
+                               "Qty": st.column_config.NumberColumn(format="%.2f")})
+            ref_all = st.text_input("ERP Ref / GRN No. (tick kora shob line-er jonno; line-wise dile seta beshi gonno hobe)",
+                                    key=f"erp_ref_all_{gen}")
+            if st.button("✅ ERP Done korun (tick kora line-gulo)", key=f"erp_do_{gen}"):
+                ticked = [i for i, v in enumerate(ed["✔"].tolist()) if bool(v)]
+                if not ticked:
+                    st.error("Kono line tick kora nei.")
+                else:
+                    ids, refs, missing = [], [], 0
+                    for i in ticked:
+                        r_line = str(ed["ERP Ref/GRN (line-wise, optional)"].iloc[i] or "").strip()
+                        r_use = r_line or ref_all.strip()
+                        if not r_use:
+                            missing += 1
+                        ids.append(int(pend["id"].iloc[i]))
+                        refs.append(r_use)
+                    if missing:
+                        st.error("ERP Ref / GRN No. din (uporer ghor-e ba line-wise).")
+                    else:
+                        n_ok = erp_mark_done(ids, refs, only_pending=True)
+                        st.session_state["erp_gen"] = gen + 1
+                        done(f"{n_ok}-ta transfer ERP Done hoyeche." + (f" ({len(ids) - n_ok}-ta age-i Done chilo.)" if n_ok < len(ids) else ""))
+            export_buttons(rep_df, "erp_pending_transfers", "ERP Pending Transfers")
+        with st.expander("↩ Vul tick? ERP Done theke Pending-e ferot nin (Manager)"):
+            dn = prep[prep["erp_status"] == "Done"]
+            if dn.empty:
+                st.caption("Done transfer nei.")
             else:
-                st.dataframe(tbl, hide_index=True, use_container_width=True, height=min(520, 60 + 35 * len(tbl)))
-                st.caption("🔒 Login kore (write role) ERP Done mark korte hoy.")
-        if can_write and len(pend):
-            with st.expander("🧹 Purano transfer ekshathe ERP Done (shuru-r backlog - Manager)"):
-                st.caption("Software cholur age ja ERP-te already entry hoye geche, oi purano pending ekshathe Done kore din. Preview dekhe tarpor korun.")
-                cutoff = st.date_input("Ei tarikh porjonto (shoho) sob Pending -> Done", value=None, key="tfe_cut", format="DD/MM/YYYY")
-                if cutoff:
-                    old = pend[pend["_dt"].notna() & (pend["_dt"] <= pd.Timestamp(cutoff))]
-                    st.write(f"**{len(old)}** ti transfer Done hobe (Qty {old['qty'].sum():g}).")
-                    if len(old):
-                        st.dataframe(_tf_cols(old), hide_index=True, use_container_width=True, height=min(260, 60 + 35 * len(old)))
-                        pw = mgr_check("tfe_bpw")
-                        conf = confirm_box("tfe_bconf", "⚠️ Ami confirm korchi - ei transfer-gulo ERP-te already entry hoyeche.")
-                        if st.button("✅ Ekshathe ERP Done korun", key="tfe_bulk"):
-                            if not pw:
-                                st.error("Manager password din.")
-                            elif not conf:
-                                st.error("Confirm tick korun.")
-                            elif guard():
-                                n = tf_erp_mark(old["transfer_ref"].tolist(), "Opening (purano)")
-                                if n is not None:
-                                    done(f"✅ {n} ti purano transfer ERP Done kora holo.")
-    elif mode == "✅ ERP Done":
-        v = dn.sort_values("id", ascending=False)
-        if v.empty:
-            st.info("Ekhono kono transfer ERP Done kora hoy ni.")
+                lab = {int(r.id): f"{r.transfer_ref} · {r.item_name} · {r.qty:g} · ERP {r.erp_ref or '-'}" for r in dn.head(300).itertuples()}
+                pick = st.multiselect("Transfer (newest 300)", list(lab.keys()), format_func=lambda i: lab[i], key=f"erp_undo_pick_{gen}")
+                pw_u = mgr_check(f"erp_undo_pw_{gen}")
+                if st.button("↩ Pending-e ferot din", key=f"erp_undo_btn_{gen}"):
+                    if not pick:
+                        st.error("Transfer bachun.")
+                    elif not pw_u:
+                        st.error("Manager password din.")
+                    else:
+                        st.session_state["erp_gen"] = gen + 1
+                        done(f"{erp_undo([int(i) for i in pick])}-ta transfer ERP Pending-e ferot gelo.")
+        with st.expander("🔐 Manager: tracking chalu howar age-er purono transfer ek-sathe ERP Done"):
+            st.caption("Ei feature-er age jeshob transfer-er ERP entry already hoye gechhe, segulo ek-bar-e 'ERP Done (Tracking-er age)' kora jay. "
+                       "Notun transfer-er jonno eta bebohar korben na - segulo line-by-line tick hobe.")
+            cutoff = st.date_input("Ei tarikh porjonto-er (shoho) shob pending transfer", value=date.today() - timedelta(days=1),
+                                   key=f"erp_cut_{gen}")
+            pw_c = mgr_check(f"erp_cut_pw_{gen}")
+            conf_c = confirm_box(f"erp_cut_conf_{gen}", "⚠️ Ami confirm korchi - ei tarikh porjonto-er shob pending transfer ERP Done hobe.")
+            if st.button("Purono transfer-gulo ERP Done korun", key=f"erp_cut_btn_{gen}"):
+                if not pw_c:
+                    st.error("Manager password din.")
+                elif not conf_c:
+                    st.error("Confirm tick din.")
+                else:
+                    st.session_state["erp_gen"] = gen + 1
+                    done(f"{erp_legacy_done(cutoff, sc, sp)}-ta purono transfer ERP Done (Tracking-er age) kora holo.")
+
+    # ---------------- edited / deleted after ERP ----------------
+    with tab_c:
+        if chg.empty and dele.empty:
+            st.success("✅ ERP Done howar por kono transfer bodlano ba delete hoy ni.")
+        if not chg.empty:
+            st.warning("ERP Done howar por ei transfer-gulo bodlano hoyeche - ERP-r songe mil bhenge geche. "
+                       "ERP-te thik kore tarpor 'Abar ERP Done' korun.")
+            ch_df = pd.DataFrame({
+                "Transfer Ref": chg["transfer_ref"], "Item": chg["item_name"], "From": chg["source_factory"], "To": chg["dest_factory"],
+                "Ekhon Qty": chg["qty"], "ERP-te dewa Qty": chg["snap_qty"], "Ekhon Date": chg["transfer_date"],
+                "ERP-r somoy Date": chg["erp_snap_date"], "ERP Ref": chg["erp_ref"], "ERP Done By": chg["erp_done_by"]})
+            ch_in = ch_df.copy()
+            ch_in.insert(0, "✔", False)
+            ch_ed = st.data_editor(ch_in, hide_index=True, use_container_width=True, height=min(90 + 35 * len(ch_in), 420),
+                                   key=f"erp_chg_{gen}_{scope_key}", disabled=[c for c in ch_in.columns if c != "✔"],
+                                   column_config={"✔": st.column_config.CheckboxColumn("✔ Abar Done", default=False)})
+            if st.button("✅ Abar ERP Done (ERP-te thik kora hoyeche)", key=f"erp_chg_btn_{gen}"):
+                tk = [i for i, v in enumerate(ch_ed["✔"].tolist()) if bool(v)]
+                if not tk:
+                    st.error("Kono line tick kora nei.")
+                else:
+                    n_ok = erp_mark_done([int(chg["id"].iloc[i]) for i in tk], [""] * len(tk), only_pending=False)
+                    st.session_state["erp_gen"] = gen + 1
+                    done(f"{n_ok}-ta transfer abar ERP Done hoyeche.")
+        if not dele.empty:
+            st.warning("ERP Done howar por ei transfer-gulo software theke delete hoyeche - ERP-te ei entry ekhono thakte pare, check korun.")
+            de_df = pd.DataFrame({
+                "Transfer Ref": dele["transfer_ref"], "Item": dele["item_name"], "Code": dele["prod_id"], "From": dele["source_factory"],
+                "To": dele["dest_factory"], "Qty": dele["qty"], "Date": dele["transfer_date"], "ERP Ref": dele["erp_ref"],
+                "Deleted By": dele["deleted_by"], "Deleted At": dele["deleted_at"]})
+            de_in = de_df.copy()
+            de_in.insert(0, "✔", False)
+            de_ed = st.data_editor(de_in, hide_index=True, use_container_width=True, height=min(90 + 35 * len(de_in), 380),
+                                   key=f"erp_del_{gen}_{scope_key}", disabled=[c for c in de_in.columns if c != "✔"],
+                                   column_config={"✔": st.column_config.CheckboxColumn("✔ Dekhechi", default=False)})
+            if st.button("👁 Dekhechi / ERP-te thik korechi", key=f"erp_del_btn_{gen}"):
+                tk = [i for i, v in enumerate(de_ed["✔"].tolist()) if bool(v)]
+                if not tk:
+                    st.error("Kono line tick kora nei.")
+                else:
+                    n_ok = erp_ack_deleted([int(dele["id"].iloc[i]) for i in tk])
+                    st.session_state["erp_gen"] = gen + 1
+                    done(f"{n_ok}-ta note dekha hoyeche.")
+
+    # ---------------- item-wise reconciliation ----------------
+    with tab_m:
+        key = ["source_factory", "dest_factory", "prod_id", "item_name"]
+        base = prep.assign(sw=prep["qty"], erp=prep["snap_qty"].where(prep["erp_status"].eq("Done"), 0.0),
+                           n_pend=(prep["erp_status"] != "Done").astype(int), n_chg=prep["changed"].astype(int))
+        g = base.groupby(key, as_index=False).agg(sw=("sw", "sum"), erp=("erp", "sum"), n_pend=("n_pend", "sum"), n_chg=("n_chg", "sum"))
+        g["n_del"] = 0
+        if not dele.empty:
+            d2 = dele.assign(qty=pd.to_numeric(dele["qty"], errors="coerce").fillna(0.0), prod_id=dele["prod_id"].fillna(""))
+            gd = d2.groupby(key, as_index=False).agg(erp_d=("qty", "sum"), n_del_d=("qty", "size"))
+            g = g.merge(gd, on=key, how="outer")
+            for c in ("sw", "erp", "n_pend", "n_chg", "erp_d", "n_del_d"):
+                g[c] = g[c].fillna(0)
+            g["erp"] = g["erp"] + g["erp_d"]
+            g["n_del"] = g["n_del_d"]
+        g["baki"] = g["sw"] - g["erp"]
+
+        def why(r):
+            bits = []
+            if r["n_pend"]:
+                bits.append(f"{int(r['n_pend'])} line ERP Pending")
+            if r["n_chg"]:
+                bits.append(f"{int(r['n_chg'])} line ERP-r por bodlano")
+            if r["n_del"]:
+                bits.append(f"{int(r['n_del'])} line ERP-r por delete")
+            return ", ".join(bits)
+        g["karon"] = g.apply(why, axis=1) if len(g) else ""
+        mis = g[g["baki"].abs() > 1e-9]
+        st.metric("Tafat ache emon item", len(mis))
+        only_mis = st.checkbox("Shudhu tafat thaka item dekhan", value=False, key=f"erp_onlymis_{gen}")
+        show = (mis if only_mis else g).sort_values("baki", key=lambda c: c.abs(), ascending=False)
+        out = pd.DataFrame({"From": show["source_factory"], "To": show["dest_factory"], "Code": show["prod_id"], "Item": show["item_name"],
+                            "Software-e transfer": show["sw"], "ERP-te entry": show["erp"], "Baki (tafat)": show["baki"],
+                            "Karon": show["karon"]})
+        if out.empty:
+            st.caption("Item nei.")
         else:
-            tbl = _tf_cols(v, [("ERP Qty", "erp_qty"), ("ERP Ref", "erp_ref"), ("Done by", "erp_done_by"), ("Done at", "erp_done_at")])
-            tbl["Changed?"] = v["changed"].map(lambda x: "⚠ Changed" if x else "")
-            st.dataframe(tbl, hide_index=True, use_container_width=True, height=min(520, 60 + 35 * len(tbl)))
-            export_buttons(tbl, "transfer_erp_done", "Transfer - ERP Done")
-            if can_write:
-                with st.expander("↩ Bhul mark hole Pending-e phiran"):
-                    pick = st.multiselect("Transfer", v["transfer_ref"].tolist(), key="tfe_undo_sel")
-                    if st.button(f"↩ Pending-e phiran ({len(pick)})", key="tfe_undo", disabled=not pick):
-                        if guard():
-                            n = tf_erp_undo(pick)
-                            if n is not None:
-                                done(f"↩ {n} ti transfer Pending-e phire gelo.")
-    elif mode == "⚠ Done-er por bodlano":
-        v = chg.sort_values("id", ascending=False)
-        if v.empty:
-            st.success("✅ ERP Done-er por kono transfer bodlayni.")
-        else:
-            st.warning("Ei transfer-gulo ERP Done hoyar por bodlano hoyeche. ERP-r songe milie dekhun, tarpor abar Done confirm korun.")
-            tbl = _tf_cols(v, [("ERP-te dewa Qty", "erp_qty"), ("ERP Ref", "erp_ref")])
-            st.dataframe(tbl, hide_index=True, use_container_width=True, height=min(420, 60 + 35 * len(tbl)))
-            if can_write:
-                pick = st.multiselect("ERP-r songe mil geche (abar Done korbo)", v["transfer_ref"].tolist(), key="tfe_re_sel")
-                if st.button(f"✅ Abar ERP Done confirm ({len(pick)})", key="tfe_re", disabled=not pick, type="primary"):
-                    if guard():
-                        n = tf_erp_mark(pick, "")
-                        if n is not None:
-                            done(f"✅ {n} ti transfer abar ERP Done confirm kora holo.")
-    else:
-        g = df.copy()
-        g["done_q"] = g.apply(lambda r: float(r["erp_qty"] or 0) if r["is_done"] else 0.0, axis=1)
-        g["pend_q"] = g.apply(lambda r: 0.0 if r["is_done"] else float(r["qty"] or 0), axis=1)
-        s = g.groupby(["item_name", "size", "code"], dropna=False).agg(
-            total=("qty", "sum"), done_q=("done_q", "sum"), pend_q=("pend_q", "sum"),
-            n_pend=("is_done", lambda x: int((~x).sum())), n_chg=("changed", "sum")).reset_index()
-        s["Status"] = s.apply(lambda r: "🔴 Pending" if r["pend_q"] > 0 else ("⚠ Changed" if r["n_chg"] else "✅ Clear"), axis=1)
-        s = s.sort_values(["pend_q", "item_name"], ascending=[False, True])
-        tbl = pd.DataFrame({"Item": s["item_name"], "Size": s["size"], "Code": s["code"], "Mot Transfer Qty": s["total"],
-                            "ERP-te Entry (Done)": s["done_q"], "ERP Pending Qty": s["pend_q"], "Pending Transfer (ti)": s["n_pend"], "Status": s["Status"]})
-        st.dataframe(tbl, hide_index=True, use_container_width=True, height=min(560, 60 + 35 * len(tbl)))
-        export_buttons(tbl, "transfer_erp_itemwise", "Transfer - Item-wise ERP hishab")
+            def red(row):
+                bad = abs(float(row["Baki (tafat)"])) > 1e-9
+                return ["background-color:#FEE2E2;color:#991B1B;font-weight:600" if bad else "" for _ in row]
+            st.dataframe(out.style.apply(red, axis=1).format({"Software-e transfer": "{:,.2f}", "ERP-te entry": "{:,.2f}",
+                                                              "Baki (tafat)": "{:,.2f}"}),
+                         hide_index=True, use_container_width=True, height=420)
+            export_buttons(out, "erp_item_reconciliation", "ERP vs Software - Item-wise")
 
 
-def _tf_history_view():
-    run_once_per_process("transfer_erp_v1", ensure_transfer_erp_columns)
+def tab_transfer_history():
+    run_once_per_process("transfer_size_column", ensure_transfer_size_column)
+    run_once_per_process("transfer_erp_columns", ensure_transfer_erp_columns)
     cols_sql = """SELECT id, transfer_ref, source_factory, dest_factory, prod_id, item_name,
                   COALESCE(NULLIF(size,''),
                            (SELECT i.size FROM inventory i WHERE i.prod_id=inter_factory_transfers.prod_id
@@ -7243,19 +7648,29 @@ def _tf_history_view():
                            (SELECT i.size FROM inventory i WHERE i.prod_id=inter_factory_transfers.prod_id
                               AND i.factory_name=inter_factory_transfers.dest_factory LIMIT 1), '') AS size,
                   qty, transfer_date, transfer_time, initiated_by, status, notes,
-                  COALESCE(erp_status,'Pending') AS erp_status, COALESCE(erp_ref,'') AS erp_ref FROM inter_factory_transfers"""
+                   COALESCE(erp_status,'Pending') AS erp_status, COALESCE(erp_ref,'') AS erp_ref,
+                   COALESCE(erp_done_date,'') AS erp_date, COALESCE(erp_done_by,'') AS erp_by,
+                   erp_snap_qty, COALESCE(erp_snap_date,'') AS erp_snap_date FROM inter_factory_transfers"""
     _d1, _d2, _lbl = report_period("tf")
     _psql, _pp = period_sql("transfer_date", _d1, _d2)
     if not FAC or "CONSOLIDATED" in FAC:
         tf = qdf(cols_sql + " WHERE 1=1" + _psql + " ORDER BY id DESC", tuple(_pp) or None)
     else:
         tf = qdf(cols_sql + " WHERE (source_factory=%s OR dest_factory=%s)" + _psql + " ORDER BY id DESC", (FAC, FAC) + tuple(_pp))
+    if not tf.empty:                       # ERP status column (🔴 Pending / ✅ Done / ⚠ changed after Done) + days pending
+        _pp = _erp_prepare(tf.rename(columns={"erp_date": "erp_done_date", "erp_by": "erp_done_by"}))
+        tf["erp_status"] = _erp_status_text(_pp)
+        tf["pending_days"] = _pp["pending_days"]
+    tf = tf.drop(columns=["erp_snap_qty", "erp_snap_date"])
     term = st.text_input("🔍 Search (ref / item / code / factory / date)", key="tf_search")
     view = tf
     if term and not tf.empty:
         view = tf[tf.astype(str).apply(lambda c: c.str.contains(term, case=False, regex=False)).any(axis=1)]
-    st.dataframe(view, hide_index=True, use_container_width=True, height=380)
-    export_buttons(view, "transfer_history")
+    st.dataframe(_erp_style_status(view, "erp_status") if (not view.empty and "erp_status" in view.columns) else view,
+                 hide_index=True, use_container_width=True, height=380)
+    export_buttons(view.assign(erp_status=view["erp_status"].astype(str).str.replace(r"^[^A-Za-z]+", "", regex=True))
+                   if "erp_status" in view.columns else view, "transfer_history")
+    _erp_tracker()
     with st.expander("🔐 Manager: Delete / Edit transfer"):
         if view.empty:
             st.caption("Transfer nei.")
@@ -7263,8 +7678,6 @@ def _tf_history_view():
             ref = st.selectbox("Transfer", view["transfer_ref"].tolist(), key="tf_sel")
             t = q_c("SELECT * FROM inter_factory_transfers WHERE transfer_ref=%s", (ref,))[0]
             pw = mgr_check("tf_pw")
-            if t.get("erp_status") == "Done":
-                st.warning(f"⚠ Ei transfer ERP-te entry hoyeche (ERP ref: {t.get('erp_ref') or '-'}). Delete / edit korle ERP-te-o thik korte hobe - 'ERP Entry Tracking'-e ⚠ Changed dekhabe.")
             src, dest = transfer_items(t)
             reverse = bool(src and dest)
             if not reverse:
@@ -7292,16 +7705,6 @@ def _tf_history_view():
                     st.error("Date DD-Mon-YYYY format-e hote hobe.")
                 elif edit_transfer(t, nq, nd, t["transfer_time"], nn):
                     done("Transfer updated.")
-
-
-def tab_transfer_history():
-    if lazy_tab_select(["📜 Transfer History", "🔌 ERP Entry Tracking"], "lz_tf") == 1:
-        try:
-            tf_erp_view()
-        except Exception as e:
-            st.error(f"ERP Entry Tracking load kora jayni: {e}")
-        return
-    _tf_history_view()
 
 
 # ============================================================
@@ -9090,7 +9493,7 @@ def _tab_repair_body():
 #  TAB 8 - LEDGER
 # ============================================================
 def tab_ledger():
-    _d1, _d2, _lbl = report_period("led")
+    _d1, _d2, _lbl = report_period("led", default="এই মাস")      # opens on this month; pick "সব সময়" for the whole history
     _psql, _pp = period_sql("t.date", _d1, _d2)
     led = qdf_c(f"""SELECT t.id, t.factory_name, t.officer_name, t.sl_no, COALESCE(i.serial_no,'') AS serial_no, t.prod_id,
                   t.item_name, t.qty, t.trans_type, t.notes, COALESCE(t.supplier_name,'') AS supplier_name,
@@ -9151,7 +9554,10 @@ def compute_forecast(mi):
     use_mtd = l3_start >= cur_start        # no finished live month yet (first month): use running month so far
     l3_days = max(now.day, 1) if use_mtd else max((cur_start - l3_start).days, 1)
     cur_c, l3_c = {}, {}
-    for t in q_c(f"SELECT factory_name, sl_no, qty, date FROM transactions WHERE trans_type IN ('Issued','Internal Issue'){FSQL}", FP):
+    _yrs = "(" + "|".join(str(y) for y in range(l3_start.year, cy + 1)) + ")"        # dates are text: only rows that mention a needed year
+    for t in q_c(f"""SELECT factory_name, sl_no, SUM(COALESCE(qty,0)) AS qty, date FROM transactions
+                     WHERE trans_type IN ('Issued','Internal Issue'){FSQL} AND date ~ %s
+                     GROUP BY factory_name, sl_no, date""", list(FP) + [_yrs]):
         dt = parse_date(t["date"])
         if not dt:
             continue
@@ -11777,8 +12183,12 @@ def render_dashboard_addons():
 # ------------------------------------------------------------------
 #  4. Similar-name warning (Add New Item)
 # ------------------------------------------------------------------
-@st.cache_data(ttl=45, show_spinner=False)
 def _item_name_index(fac):
+    return _item_name_index_c(fac, _data_version())      # refreshed when something is saved, not every 45 seconds
+
+
+@st.cache_data(ttl=900, show_spinner=False, max_entries=8)
+def _item_name_index_c(fac, ver):
     rows = q("SELECT sl_no, prod_id, item_name, COALESCE(size,'') AS size, COALESCE(current_stock,0) AS stock "
              "FROM inventory WHERE factory_name=%s", (fac,))
     for r in rows:
@@ -14533,24 +14943,29 @@ def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_
         line_notes.append(nt)
     po_flag, po_date = ("Pending", date_s) if po_pending else ("", None)
     _mc_max = int(run("SELECT COALESCE(MAX(id),0) FROM transactions")[0][0]) if machine else 0   # machine tag: only when a machine was picked
-    run("""UPDATE inventory SET current_stock = current_stock - v.q
+    _sql_stock = """UPDATE inventory SET current_stock = current_stock - v.q
            FROM (SELECT unnest(%s::int[]) AS sl, unnest(%s::float8[]) AS q) v
-           WHERE inventory.factory_name=%s AND inventory.sl_no=v.sl""", (sls, qtys, fac))
+           WHERE inventory.factory_name=%s AND inventory.sl_no=v.sl"""
     new_price = [(sl, rates[sl]) for sl in sls if price0.get(sl, 0) <= 0 and rates.get(sl, 0) > 0]
-    if new_price:   # item had no rate: the rate given now becomes the item's rate (reports / budget pick it up)
+    if new_price:
+        run(_sql_stock, (sls, qtys, fac))   # item had no rate: the rate given now becomes the item's rate (reports / budget pick it up)
         run("""UPDATE inventory SET unit_price = v.p
                FROM (SELECT unnest(%s::int[]) AS sl, unnest(%s::float8[]) AS p) v
                WHERE inventory.factory_name=%s AND inventory.sl_no=v.sl""", ([a for a, _ in new_price], [b for _, b in new_price], fac))
         for sl_, p_ in new_price:
             audit("SET_PRICE", f"{fac}: {info[sl_][1]} unit price 0 -> {p_:g} (Requisition Issue SR {sr_no})")
-    run("""INSERT INTO transactions (factory_name, officer_name, sl_no, prod_id, item_name, qty, trans_type, day, notes, date, time,
+    _sql_ins = """INSERT INTO transactions (factory_name, officer_name, sl_no, prod_id, item_name, qty, trans_type, day, notes, date, time,
                   verification_status, erp_grn_status, supplier_name, challan_no, po_pending_flag, po_pending_date,
                   unit_price_at_tx, req_no, section)
            SELECT %s, %s, v.sl, v.pid, v.nm, v.q, %s, %s, v.nt, %s, %s, v.vs, 'Not Required', '', '', %s, %s::text, NULL::float8, %s, %s
            FROM (SELECT unnest(%s::int[]) AS sl, unnest(%s::text[]) AS pid, unnest(%s::text[]) AS nm,
-                        unnest(%s::float8[]) AS q, unnest(%s::text[]) AS vs, unnest(%s::text[]) AS nt) v""",
-        (fac, user, ttype, tx_dt.day, date_s, time_s, po_flag, po_date, sr_no, section or "",
-         sls, [info[sl][0] for sl in sls], [info[sl][1] for sl in sls], qtys, vstat, line_notes))
+                        unnest(%s::float8[]) AS q, unnest(%s::text[]) AS vs, unnest(%s::text[]) AS nt) v"""
+    _par_ins = (fac, user, ttype, tx_dt.day, date_s, time_s, po_flag, po_date, sr_no, section or "",
+                sls, [info[sl][0] for sl in sls], [info[sl][1] for sl in sls], qtys, vstat, line_notes)
+    if new_price:
+        run(_sql_ins, _par_ins)
+    else:       # normal case: stock update + slip lines go to the database in ONE round trip (same two statements, same order)
+        run(_sql_stock + ";\n" + _sql_ins, (sls, qtys, fac) + _par_ins)
     if machine:
         _pairs = (list(machine.items()) if isinstance(machine, dict)
                   else ([(x, machine[0]) for x in (machine[1] or [])] if machine[0] else []))
@@ -14566,12 +14981,18 @@ def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_
                + f" [stock before {info[sl][2]:g}" + (f", auto-transfer {plan[sl][0]:g} from {plan[sl][1]['factory_name']} (officer confirmed)" if sl in plan else ", no transfer") + "]"
                for sl, q_ in zip(sls, qtys)]
     st.session_state["_ri_xfer_note"] = "; ".join(f"{info[sl][1]}: {plan[sl][0]:g} pcs {plan[sl][1]['factory_name']} theke" for sl in sls if sl in plan)
-    run("""INSERT INTO audit_logs (timestamp, username, action_type, details)
-           SELECT %s, %s, 'TRANSACTION', d FROM unnest(%s::text[]) AS d""",
-        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user or "SYSTEM", details))
+    # the audit lines + section remember + slip audit: three small inserts sent together (one round trip, same order)
+    _now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _sqls = ["""INSERT INTO audit_logs (timestamp, username, action_type, details)
+           SELECT %s, %s, 'TRANSACTION', d FROM unnest(%s::text[]) AS d"""]
+    _pars = [_now_s, user or "SYSTEM", details]
     if section:
-        run("INSERT INTO ri_sections (factory_name, section_name) VALUES (%s,%s) ON CONFLICT DO NOTHING", (fac, section))
-    audit("REQUISITION_ISSUE", f"{fac}: SR {sr_no} - {len(sls)} item line(s) issued in one go" + (f" · Section {section}" if section else ""))
+        _sqls.append("INSERT INTO ri_sections (factory_name, section_name) VALUES (%s,%s) ON CONFLICT DO NOTHING")
+        _pars += [fac, section]
+    _sqls.append("INSERT INTO audit_logs (timestamp, username, action_type, details) VALUES (%s,%s,%s,%s)")
+    _pars += [_now_s, st.session_state.get("user") or "SYSTEM", "REQUISITION_ISSUE",
+              f"{fac}: SR {sr_no} - {len(sls)} item line(s) issued in one go" + (f" · Section {section}" if section else "")]
+    run(";\n".join(_sqls), tuple(_pars))
     return len(sls)
 
 
@@ -16270,7 +16691,7 @@ def _ri_tools_tabs(mode, is_mgr):
     npend = 0
     if is_mgr:
         try:
-            _r = q("SELECT COUNT(*) AS n FROM ri_correction_requests WHERE factory_name=%s AND status='Pending'", (FAC,))
+            _r = q_c("SELECT COUNT(*) AS n FROM ri_correction_requests WHERE factory_name=%s AND status='Pending'", (FAC,))
             npend = int(_r[0]["n"]) if _r else 0
         except Exception:
             npend = 0
@@ -16607,7 +17028,7 @@ def ensure_ri_regular_table():
 def ri_reg_list(fac):
     """Regular / common items (with live stock) for the Quick Issue tab: the unit's own list PLUS the items that are on the
     OTHER unit's regular list and also exist in this unit (matched by ERP code, else same name + size). own=False -> mirrored."""
-    return q("""WITH oth AS (
+    return q_c("""WITH oth AS (
                     SELECT LOWER(TRIM(COALESCE(o.prod_id,''))) AS code, LOWER(TRIM(COALESCE(o.item_name,''))) AS nm,
                            LOWER(TRIM(COALESCE(o.size,''))) AS sz
                     FROM ri_regular_items r2 JOIN inventory o ON o.factory_name=r2.factory_name AND o.sl_no=r2.sl_no
@@ -17038,7 +17459,7 @@ def _ri_quick_form():
         _tx_date_banner(tx_date, date_ok, "Issue", wkey="qi_dt")
         confirm_existing = True
         if sr_no:
-            used = q("SELECT COUNT(*) AS n FROM transactions WHERE factory_name=%s AND req_no=%s", (fac, sr_no))
+            used = q_c("SELECT COUNT(*) AS n FROM transactions WHERE factory_name=%s AND req_no=%s", (fac, sr_no))
             n_used = int(used[0]["n"]) if used else 0
             if n_used:
                 st.warning(f"⚠️ SR {sr_no} এই Unit-এ আগেই ব্যবহার হয়েছে ({n_used}টি লাইন)। একই স্লিপে আরও আইটেম যোগ করছেন তো?")
@@ -17439,8 +17860,8 @@ def _ri_form():
                 except Exception:
                     need, days = False, 0
                 try:
-                    _ur = q("SELECT COALESCE(NULLIF(TRIM(unit_name),''),'Pcs') AS u FROM inventory WHERE factory_name=%s AND sl_no=%s",
-                            (fac, int(r["sl_no"])))
+                    _ur = q_c("SELECT COALESCE(NULLIF(TRIM(unit_name),''),'Pcs') AS u FROM inventory WHERE factory_name=%s AND sl_no=%s",
+                              (fac, int(r["sl_no"])))
                     unit_v = _ur[0]["u"] if _ur else "Pcs"
                 except Exception:
                     unit_v = "Pcs"
