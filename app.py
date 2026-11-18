@@ -7447,8 +7447,89 @@ def _erp_status_text(prep):
     return txt
 
 
+_ERP_COL = {"red": "#DC2626", "amber": "#D97706", "green": "#16A34A"}
+
+
+def _erp_card_html(head_l, head_r, body, kind="red"):
+    """One card (works in light and dark mode: only translucent greys + one accent colour)."""
+    col = _ERP_COL.get(kind, "#DC2626")
+    return (f'<div style="border:1px solid rgba(128,128,128,.28);border-left:6px solid {col};border-radius:12px;'
+            f'padding:10px 14px;margin:0 0 6px 0;background:rgba(128,128,128,.07)">'
+            f'<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:.8rem;opacity:.9">'
+            f'<span>{head_l}</span><span style="font-weight:700;color:{col}">{head_r}</span></div>{body}</div>')
+
+
+def _erp_body(item, sub, chips):
+    """Item name, one small line, and a row of number chips [(label, value, accent_or_None)]."""
+    cs = "".join(
+        f'<span style="display:inline-block;margin:6px 14px 0 0"><span style="opacity:.65;font-size:.75rem">{html_lib.escape(str(lb))}</span><br>'
+        f'<span style="font-weight:800;font-size:1.08rem;{("color:" + ac + ";") if ac else ""}">{html_lib.escape(str(vl))}</span></span>'
+        for lb, vl, ac in chips)
+    return (f'<div style="font-weight:700;font-size:1.02rem;margin-top:4px">{html_lib.escape(str(item))}</div>'
+            f'<div style="opacity:.78;font-size:.84rem">{sub}</div><div>{cs}</div>')
+
+
+def _erp_num(x):
+    try:
+        return f"{float(x):,.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return str(x)
+
+
+def _erp_tick_cb(tk_key, cb_key, i):
+    s = st.session_state.setdefault(tk_key, set())
+    (s.add if st.session_state.get(cb_key) else s.discard)(i)
+
+
+def _erp_all_cb(tk_key, prefix, gen, ids, on):
+    st.session_state[tk_key] = set(ids) if on else set()
+    for i in ids:                                   # cards that are already on screen follow the button
+        k = f"erp_ck_{prefix}_{gen}_{i}"
+        if k in st.session_state:
+            st.session_state[k] = bool(on)
+
+
+def _erp_lref_cb(map_key, k, i):
+    st.session_state.setdefault(map_key, {})[i] = st.session_state.get(k, "")
+
+
+def _erp_card_list(prefix, gen, rows, card_fn, per=20, ticks=True, line_ref=False):
+    """Shows rows as cards (newest page first), optional tick box on each card. Returns the ticked ids (all pages)."""
+    ids = [r["id"] for r in rows]
+    tk_key = f"erp_ticked_{prefix}_{gen}"
+    ticked = st.session_state.setdefault(tk_key, set())
+    pages = max(1, (len(rows) + per - 1) // per)
+    page = 1
+    if ticks or pages > 1:
+        b1, b2, b3 = st.columns([1.1, 1.1, 1.6])
+        if ticks:
+            b1.button("☑ Shob tick", key=f"erp_all_{prefix}_{gen}", on_click=_erp_all_cb, args=(tk_key, prefix, gen, ids, True))
+            b2.button("☐ Tick shoraan", key=f"erp_none_{prefix}_{gen}", on_click=_erp_all_cb, args=(tk_key, prefix, gen, ids, False))
+        if pages > 1:
+            page = int(b3.number_input(f"Page (1-{pages})", min_value=1, max_value=pages, value=1, step=1, key=f"erp_pg_{prefix}_{gen}"))
+    lmap_key = f"erp_lref_{prefix}_{gen}"
+    for r in rows[(page - 1) * per: page * per]:
+        if ticks:
+            cb, body = st.columns([0.09, 0.91])
+            k = f"erp_ck_{prefix}_{gen}_{r['id']}"
+            if k not in st.session_state:
+                st.session_state[k] = r["id"] in ticked
+            cb.checkbox("tick", key=k, label_visibility="collapsed", on_change=_erp_tick_cb, args=(tk_key, k, r["id"]))
+        else:
+            body = st.container()
+        body.markdown(card_fn(r), unsafe_allow_html=True)
+        if ticks and line_ref and r["id"] in ticked:
+            lk = f"erp_lr_{prefix}_{gen}_{r['id']}"
+            if lk not in st.session_state:
+                st.session_state[lk] = st.session_state.get(lmap_key, {}).get(r["id"], "")
+            body.text_input("ERP Ref / GRN (ei line-er jonno, optional)", key=lk, on_change=_erp_lref_cb, args=(lmap_key, lk, r["id"]))
+    if ticks:
+        st.caption(f"✔ {len(set(ids) & ticked)}-ta line tick kora ({len(ids)}-ta-r moddhe)")
+    return sorted(set(ids) & ticked)
+
+
 def _erp_tracker():
-    """Pending report, tick-to-Done, edited/deleted-after-ERP warnings and item-wise software-vs-ERP check."""
+    """Pending report, tick-to-Done, edited/deleted-after-ERP warnings and item-wise software-vs-ERP check - all as cards."""
     sc, sp = _erp_scope()
     allt = qdf_c(f"SELECT {_ERP_SEL} FROM inter_factory_transfers WHERE 1=1{sc} ORDER BY id DESC", tuple(sp) or None)
     dele = qdf_c(f"""SELECT id, transfer_ref, source_factory, dest_factory, prod_id, item_name, qty, transfer_date, erp_ref,
@@ -7464,8 +7545,10 @@ def _erp_tracker():
     n_alert = len(chg) + len(dele)
     tab_p, tab_c, tab_m = st.tabs([f"🔴 Pending Report ({len(pend)})", f"⚠ ERP-r por bodlano ({n_alert})", "⚖ Item-wise mil"])
     gen = st.session_state.setdefault("erp_gen", 0)
-    scope_key = abs(hash((FAC or "", tuple(prep["id"].tolist())))) % 10**8
-    tick_hint = "ERP-te entry shesh kora line-gulo tick diye 'ERP Done' korun."
+    tick_hint = "ERP-te entry shesh kora card-gulo tick diye 'ERP Done' korun."
+
+    def _bump():
+        st.session_state["erp_gen"] = gen + 1
 
     # ---------------- pending report + tick ----------------
     with tab_p:
@@ -7475,45 +7558,45 @@ def _erp_tracker():
             pend = pend.sort_values(["pending_days", "id"], ascending=[False, True], na_position="last")
             m1, m2, m3 = st.columns(3)
             m1.metric("ERP Pending line", len(pend))
-            m2.metric("Pending total qty", f"{pend['qty'].sum():,.2f}".rstrip("0").rstrip("."))
+            m2.metric("Pending total qty", _erp_num(pend["qty"].sum()))
             oldest = pend["pending_days"].dropna()
             m3.metric("Shobcheye purono (din)", int(oldest.max()) if len(oldest) else 0)
+            term = st.text_input("🔍 Pending-e khujun (ref / item / code / factory)", key=f"erp_q_{gen}").strip().lower()
+            shown = pend
+            if term:
+                hay = (pend["transfer_ref"] + " " + pend["item_name"].astype(str) + " " + pend["prod_id"].astype(str) + " "
+                       + pend["source_factory"] + " " + pend["dest_factory"]).str.lower()
+                shown = pend[hay.str.contains(term, regex=False)]
+            st.caption("Management view: ekhane shudhu ERP-te ekhono na dhoka transfer ache. " + tick_hint)
+
+            def pend_card(r):
+                d = r["pending_days"]
+                days = int(d) if pd.notna(d) else None
+                kind = "red" if (days is not None and days >= 7) else "amber"
+                head_r = f"🔴 {days} din pending" if days is not None else "🔴 ERP Pending"
+                sub = (f"{html_lib.escape(str(r['prod_id']))} · {html_lib.escape(str(r['source_factory']))} → "
+                       f"{html_lib.escape(str(r['dest_factory']))} · {html_lib.escape(str(r['initiated_by']))}")
+                return _erp_card_html(f"🔁 {html_lib.escape(str(r['transfer_ref']))} · {html_lib.escape(str(r['transfer_date']))}", head_r,
+                                      _erp_body(r["item_name"], sub, [("Qty", _erp_num(r["qty"]), None)]), kind)
+            sel = _erp_card_list("p", gen, shown.to_dict("records"), pend_card, line_ref=True)
+            ref_all = st.text_input("ERP Ref / GRN No. (tick kora shob card-er jonno; card-e alada dile seta beshi gonno hobe)",
+                                    key=f"erp_ref_all_{gen}")
+            if st.button("✅ ERP Done korun (tick kora card-gulo)", key=f"erp_do_{gen}", type="primary"):
+                lmap = st.session_state.get(f"erp_lref_p_{gen}", {})
+                if not sel:
+                    st.error("Kono card tick kora nei.")
+                else:
+                    refs = [str(lmap.get(i, "") or "").strip() or ref_all.strip() for i in sel]
+                    if any(not r_ for r_ in refs):
+                        st.error("ERP Ref / GRN No. din (niche-r ghor-e ba card-e alada).")
+                    else:
+                        n_ok = erp_mark_done([int(i) for i in sel], refs, only_pending=True)
+                        _bump()
+                        done(f"{n_ok}-ta transfer ERP Done hoyeche." + (f" ({len(sel) - n_ok}-ta age-i Done chilo.)" if n_ok < len(sel) else ""))
             rep_df = pd.DataFrame({
                 "Transfer Ref": pend["transfer_ref"], "Date": pend["transfer_date"], "Code": pend["prod_id"], "Item": pend["item_name"],
                 "Qty": pend["qty"], "From": pend["source_factory"], "To": pend["dest_factory"],
                 "Pending Din": pend["pending_days"].astype("Int64"), "Initiated By": pend["initiated_by"]})
-            st.caption("Ekhane shudhu ERP-te ekhono na dhoka transfer ache. " + tick_hint)
-            sel_all = st.checkbox("Shob line tick korun", key=f"erp_selall_{gen}")
-            ed_in = rep_df.copy()
-            ed_in.insert(0, "✔", bool(sel_all))
-            ed_in["ERP Ref/GRN (line-wise, optional)"] = ""
-            ed = st.data_editor(
-                ed_in, hide_index=True, use_container_width=True, height=min(90 + 35 * len(ed_in), 520),
-                key=f"erp_tick_{gen}_{scope_key}_{int(sel_all)}",
-                disabled=[c for c in ed_in.columns if c not in ("✔", "ERP Ref/GRN (line-wise, optional)")],
-                column_config={"✔": st.column_config.CheckboxColumn("✔ ERP Done", default=False),
-                               "Qty": st.column_config.NumberColumn(format="%.2f")})
-            ref_all = st.text_input("ERP Ref / GRN No. (tick kora shob line-er jonno; line-wise dile seta beshi gonno hobe)",
-                                    key=f"erp_ref_all_{gen}")
-            if st.button("✅ ERP Done korun (tick kora line-gulo)", key=f"erp_do_{gen}"):
-                ticked = [i for i, v in enumerate(ed["✔"].tolist()) if bool(v)]
-                if not ticked:
-                    st.error("Kono line tick kora nei.")
-                else:
-                    ids, refs, missing = [], [], 0
-                    for i in ticked:
-                        r_line = str(ed["ERP Ref/GRN (line-wise, optional)"].iloc[i] or "").strip()
-                        r_use = r_line or ref_all.strip()
-                        if not r_use:
-                            missing += 1
-                        ids.append(int(pend["id"].iloc[i]))
-                        refs.append(r_use)
-                    if missing:
-                        st.error("ERP Ref / GRN No. din (uporer ghor-e ba line-wise).")
-                    else:
-                        n_ok = erp_mark_done(ids, refs, only_pending=True)
-                        st.session_state["erp_gen"] = gen + 1
-                        done(f"{n_ok}-ta transfer ERP Done hoyeche." + (f" ({len(ids) - n_ok}-ta age-i Done chilo.)" if n_ok < len(ids) else ""))
             export_buttons(rep_df, "erp_pending_transfers", "ERP Pending Transfers")
         with st.expander("↩ Vul tick? ERP Done theke Pending-e ferot nin (Manager)"):
             dn = prep[prep["erp_status"] == "Done"]
@@ -7529,11 +7612,12 @@ def _erp_tracker():
                     elif not pw_u:
                         st.error("Manager password din.")
                     else:
-                        st.session_state["erp_gen"] = gen + 1
-                        done(f"{erp_undo([int(i) for i in pick])}-ta transfer ERP Pending-e ferot gelo.")
+                        n_u = erp_undo([int(i) for i in pick])
+                        _bump()
+                        done(f"{n_u}-ta transfer ERP Pending-e ferot gelo.")
         with st.expander("🔐 Manager: tracking chalu howar age-er purono transfer ek-sathe ERP Done"):
             st.caption("Ei feature-er age jeshob transfer-er ERP entry already hoye gechhe, segulo ek-bar-e 'ERP Done (Tracking-er age)' kora jay. "
-                       "Notun transfer-er jonno eta bebohar korben na - segulo line-by-line tick hobe.")
+                       "Notun transfer-er jonno eta bebohar korben na - segulo card dhore dhore tick hobe.")
             cutoff = st.date_input("Ei tarikh porjonto-er (shoho) shob pending transfer", value=date.today() - timedelta(days=1),
                                    key=f"erp_cut_{gen}")
             pw_c = mgr_check(f"erp_cut_pw_{gen}")
@@ -7544,8 +7628,9 @@ def _erp_tracker():
                 elif not conf_c:
                     st.error("Confirm tick din.")
                 else:
-                    st.session_state["erp_gen"] = gen + 1
-                    done(f"{erp_legacy_done(cutoff, sc, sp)}-ta purono transfer ERP Done (Tracking-er age) kora holo.")
+                    n_l = erp_legacy_done(cutoff, sc, sp)
+                    _bump()
+                    done(f"{n_l}-ta purono transfer ERP Done (Tracking-er age) kora holo.")
 
     # ---------------- edited / deleted after ERP ----------------
     with tab_c:
@@ -7554,41 +7639,44 @@ def _erp_tracker():
         if not chg.empty:
             st.warning("ERP Done howar por ei transfer-gulo bodlano hoyeche - ERP-r songe mil bhenge geche. "
                        "ERP-te thik kore tarpor 'Abar ERP Done' korun.")
-            ch_df = pd.DataFrame({
-                "Transfer Ref": chg["transfer_ref"], "Item": chg["item_name"], "From": chg["source_factory"], "To": chg["dest_factory"],
-                "Ekhon Qty": chg["qty"], "ERP-te dewa Qty": chg["snap_qty"], "Ekhon Date": chg["transfer_date"],
-                "ERP-r somoy Date": chg["erp_snap_date"], "ERP Ref": chg["erp_ref"], "ERP Done By": chg["erp_done_by"]})
-            ch_in = ch_df.copy()
-            ch_in.insert(0, "✔", False)
-            ch_ed = st.data_editor(ch_in, hide_index=True, use_container_width=True, height=min(90 + 35 * len(ch_in), 420),
-                                   key=f"erp_chg_{gen}_{scope_key}", disabled=[c for c in ch_in.columns if c != "✔"],
-                                   column_config={"✔": st.column_config.CheckboxColumn("✔ Abar Done", default=False)})
-            if st.button("✅ Abar ERP Done (ERP-te thik kora hoyeche)", key=f"erp_chg_btn_{gen}"):
-                tk = [i for i, v in enumerate(ch_ed["✔"].tolist()) if bool(v)]
-                if not tk:
-                    st.error("Kono line tick kora nei.")
+
+            def chg_card(r):
+                q_bad = abs(float(r["qty"]) - float(r["snap_qty"])) > 1e-9
+                d_bad = bool(r["erp_snap_date"]) and r["erp_snap_date"] != r["transfer_date"]
+                sub = (f"{html_lib.escape(str(r['prod_id']))} · {html_lib.escape(str(r['source_factory']))} → "
+                       f"{html_lib.escape(str(r['dest_factory']))} · ERP {html_lib.escape(str(r['erp_ref']))} "
+                       f"({html_lib.escape(str(r['erp_done_by']))}, {html_lib.escape(str(r['erp_done_date']))})")
+                chips = [("Ekhon Qty", _erp_num(r["qty"]), "#D97706" if q_bad else None),
+                         ("ERP-te dewa Qty", _erp_num(r["snap_qty"]), None),
+                         ("Ekhon Date", r["transfer_date"], "#D97706" if d_bad else None),
+                         ("ERP-r somoy Date", r["erp_snap_date"] or r["transfer_date"], None)]
+                return _erp_card_html(f"🔁 {html_lib.escape(str(r['transfer_ref']))}", "⚠ ERP-r por bodlano hoyeche, abar dekhun",
+                                      _erp_body(r["item_name"], sub, chips), "amber")
+            sel_c = _erp_card_list("c", gen, chg.to_dict("records"), chg_card)
+            if st.button("✅ Abar ERP Done (ERP-te thik kora hoyeche)", key=f"erp_chg_btn_{gen}", type="primary"):
+                if not sel_c:
+                    st.error("Kono card tick kora nei.")
                 else:
-                    n_ok = erp_mark_done([int(chg["id"].iloc[i]) for i in tk], [""] * len(tk), only_pending=False)
-                    st.session_state["erp_gen"] = gen + 1
+                    n_ok = erp_mark_done([int(i) for i in sel_c], [""] * len(sel_c), only_pending=False)
+                    _bump()
                     done(f"{n_ok}-ta transfer abar ERP Done hoyeche.")
         if not dele.empty:
             st.warning("ERP Done howar por ei transfer-gulo software theke delete hoyeche - ERP-te ei entry ekhono thakte pare, check korun.")
-            de_df = pd.DataFrame({
-                "Transfer Ref": dele["transfer_ref"], "Item": dele["item_name"], "Code": dele["prod_id"], "From": dele["source_factory"],
-                "To": dele["dest_factory"], "Qty": dele["qty"], "Date": dele["transfer_date"], "ERP Ref": dele["erp_ref"],
-                "Deleted By": dele["deleted_by"], "Deleted At": dele["deleted_at"]})
-            de_in = de_df.copy()
-            de_in.insert(0, "✔", False)
-            de_ed = st.data_editor(de_in, hide_index=True, use_container_width=True, height=min(90 + 35 * len(de_in), 380),
-                                   key=f"erp_del_{gen}_{scope_key}", disabled=[c for c in de_in.columns if c != "✔"],
-                                   column_config={"✔": st.column_config.CheckboxColumn("✔ Dekhechi", default=False)})
-            if st.button("👁 Dekhechi / ERP-te thik korechi", key=f"erp_del_btn_{gen}"):
-                tk = [i for i, v in enumerate(de_ed["✔"].tolist()) if bool(v)]
-                if not tk:
-                    st.error("Kono line tick kora nei.")
+
+            def del_card(r):
+                sub = (f"{html_lib.escape(str(r['prod_id'] or ''))} · {html_lib.escape(str(r['source_factory']))} → "
+                       f"{html_lib.escape(str(r['dest_factory']))} · ERP {html_lib.escape(str(r['erp_ref'] or ''))}")
+                chips = [("Qty (ERP-te ache)", _erp_num(r["qty"]), "#DC2626"), ("Transfer Date", r["transfer_date"] or "-", None),
+                         ("Deleted By", r["deleted_by"] or "-", None), ("Deleted At", r["deleted_at"] or "-", None)]
+                return _erp_card_html(f"🗑 {html_lib.escape(str(r['transfer_ref']))}", "ERP Done-er por delete hoyeche",
+                                      _erp_body(r["item_name"], sub, chips), "red")
+            sel_d = _erp_card_list("d", gen, dele.to_dict("records"), del_card)
+            if st.button("👁 Dekhechi / ERP-te thik korechi", key=f"erp_del_btn_{gen}", type="primary"):
+                if not sel_d:
+                    st.error("Kono card tick kora nei.")
                 else:
-                    n_ok = erp_ack_deleted([int(dele["id"].iloc[i]) for i in tk])
-                    st.session_state["erp_gen"] = gen + 1
+                    n_ok = erp_ack_deleted([int(i) for i in sel_d])
+                    _bump()
                     done(f"{n_ok}-ta note dekha hoyeche.")
 
     # ---------------- item-wise reconciliation ----------------
@@ -7619,21 +7707,30 @@ def _erp_tracker():
             return ", ".join(bits)
         g["karon"] = g.apply(why, axis=1) if len(g) else ""
         mis = g[g["baki"].abs() > 1e-9]
-        st.metric("Tafat ache emon item", len(mis))
-        only_mis = st.checkbox("Shudhu tafat thaka item dekhan", value=False, key=f"erp_onlymis_{gen}")
+        k1, k2 = st.columns(2)
+        k1.metric("Tafat ache emon item", len(mis))
+        only_mis = k2.checkbox("Shudhu tafat thaka item dekhan", value=False, key=f"erp_onlymis_{gen}")
         show = (mis if only_mis else g).sort_values("baki", key=lambda c: c.abs(), ascending=False)
-        out = pd.DataFrame({"From": show["source_factory"], "To": show["dest_factory"], "Code": show["prod_id"], "Item": show["item_name"],
-                            "Software-e transfer": show["sw"], "ERP-te entry": show["erp"], "Baki (tafat)": show["baki"],
-                            "Karon": show["karon"]})
-        if out.empty:
+        if show.empty:
             st.caption("Item nei.")
         else:
-            def red(row):
-                bad = abs(float(row["Baki (tafat)"])) > 1e-9
-                return ["background-color:#FEE2E2;color:#991B1B;font-weight:600" if bad else "" for _ in row]
-            st.dataframe(out.style.apply(red, axis=1).format({"Software-e transfer": "{:,.2f}", "ERP-te entry": "{:,.2f}",
-                                                              "Baki (tafat)": "{:,.2f}"}),
-                         hide_index=True, use_container_width=True, height=420)
+            show = show.reset_index(drop=True)
+            show["id"] = show.index
+
+            def mil_card(r):
+                bad = abs(float(r["baki"])) > 1e-9
+                sub = (f"{html_lib.escape(str(r['prod_id']))} · {html_lib.escape(str(r['source_factory']))} → "
+                       f"{html_lib.escape(str(r['dest_factory']))}")
+                chips = [("Software-e transfer", _erp_num(r["sw"]), None), ("ERP-te entry", _erp_num(r["erp"]), None),
+                         ("Baki (tafat)", _erp_num(r["baki"]), "#DC2626" if bad else "#16A34A")]
+                body = _erp_body(r["item_name"], sub, chips)
+                if r["karon"]:
+                    body += f'<div style="margin-top:6px;font-size:.82rem;color:{"#DC2626" if bad else "inherit"}">{html_lib.escape(r["karon"])}</div>'
+                return _erp_card_html("⚖ Item-wise mil", ("❗ Tafat ache" if bad else "✅ Mil ache"), body, "red" if bad else "green")
+            _erp_card_list("m", gen, show.to_dict("records"), mil_card, per=20, ticks=False)
+            out = pd.DataFrame({"From": show["source_factory"], "To": show["dest_factory"], "Code": show["prod_id"], "Item": show["item_name"],
+                                "Software-e transfer": show["sw"], "ERP-te entry": show["erp"], "Baki (tafat)": show["baki"],
+                                "Karon": show["karon"]})
             export_buttons(out, "erp_item_reconciliation", "ERP vs Software - Item-wise")
 
 
