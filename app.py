@@ -16086,7 +16086,8 @@ def _ri_challan_center(view_only=False):
         _ri_item_trail_ui(fac, _vp, key="cct_v")
         return
     t = lazy_tab_select(["➕ Baki item receive korun", "✏️ Received line thik korun", "🏷️ Item nam thik korun (shudhu nam)",
-                         "🔁 Vul item bodlan (onno item-e soran)", "📝 Challan header (No / Supplier / Date)", "🔎 Item details (stock trail)"], "lz_cc")
+                         "🔁 Vul item bodlan (onno item-e soran)", "📝 Challan header (No / Supplier / Date)",
+                         "🔀 Vul unit? (onno unit-e soran)", "🔎 Item details (stock trail)"], "lz_cc")
     on_challan = {int(r["sl_no"]) for r in lines}
 
     if t == 0:
@@ -16279,6 +16280,55 @@ def _ri_challan_center(view_only=False):
         if len(dates) > 1:
             st.caption("📅 Ei challan-er line-gulor tarikh alada (" + ", ".join(str(d) for d in dates) + "). Header save korle sob line-er tarikh ekoi hoye jabe.")
         _tx_header_edit("rec", fac, [ln["id"] for ln in lines], ch, sup, lines[0]["date"], "cch_" + re.sub(r"\W+", "_", f"{ch}|{sup}"), need_pw=False)
+
+    elif t == 5:
+        # ---- wrong unit at entry: move the WHOLE challan to the other unit (same stock-safe rr_move_challan the old panel used) ----
+        _dest = other_factory(fac)
+        st.markdown(f"**🔀 Ei challan vul unit-e receive hoyechilo?** Pura challan **{fac}** theke **{_dest}**-e soriye din.")
+        st.caption(f"{fac}-er stock theke kombe, {_dest}-er stock-e jog hobe; receipt line, requisition Received qty ar audit sob sathe sathe thik hobe. "
+                   f"Shorto: (1) {_dest}-er inventory-te hubohu ei item thakte hobe (ERP code ba nam + size mile), "
+                   f"(2) {fac}-e ei mal-er stock challan qty-r kom hole cholbe na (mane mal ager-i issue hoye gele).")
+        _plan, _blocked = [], False
+        for _ln in lines:
+            _inv = q(f"SELECT {INV_COLS} FROM inventory WHERE sl_no=%s AND factory_name=%s", (int(_ln["sl_no"]), fac))
+            _stk = float(_inv[0]["stock"] or 0) if _inv else 0.0
+            _qty = float(_ln["qty"] or 0)
+            _m = find_same_in_other(_inv[0]["prod_id"], _inv[0]["item_name"], _dest, _inv[0]["size"]) if _inv else None
+            if not _inv:
+                _why = f"⛔ {fac}-e item paoa jayni"
+            elif _stk < _qty - 1e-9:
+                _why = f"⛔ {fac}-e stock {_stk:g}, challan qty {_qty:g} - mal ager-i issue hoyeche"
+            elif not _m or _m.get("level") not in ("exact", "code"):
+                _why = f"⛔ {_dest}-e hubohu ei item nei - age oi unit-e item add korun"
+            else:
+                _why = "✅ Soranu jabe"
+            _blocked = _blocked or _why.startswith("⛔")
+            _plan.append({"Item": _ln["item_name"], "ERP Code": _ln["prod_id"], "Challan Qty": _qty, f"{fac} stock": _stk,
+                          f"{_dest}-e item": ("ache" if (_m and _m.get("level") in ("exact", "code")) else "nei"), "Status": _why})
+        st.dataframe(pd.DataFrame(_plan), hide_index=True, use_container_width=True, height=min(80 + 36 * len(_plan), 300))
+        if any("mal ager-i issue" in r["Status"] for r in _plan):
+            st.warning(f"Ei challan-er mal {fac}-e ager-i issue hoye gechhe, tai ekhon soranu jabe na. Age 'Item details (stock trail)' tab-e dekhun kon SR-e issue hoyeche, "
+                       f"tarpor oi issue {fac}-er SR Center theke ferot (Delete & revert stock) niye ashun, challan {_dest}-e soriye din, "
+                       f"ar {_dest}-e (ba jar kaje legechhe seta-e) abar issue korun.")
+        if len(dates) > 1:
+            st.warning("Ei challan-er line-gulor tarikh alada (" + ", ".join(str(d) for d in dates) + "). Age '📝 Challan header' tab-e tarikh ek kore nin, tarpor ekhane soran.")
+            return
+        _mreason = st.text_input("Karon likhun (jemon: vul unit select hoyechilo) *", key=f"ccmove_reason_{gen}").strip()
+        _mconf = confirm_box(f"ccmove_conf_{gen}", f"⚠️ Ami confirm korchi - ei challan {fac} theke bad hoye {_dest}-e jabe, stock-shoho.")
+        if st.button(f"🔀 {_dest}-e soriye din", type="primary", key=f"ccmove_btn_{gen}", disabled=not can_write):
+            if len(_mreason) < 5:
+                st.error("Karon likhun (kom-pokkhe 5 akkhor).")
+            elif not _mgr_only_ok():
+                st.error("Eta shudhu Store Manager korte pare.")
+            elif not _mconf:
+                st.error("Confirm tick din.")
+            elif guard():
+                _n = rr_move_challan(fac, ch, sup, lines[0]["date"], _dest, _mreason)
+                if _n:
+                    who = st.session_state.get("user", "")
+                    st.session_state["ri_saved"] = {"user": who, "sr": label, "kind": "fix", "time": local_now().strftime("%d-%b-%Y %I:%M %p"),
+                                                    "detail": f"{_n} item {fac} theke {_dest}-e soranu hoyeche"}
+                    done(f"✅ {who}, {label} ekhon {_dest}-er under-e ({_n} item). {fac}-er stock theke komeche, {_dest}-er stock-e joma hoyeche.")
 
     else:
         pairs, seen = [], set()
