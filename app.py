@@ -2521,6 +2521,147 @@ def _name_match_score(a, b):
                difflib.SequenceMatcher(None, "".join(sorted(ta)), "".join(sorted(tb))).ratio())
 
 
+# ---- Printing items (forms / registers / books): each belongs to ONE unit only, so they are NEVER moved between the two factories
+# ---- (no auto-transfer, no manual transfer, no transfer suggestion). Names are compared ignoring case, spaces and punctuation.
+NO_TRANSFER_ITEMS = """
+Worker Over Time Sheet
+Worker Service Book
+Machine Utilization Sheet
+Machine Card
+Order closing report
+Moisture Check Register-1
+Log Book Vehicle
+Replace Cutting and Re-Inspection Record
+Iou Payment Slip
+Environmental Law
+Requisition From- 200 Page
+Note Book
+Pantone Book TCX
+Binding Register Book
+Facility Perimeter and Outside Lights Inspection Check List
+Quality Audit Report
+Short Leave from
+Store Requisition Mamo
+Age and abilty Book
+Blanket Report RnD
+Lunch Bill / Tiffin Bill
+Medical prescription pad
+Dry Room Register Book
+Cash Book
+Label and Packing Audit Report-2
+Safety Register
+Ledger Book
+Daily Production Report DR.
+Delivery Challan
+Debit Vouchere
+Chemical Requisition Sleep R And D
+DRY PROCESS HOURLY QUALITY CHECK REPORT
+FIRST OUT PUT QUALITY CHECK REPORT
+Sketch Book
+Hourly Key Point Measurement Record [Sewing]
+Risk analysis report
+Store ledger 300 page
+Hourly Final QC Report
+Hourly Production Report DR.
+Bulk Work Order Yellow Reports Batch Card
+Chemical Conjumtion Sheet
+Worker Hand Book and Leave Book
+Chemical Requisition Sleep [Red]
+Daily Fusing Bonding Strength Test Record
+Register Book 30 No
+Credit Voucher
+Delivery Challan and Gate Pass Book
+Safety Register Book
+Shade Band Report Card
+Register Book 10 No
+Hourly Audit Report
+Measurement Check Report
+Sample Card
+Store Ledger 600 page
+Hydro Machin Utilization Sheet
+Bulk Work Order Pink Reports Batch Card
+Night Bill
+Attendance Register Book
+Conveyance Bill
+Pilot Run 1ST Lot Reports
+Work Instruction for Packing Man
+Lock Ledger, 400 Page
+Wash Lot Making Token Book, Three Page Auto Carbon
+SHADE BAND LOT QUALITY CHECK REPORT
+Binding Register Book
+INITIAL QUALITY CHECK REPORT
+DAILY QC PASS AND BUNDLE REPORT
+Sample Quality Report
+Gate Pass Book
+Masurment Check Report
+Chemical Internal Req
+Daily Final Quality Report
+Labor Register
+SIZE SET QUALITY CHECK REPORT
+MEASUREMENT CHECK REPORT [PANT]
+Style Comments and Input Meeting Record
+TRAVELLING and CONVEYANCE BILL.
+Wash Recipy Formula
+Garments Critical Measurement Graph.
+Sample Reciepy Book
+Bulk Work Order Green Reports Batch Card
+Register Book-24
+Cash Book
+DAILY LINE FEEDING
+Final QC Pass Report
+Sample card Celio
+Bangladesh Labour Law 2006
+Register Book 30-No
+Daily Production Report [Laser Section]
+Before Wash Report
+Hourly Production Report [Laser Section]
+Sick Leave Register
+AFTER WASH CHECK REPORT [10 Pcs]
+Fusing Parts Inspection Record
+Register Book 20 No
+Art Board Paper Book A3,300 GSM Colorless Paper
+Dryer Machin Utilization Sheet
+Quality Report Statement
+Label and Packing Audit Report-1
+Ledger Book 200page
+Store Ledger Book, 300page
+Store Ledger Book, 600page
+Personal File
+Swatch Card Single
+Swatch Card Double
+Shade Band Report
+Bin Card Book
+DAILY/ HOURLY QUALITY INSPECTION REPORT
+Building Security Inspection Check List
+Patrol Duty Inspection Check List
+DAILY BEFORE WASH REPORT [BULK]
+Service Information Book
+Critical Process Follow-up
+NEEDLE PAPER
+Befour Wash Insfection Report
+K.C Washing Pad
+Chemical Requisition Sleep
+Attendance Card
+Out Gate Pass
+Register Book 32 No
+Chemical Requisition Sleep Re-Wash
+DAILY BEFORE WASH REPORT [SAMPLE]
+"""
+NO_TRANSFER_KEYS = {re.sub(r"[^a-z0-9]", "", ln.lower()) for ln in NO_TRANSFER_ITEMS.splitlines() if ln.strip()}
+
+
+def is_no_transfer(name):
+    """True for printing items that must never move between the two units."""
+    return re.sub(r"[^a-z0-9]", "", str(name or "").lower()) in NO_TRANSFER_KEYS
+
+
+def find_transferable_in_other(prod_id, name, other_fac, size, need=None):
+    """find_same_in_other() for TRANSFER decisions: a printing item is never offered from the other unit (returns None)."""
+    if is_no_transfer(name):
+        return None
+    return find_same_in_other(prod_id, name, other_fac, size, need=need)
+
+
 def find_same_in_other(prod_id, name, other_fac, size, need=None):
     """Same product in the other factory. Order: exact NAME + SIZE -> same ERP code (any size) -> similar name (>= 80%, same size)
     -> exact name when one side has no size / the size only repeats the item name (only if it is unambiguous).
@@ -3815,7 +3956,7 @@ def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, sup
 
     if ttype in ISSUE_TYPES and qty > stock:
         shortage = qty - stock
-        other = find_same_in_other(pid, name, other_factory(fac), item["size"], need=shortage)
+        other = find_transferable_in_other(pid, name, other_factory(fac), item["size"], need=shortage)
         if not other or float(other["stock"] or 0) < shortage or not xfer_ok:
             st.error("Transfer possible nay / confirm kora hoy nai.")
             return False
@@ -4325,7 +4466,7 @@ def tab_transactions():
                         blocked = True
                     if qty > float(item["stock"]) and ttype in ISSUE_TYPES:
                         shortage = qty - float(item["stock"])
-                        other = find_same_in_other(item["prod_id"], item["item_name"], other_factory(fac), item["size"], need=shortage)
+                        other = find_transferable_in_other(item["prod_id"], item["item_name"], other_factory(fac), item["size"], need=shortage)
                         if other and float(other["stock"] or 0) >= shortage:
                             need_xfer = True
                             st.warning(f"⚠️ Stock short {shortage:g}. {other['factory_name']} theke auto-transfer hobe "
@@ -11624,6 +11765,8 @@ def compute_transfer_suggestions(df, low_days=15, src_keep_days=45, dst_target_d
     out = []
     for r in a.merge(b, on="ident", suffixes=("_a", "_b")).to_dict("records"):
         sides = [{k: r[f"{k}_{s}"] for k in fields} for s in ("a", "b")]
+        if is_no_transfer(sides[0]["item_name"]) or is_no_transfer(sides[1]["item_name"]):
+            continue                                    # printing items belong to one unit only
         if str(sides[0]["unit"]).strip().lower() != str(sides[1]["unit"]).strip().lower():
             continue
         best = None
@@ -11708,6 +11851,9 @@ def render_dash_transfer_hint(stamp):
 def do_manual_transfer(sug, qty, date_s, note, leave_note):
     """Moves stock between the two units exactly like the existing auto-transfer (same table, same note format, so
     Transfer History can edit / reverse it). Stock is re-read and locked here; ERP balances are not touched."""
+    if is_no_transfer(sug.get("item_name")) or is_no_transfer(sug.get("src_item_name")):
+        st.error("🚫 Ei item printing item - nirdisto unit-er jonno, onno unit-e transfer kora jay na.")
+        return False
     src = run("SELECT COALESCE(current_stock,0) FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE",
               (sug["src_sl"], sug["src_factory"]))
     dst = run("SELECT COALESCE(current_stock,0) FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE",
@@ -14993,7 +15139,7 @@ def save_requisition_issue(fac, lines, tx_dt, sr_no, ttype, notes, verified, po_
         if q_ <= stk_ + 1e-9:
             continue
         shortage = q_ - stk_
-        other = find_same_in_other(pid_, nm_, other_factory(fac), size_, need=shortage)
+        other = find_transferable_in_other(pid_, nm_, other_factory(fac), size_, need=shortage)
         if other and xfer.get(sl) and abs(xconf.get(sl, 0.0) - shortage) > 1e-6:
             bad_short.append(f"{pid_} (stock {stk_:g}, issue {q_:g}: transfer {xconf.get(sl, 0.0):g} confirm kora hoyechilo kintu ekhon {shortage:g} lagche — abar tick din)")
             continue
@@ -15596,7 +15742,7 @@ def _ri_pending_rows(fac, sr=None):
         r["other"], r["xok"] = None, False
         if r["left"] > 0 and r["stock"] < r["left"] - 1e-9:        # short here: maybe the other unit has the rest
             try:
-                r["other"] = find_same_in_other(r["prod_id"], r["item_name"], other_factory(fac), r["size"] or "", need=r["left"] - r["stock"])
+                r["other"] = find_transferable_in_other(r["prod_id"], r["item_name"], other_factory(fac), r["size"] or "", need=r["left"] - r["stock"])
                 r["xok"] = bool(r["other"]) and float(r["other"]["stock"] or 0) >= r["left"] - r["stock"] - 1e-9
             except Exception:
                 r["other"], r["xok"] = None, False
@@ -15859,7 +16005,7 @@ def _ri_sr_center():
             other, xok = None, False
             if short > 1e-9:
                 try:
-                    other = find_same_in_other(it["prod_id"], it["item_name"], other_factory(fac), it["size"] or "", need=short)
+                    other = find_transferable_in_other(it["prod_id"], it["item_name"], other_factory(fac), it["size"] or "", need=short)
                     xok = bool(other) and float(other["stock"] or 0) >= short - 1e-9
                 except Exception:
                     other, xok = None, False
@@ -17269,34 +17415,49 @@ def _ri_quick_manage(fac, reg, can_write):
 
 
 def _qi_confirm_body(p):
-    """Summary of what is about to be issued - the officer checks it once more and presses OK (or Cancel)."""
+    """Summary of what is about to be issued (and what goes to Pending Issue) - the officer checks it once more and presses OK (or Cancel)."""
     rows = p["rows"]
+    prows = p.get("prows") or []
     tot = sum(r["qty"] for r in rows)
     units = {str(r["uom"]) for r in rows}
     unit_txt = (" " + next(iter(units))) if len(units) == 1 else ""
-    st.markdown(f"#### 📋 {len(rows)} ti item · mot **{tot:g}{unit_txt}** issue hocche")
+    if rows:
+        st.markdown(f"#### 📋 {len(rows)} ti item · mot **{tot:g}{unit_txt}** issue hocche")
     st.caption(f"SR {p['sr_no']} · 📅 {p['tx_date']:%d-%b-%Y} · 🏭 {p['fac']}" + (f" · 🏷 {p['section']}" if p["section"] else ""))
-    st.dataframe(pd.DataFrame([{"Serial": (r.get("ser") or "-"), "Item": r["item"], "Size": r["size"], "Qty": r["qty"], "UOM": r["uom"],
-                                "Rate": (f"৳{r['rate']:g}" + (" (notun)" if r.get("rnew") else "")), "M/C": r.get("mc") or "", "Transfer": r["xfer"]}
-                               for i, r in enumerate(rows)]),
-                 hide_index=True, use_container_width=True, height=min(80 + 36 * len(rows), 420))
-    st.caption("Serial = apni je kromei qty diyechen. Kagoj-er sathe line-by-line milan - thik thakle OK chapun, vul thakle Cancel kore thik korun.")
+    if rows:
+        st.dataframe(pd.DataFrame([{"Serial": (r.get("ser") or "-"), "Item": r["item"], "Size": r["size"], "Qty": r["qty"], "UOM": r["uom"],
+                                    "Rate": (f"৳{r['rate']:g}" + (" (notun)" if r.get("rnew") else "")), "M/C": r.get("mc") or "", "Transfer": r["xfer"]}
+                                   for i, r in enumerate(rows)]),
+                     hide_index=True, use_container_width=True, height=min(80 + 36 * len(rows), 420))
+        st.caption("Serial = apni je kromei qty diyechen. Kagoj-er sathe line-by-line milan - thik thakle OK chapun, vul thakle Cancel kore thik korun.")
+    if prows:
+        st.markdown(f"#### ⏳ {len(prows)} ti item stock nei - **Pending Issue**-te thakbe")
+        st.dataframe(pd.DataFrame([{"Item": r["item"], "Size": r["size"], "Qty (chaoa)": r["qty"], "Ekhon stock": r["stock"], "UOM": r["uom"]} for r in prows]),
+                     hide_index=True, use_container_width=True, height=min(80 + 36 * len(prows), 300))
+        st.caption("Ei item-gulor kono transaction / stock-er poriborton hobe na. Stock ashle ⏳ Pending Issue tab theke issue korben.")
     b1, b2 = st.columns(2)
-    if b1.button("✅ OK - Issue korun", type="primary", key="qi_ok", use_container_width=True):
+    if b1.button("✅ OK - Issue korun" if rows else "✅ OK - Pending-e rakhun", type="primary", key="qi_ok", use_container_width=True):
         if guard():
-            n = save_requisition_issue(p["fac"], p["lines"], p["tx_date"], p["sr_no"], p["ttype"], "[Quick Issue]", p["verified"], False,
-                                       p["section"], machine=p.get("machine"), asof=True)
-            if n:
+            n, ok_all = 0, True
+            if p["lines"]:
+                n = save_requisition_issue(p["fac"], p["lines"], p["tx_date"], p["sr_no"], p["ttype"], "[Quick Issue]", p["verified"], False,
+                                           p["section"], machine=p.get("machine"), asof=True)
+                ok_all = bool(n)
+            if ok_all and p.get("pending"):
+                ok_all = bool(ri_save_pending(p["fac"], p["sr_no"], p["tx_date"], p["ttype"], p["section"], "[Quick Issue]", p["pending"]))
+            if ok_all:
                 _who = st.session_state.get("user", "")
                 st.session_state["last_req_no"] = p["sr_no"]
-                st.session_state["ri_saved"] = {"user": _who, "sr": p["sr_no"], "n": int(n), "qty": float(tot), "section": p["section"],
-                                                "time": local_now().strftime("%d-%b-%Y %I:%M %p"), "kind": "save"}
+                if n:
+                    st.session_state["ri_saved"] = {"user": _who, "sr": p["sr_no"], "n": int(n), "qty": float(tot), "section": p["section"],
+                                                    "time": local_now().strftime("%d-%b-%Y %I:%M %p"), "kind": "save"}
                 st.session_state["qi_gen"] = p["gen"] + 1
                 st.session_state["qi_extra"] = []
                 st.session_state.pop("qi_confirm", None)
-                done(f"✅ {_who}, apnar data sofolbhabe save hoyeche - SR {p['sr_no']}: {n}টি আইটেম ইস্যু হয়েছে"
-                     + (f" · Section: {p['section']}" if p["section"] else "") + ", স্টক কমেছে।"
-                     + (f" 🔁 Auto-transfer (apni tick diyechilen): {st.session_state.pop('_ri_xfer_note')}." if st.session_state.get("_ri_xfer_note") else ""))
+                done(f"✅ {_who}, apnar data sofolbhabe save hoyeche - SR {p['sr_no']}"
+                     + (f": {n}টি আইটেম ইস্যু হয়েছে" + (f" · Section: {p['section']}" if p["section"] else "") + ", স্টক কমেছে." if n else ".")
+                     + (f" 🔁 Auto-transfer (apni tick diyechilen): {st.session_state.pop('_ri_xfer_note')}." if st.session_state.get("_ri_xfer_note") else "")
+                     + (f" ⏳ {len(prows)}টি আইটেমে stock nei — Pending Issue-te rakha holo (transaction hoy ni)." if prows else ""))
     if b2.button("✖ Cancel", key="qi_cancel", use_container_width=True):
         st.session_state.pop("qi_confirm", None)
         st.rerun()
@@ -17811,8 +17972,9 @@ def _ri_quick_form():
     _sty = "".join(f".st-key-qi_row_{gen}_{int(r['sl_no'])}{{background:#F1F9F4;border-color:#8FCBA5}}" for r, _, _ in sel)
     if _sty:
         st.markdown(f"<style>{_sty}</style>", unsafe_allow_html=True)
-    # ---- stock kom hole: onno unit theke auto-transfer (same rule as the 📤 Issue tab); tick must stay ON for the line to save
-    short, xfer = [], {}
+    # ---- stock kom hole: onno unit theke auto-transfer (same rule as the 📤 Issue tab). Onno unit-eo stock na thakle (ba transfer tick bondho
+    # ---- thakle) line ta PENDING ISSUE-te jabe - transaction hobe na, stock ashle pore issue hobe (📤 Issue tab-er Pending-er ekoi niyom).
+    short, xfer, pend_sl = [], {}, set()
     xcache = st.session_state.setdefault("ri_other_cache", {})
     for r, qv, stk in sel:
         if qv <= stk + 1e-9:
@@ -17822,7 +17984,7 @@ def _ri_quick_form():
         ck = (gen, sl_, round(shortage, 6))
         if ck not in xcache:
             try:
-                xcache[ck] = find_same_in_other(r["prod_id"], r["item_name"], other_factory(fac), r["size"], need=shortage)
+                xcache[ck] = find_transferable_in_other(r["prod_id"], r["item_name"], other_factory(fac), r["size"], need=shortage)
             except Exception:
                 xcache[ck] = None
         other = xcache[ck]
@@ -17835,45 +17997,54 @@ def _ri_quick_form():
                 st.caption(f"⚠️ {nm_}: nam hubohu ek noy - duto ek-i item kina dekhe nishchit hon.")
             xfer[sl_] = (bool(ok_x), round(float(shortage), 6))
             if not ok_x:
-                short.append(f"{nm_} (transfer tick bondho - tick din ba qty komiye {stk:g} korun)")
+                pend_sl.add(sl_)
+                st.caption(f"⏳ {nm_}: transfer tick bondho - save korle ei item **Pending Issue**-te thakbe (transaction hobe na).")
         else:
-            short.append(f"{nm_} (stock {stk:g}, issue {qv:g}; {other_factory(fac)}-e-o {shortage:g} {r['unit']} stock nei)")
-    no_rate = [f"{r['item_name']} [{r['size'] or '-'}]" for r, qv, _ in sel if rate_of.get(int(r["sl_no"]), float(r["price"] or 0)) <= 0]
+            pend_sl.add(sl_)
+            _why = "🚫 printing item - onno unit theke transfer hoy na" if is_no_transfer(r["item_name"]) else f"{other_factory(fac)}-eo nei"
+            st.warning(f"⏳ {nm_}: stock {stk:g}, issue {qv:g} ({shortage:g} {r['unit']} kom; {_why}) — save korle ei item "
+                       "**Pending Issue**-te thakbe, transaction hobe na; stock ashle pore ekhan theke issue korben.")
+    _sel_i = [t_ for t_ in sel if int(t_[0]["sl_no"]) not in pend_sl]          # lines that really issue now
+    if pend_sl:
+        _pst = "".join(f".st-key-qi_row_{gen}_{sl_}{{background:#FFF7E6!important;border-color:#F5C26B!important}}" for sl_ in pend_sl)
+        st.markdown(f"<style>{_pst}</style>", unsafe_allow_html=True)
+    no_rate = [f"{r['item_name']} [{r['size'] or '-'}]" for r, qv, _ in _sel_i if rate_of.get(int(r["sl_no"]), float(r["price"] or 0)) <= 0]
     if short:
-        st.error("⛔ Stock kom: " + "; ".join(short) + " — qty komiye din, ba 📤 Issue tab-e Pending diye korun.")
+        st.error("⛔ Stock kom: " + "; ".join(short) + " — qty komiye din.")
     if no_rate:
         st.error("⛔ Rate nei: " + "; ".join(no_rate) + " — oi item-er Rate box-e rate likhun (eta-i item-er Rate hishebe save hobe).")
     if len(sel) > RI_MAX_LINES:
         st.error(f"Ekta slip-e sorbocho {RI_MAX_LINES} ti item - apni {len(sel)} ti diyechen.")
     verified = False
-    if sel:
+    if _sel_i:
         try:
-            vm = _ri_verif_many(fac, [int(r["sl_no"]) for r, _, _ in sel], tx_date)
+            vm = _ri_verif_many(fac, [int(r["sl_no"]) for r, _, _ in _sel_i], tx_date)
         except Exception:
             vm = {}
-        need_names = [r["item_name"] for r, _, _ in sel if vm.get(int(r["sl_no"]), (False, 0))[0]]
+        need_names = [r["item_name"] for r, _, _ in _sel_i if vm.get(int(r["sl_no"]), (False, 0))[0]]
         if need_names:
             verified = st.checkbox("Physically verified — এই আইটেমগুলো ফিজিক্যালি গুনে দেখা হয়েছে: " + ", ".join(need_names), key=f"qi_ver_{gen}")
         try:
-            _sb_issue_warn(fac, section, tx_date, sum(qv * rate_of.get(int(r["sl_no"]), float(r["price"] or 0)) for r, qv, _ in sel), ttype)
+            _sb_issue_warn(fac, section, tx_date, sum(qv * rate_of.get(int(r["sl_no"]), float(r["price"] or 0)) for r, qv, _ in _sel_i), ttype)
         except Exception:
             pass
     else:
         need_names = []
-    if sel:
-        _wr_issue_alert(fac, [(int(r["sl_no"]), r["item_name"], r["size"]) for r, _, _ in sel], tx_date, ttype)      # warranty reminder (read-only)
+    if _sel_i:
+        _wr_issue_alert(fac, [(int(r["sl_no"]), r["item_name"], r["size"]) for r, _, _ in _sel_i], tx_date, ttype)      # warranty reminder (read-only)
     _mc_map, _mc_err = {}, ""
     if sel and _mc_labs and ttype == "Issued":          # machine-wise issue (same check as the 📤 Issue tab)
         _mlines = [{"sl": int(r["sl_no"]), "name": r["item_name"], "size": r["size"]} for r, _, _ in sel]
-        _mc_map, _mc_err = _mc_lines_check(fac, _mlines, [False] * len(_mlines), mc_sel, _mc_msl, tx_date, ttype, True)
-    _tq = sum(qv for _, qv, _ in sel)
+        _mc_map, _mc_err = _mc_lines_check(fac, _mlines, [int(r["sl_no"]) in pend_sl for r, _, _ in sel], mc_sel, _mc_msl, tx_date, ttype, True)
+    _tq = sum(qv for _, qv, _ in _sel_i)
     _alerts = len(short) + len(no_rate) + len(bad_qty) + len(bad_rate)
     _sr = lambda k, v, c="": f"<div class='qi-side-row {c}'><span>{k}</span><b>{_html.escape(str(v))}</b></div>"
     colR.markdown("<div class='qi-side'><div class='qi-side-h'>📋 Issue Summary</div>"
-                  f"<div class='qi-side-kpis'><div class='qi-kpi'><b>{len(sel)}</b><span>Items</span></div>"
+                  f"<div class='qi-side-kpis'><div class='qi-kpi'><b>{len(_sel_i)}</b><span>Items</span></div>"
                   f"<div class='qi-kpi'><b>{_tq:g}</b><span>Total Qty</span></div></div>"
                   + _sr("SR No.", sr_no or "—", "hl-sr" + ("" if sr_no else " empty")) + _sr("Date", f"{tx_date:%d-%b-%Y}" if date_ok else "— bachai korun —")
                   + _sr("Type", TRANS_LABELS.get(ttype, ttype)) + _sr("Section", section or "—", "hl-sec" + ("" if section else " empty")) + _sr("Unit", fac)
+                  + (_sr("⏳ Pending Issue", f"{len(pend_sl)} item", "hl-sec") if pend_sl else "")
                   + (f"<div class='qi-side-alert'>⚠ {_alerts} ti shomossha - bam-e lal message dekhun</div>" if _alerts
                      else ("<div class='qi-side-ok'>✔ Shob thik ache - Save korte paren</div>" if sel else ""))
                   + "</div>", unsafe_allow_html=True)
@@ -17902,7 +18073,7 @@ def _ri_quick_form():
             st.error("এই SR আগে ব্যবহার হয়েছে — নিশ্চিত করার টিক দিন।")
         elif guard():
             _rows = []
-            for r, qv, _stk in sel:
+            for r, qv, _stk in _sel_i:
                 _sl = int(r["sl_no"])
                 _x = xfer.get(_sl, (False, 0.0))
                 _rows.append({"ser": ser.get(_sl), "item": r["item_name"], "size": r["size"] or "-", "qty": qv,
@@ -17913,7 +18084,13 @@ def _ri_quick_form():
                   "rows": _rows, "machine": (_mc_map or None),
                   "lines": [(int(r["sl_no"]), qv, xfer.get(int(r["sl_no"]), (False, 0.0))[0],
                              rate_of.get(int(r["sl_no"]), float(r["price"] or 0)),
-                             xfer.get(int(r["sl_no"]), (False, 0.0))[1]) for r, qv, _ in sel]}
+                             xfer.get(int(r["sl_no"]), (False, 0.0))[1]) for r, qv, _ in _sel_i]}
+            _p["pending"] = [(int(r["sl_no"]), r["prod_id"], r["item_name"], r["size"] or "",
+                              uom_of.get(int(r["sl_no"]), r["unit"]) or "Pcs", qv,
+                              rate_of.get(int(r["sl_no"]), float(r["price"] or 0)), mc_sel.get(int(r["sl_no"])))
+                             for r, qv, _ in sel if int(r["sl_no"]) in pend_sl]
+            _p["prows"] = [{"item": r["item_name"], "size": r["size"] or "-", "qty": qv, "uom": uom_of.get(int(r["sl_no"]), r["unit"]), "stock": stk_}
+                           for r, qv, stk_ in sel if int(r["sl_no"]) in pend_sl]
             st.session_state["qi_confirm"] = _p
             if _qi_confirm_dialog:
                 _qi_confirm_dialog(_p)
@@ -18114,7 +18291,7 @@ def _ri_form():
                 ck = (gen, ln["sl"], round(shortage, 6))
                 if ck not in xcache:
                     try:
-                        xcache[ck] = find_same_in_other(ln["pid"], ln["name"], other_factory(fac), ln["size"], need=shortage)
+                        xcache[ck] = find_transferable_in_other(ln["pid"], ln["name"], other_factory(fac), ln["size"], need=shortage)
                     except Exception:
                         xcache[ck] = None
                 other = xcache[ck]
@@ -18133,7 +18310,8 @@ def _ri_form():
                     st.caption(note_x)
                 else:
                     r[8].write("⏳ Pending-e jabe")
-                    st.caption(f"⏳ {ln['name']}: stock kom (shortage {shortage:g}) — save korle ei item **Pending Issue**-te thakbe, "
+                    st.caption(f"⏳ {ln['name']}: stock kom (shortage {shortage:g})" + (" · 🚫 printing item - onno unit theke transfer hoy na" if is_no_transfer(ln["name"]) else "")
+                               + " — save korle ei item **Pending Issue**-te thakbe, "
                                "transaction hobe na; stock ashle pore issue korben.")
                     is_pend = True
             elif ln["need"]:
