@@ -1169,6 +1169,7 @@ def _cached_rows(sql, params_t, ver):
 
 _OK_FUNCS = {"unnest", "generate_series"}
 _STOCK_TABLES = {"inventory", "transactions", "inter_factory_transfers"}
+_LIVE_TABLES = _STOCK_TABLES | {"category_budgets", "repair_returns"}   # checked against the live DB stamp on every read
 
 
 def _read_tables(sql):
@@ -1210,7 +1211,7 @@ def _scoped_ver(sql):
         tabs = _read_tables(sql)
         if tabs:
             box = _ver_box()
-            live = _db_fresh_stamp() if (tabs & _STOCK_TABLES) else None
+            live = _db_fresh_stamp() if (tabs & _LIVE_TABLES) else None
             return ("t", box["g"], tuple((t, box["t"].get(t, 0)) for t in sorted(tabs)), live)
     except Exception:
         pass
@@ -10259,19 +10260,24 @@ def _tab_repair_body():
 
     if not rp.empty:
         with st.expander("✏️ Update / 🗑 Delete record"):
-            labels = {f"ID {r['id']} | {r['tracking_code']} | {r['item_name']} | {r['status']}": r for r in rp.to_dict("records")}
-            r = labels[st.selectbox("Record", list(labels), key="rp_sel")]
+            by_id = {int(r["id"]): r for r in rp.to_dict("records")}
+            _rid = st.selectbox("Record", list(by_id), key="rp_sel_id",
+                                format_func=lambda i: f"ID {i} | {by_id[i]['tracking_code']} | {by_id[i]['item_name']} | {by_id[i]['status']}")
+            r = by_id[_rid]
             k = str(r["id"])
             with st.form(f"rp_edit_{k}"):
                 c1, c2, c3 = st.columns(3)
                 gate = c1.text_input("Gate Pass No", r["gate_pass_no"] or "", key=f"rg_{k}")
                 item = c2.text_input("Item", r["item_name"] or "", key=f"ri_{k}")
                 qty = c3.number_input("Qty", min_value=0.0, value=float(r["qty"] or 0), key=f"rq_{k}")
-                stype = c1.selectbox("Type", ["Repair", "Warranty Claim", "Rejected Return", "Other"], key=f"rs_{k}")
-                rtype = c2.selectbox("Return Type", ["Returnable", "Non-Returnable"], key=f"rt_{k}")
+                _types = ["Repair", "Warranty Claim", "Rejected Return", "Other"]
+                _rtypes = ["Returnable", "Non-Returnable"]
+                _stats = ["Pending Return", "Returned", "Closed"]
+                stype = c1.selectbox("Type", _types, index=_types.index(r["source_type"]) if r.get("source_type") in _types else 0, key=f"rs_{k}")
+                rtype = c2.selectbox("Return Type", _rtypes, index=_rtypes.index(r["return_type"]) if r.get("return_type") in _rtypes else 0, key=f"rt_{k}")
                 supplier = c3.text_input("Supplier", r["supplier_name"] or "", key=f"rsu_{k}")
                 sent = c1.text_input("Sent Date (DD-Mon-YYYY)", r["sent_date"] or "", key=f"rse_{k}")
-                status = c2.selectbox("Status", ["Pending Return", "Returned", "Closed"], key=f"rst_{k}")
+                status = c2.selectbox("Status", _stats, index=_stats.index(r["status"]) if r.get("status") in _stats else 0, key=f"rst_{k}")
                 ret = c3.text_input("Return Date (blank = not returned)", r["return_date"] or "", key=f"rre_{k}")
                 approved = c1.text_input("কার অনুমতিতে বাইরে যাচ্ছে", r.get("approved_by") or "", key=f"rap_{k}")
                 carrier = c2.text_input("কে Gate Pass স্টোরে এনেছে", r.get("gatepass_carrier") or "", key=f"rca_{k}")
@@ -10477,9 +10483,11 @@ def budget_manage_panel():
             return
         pw_ok = mgr_check("bud_pw")
         if brows:
-            labels = {f"{r['factory_name']} | {r['department_name']} | {r['category_name']} "
-                      f"(৳ {float(r['allocated_budget'] or 0):,.0f})": r for r in brows}
-            r = labels[st.selectbox("Budget line", list(labels), key="bud_sel")]
+            by_id = {int(r["id"]): r for r in brows}
+            _bid = st.selectbox("Budget line", list(by_id), key="bud_sel_id",
+                                format_func=lambda i: f"{by_id[i]['factory_name']} | {by_id[i]['department_name']} | {by_id[i]['category_name']} "
+                                                      f"(৳ {float(by_id[i]['allocated_budget'] or 0):,.0f})")
+            r = by_id[_bid]
             k = str(r["id"])
             amt = st.number_input("Allocated budget (৳)", min_value=0.0, step=100.0,
                                   value=float(r["allocated_budget"] or 0), key=f"bud_amt_{k}")
@@ -12036,8 +12044,11 @@ STAMP_SQL = """(SELECT COALESCE(MAX(id),0) FROM transactions) AS tx_max,
  (SELECT ROUND(COALESCE(SUM(COALESCE(current_stock,0)),0)::numeric,3)::float8 FROM inventory WHERE factory_name=%s) AS s_a,
  (SELECT ROUND(COALESCE(SUM(COALESCE(current_stock,0)),0)::numeric,3)::float8 FROM inventory WHERE factory_name=%s) AS s_b,
  (SELECT ROUND(COALESCE(SUM(COALESCE(erp_stock,0)),0)::numeric,3)::float8 FROM inventory) AS erp_sum,
- (SELECT COUNT(*) FROM inventory) AS inv_n"""
-STAMP_KEYS = ("tx_max", "tx_n", "tf_n", "tf_max", "s_a", "s_b", "erp_sum", "inv_n")
+ (SELECT COUNT(*) FROM inventory) AS inv_n,
+ (SELECT COALESCE(SUM(hashtext(COALESCE(category,'')||'|'||COALESCE(unit_price,0)::text)),0) FROM inventory) AS inv_h,
+ (SELECT COUNT(*)||':'||COALESCE(SUM(hashtext(id::text||'|'||COALESCE(department_name,'')||'|'||COALESCE(category_name,'')||'|'||COALESCE(allocated_budget,0)::text)),0) FROM category_budgets) AS bud_h,
+ (SELECT COUNT(*)||':'||COALESCE(MAX(id),0)||':'||COALESCE(SUM(hashtext(COALESCE(status,'')||'|'||COALESCE(return_date,'')||'|'||COALESCE(qty,0)::text||'|'||COALESCE(item_name,'')||'|'||COALESCE(gate_pass_no,''))),0) FROM repair_returns) AS rep_h"""
+STAMP_KEYS = ("tx_max", "tx_n", "tf_n", "tf_max", "s_a", "s_b", "erp_sum", "inv_n", "inv_h", "bud_h", "rep_h")
 
 
 def bn(x):
