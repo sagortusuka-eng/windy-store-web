@@ -3510,6 +3510,10 @@ def _dbp_addons_top():
         render_ri_request_notice()
     except Exception:
         pass
+    try:
+        render_overdue_alert_panel(stamp)
+    except Exception as e:
+        st.caption(f"Overdue panel লোড হয়নি: {e}")
     return stamp
 
 
@@ -12493,13 +12497,231 @@ def transfer_form(sug):
 # ------------------------------------------------------------------
 #  5. Stock Cover page
 # ------------------------------------------------------------------
+# ============================================================
+#  SLOW / DEAD STOCK  +  DASHBOARD OVERDUE ALERT PANEL   (read-only; nothing is written)
+# ============================================================
+SC_SLOW = "🐢 Slow / Dead Stock"
+HB_OVERDUE_DAYS = 7          # Hold Bill still Open after this many days -> overdue
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _slow_stock_base(fac_key, today_s):
+    """Every item with stock > 0 and the date of its last Issue / last stock-in. Cached 15 min (not re-run after every save)."""
+    d = _sql_date("btrim(date)")
+    iss = "('" + "','".join(ISSUE_TYPES) + "')"
+    inn = "('" + "','".join(tuple(RECEIPT_TYPES) + (OPENING_TYPE,)) + "')"
+    fsql, fp = fw(None if fac_key == "ALL" else fac_key, "i.")
+    df = qdf_c(f"""SELECT i.factory_name, i.sl_no, COALESCE(i.prod_id,'') AS prod_id, COALESCE(i.item_name,'') AS item_name,
+                          COALESCE(i.size,'') AS size, COALESCE(i.category,'') AS category,
+                          COALESCE(NULLIF(i.unit_name,''),'Pcs') AS unit, COALESCE(i.current_stock,0) AS stock,
+                          COALESCE(i.unit_price,0) AS price, m.last_issue, m.last_in
+                   FROM inventory i
+                   LEFT JOIN (SELECT factory_name, sl_no,
+                                     MAX(CASE WHEN trans_type IN {iss} THEN {d} END) AS last_issue,
+                                     MAX(CASE WHEN trans_type IN {inn} THEN {d} END) AS last_in
+                              FROM transactions GROUP BY factory_name, sl_no) m
+                          ON m.factory_name=i.factory_name AND m.sl_no=i.sl_no
+                   WHERE COALESCE(i.current_stock,0) > 0{fsql}""", fp)
+    if df.empty:
+        return df
+    today = pd.Timestamp(datetime.strptime(today_s, "%Y-%m-%d"))
+    for c in ("stock", "price"):
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+    df["last_issue"] = pd.to_datetime(df["last_issue"], errors="coerce")
+    df["last_in"] = pd.to_datetime(df["last_in"], errors="coerce")
+    ref = df[["last_issue", "last_in"]].max(axis=1)                 # a freshly received item is not "idle"
+    df["idle_days"] = (today - ref).dt.days
+    df["value"] = df["stock"] * df["price"]
+    return df
+
+
+def _slow_status(idle, slow_d, dead_d):
+    if pd.isna(idle):
+        return "🔴 Dead (record nei)"
+    if idle >= dead_d:
+        return "🔴 Dead"
+    if idle >= slow_d:
+        return "🟡 Slow"
+    return "🟢 Cholche"
+
+
+def slow_dead_view():
+    st.markdown("**🐢 Slow / Dead Stock** — je maal onek din Issue hoy ni (stock ache, kintu babohar nei)")
+    st.caption("Idle din = ajker tarikh theke (last Issue ba last stock-in, jeta pore) porjonto. Notun receive kora maal Dead dhora hoy na. "
+               "Ekhane kono data change hoy na.")
+    c1, c2, c3, c4 = st.columns([1, 1, 1.6, 1.6])
+    slow_d = c1.selectbox("Slow (din)", [60, 90, 120, 150], index=1, key="sd_slow")
+    dead_d = c2.selectbox("Dead (din)", [180, 270, 365, 540], index=0, key="sd_dead")
+    term = c3.text_input("🔍 Item / ERP code / Category", key="sd_term").strip().lower()
+    stat = c4.radio("Dekhan", ["Slow + Dead", "Shudhu Dead", "Shudhu Slow"], horizontal=True, key="sd_stat")
+    if dead_d <= slow_d:
+        st.warning("Dead-er din Slow-er cheye beshi rakhun.")
+        return
+    fac_key = "ALL" if (not FAC or "CONSOLIDATED" in FAC) else FAC
+    df = _slow_stock_base(fac_key, local_now().strftime("%Y-%m-%d"))
+    if df is None or df.empty:
+        st.info("Stock ache emon item nei.")
+        return
+    df = df.copy()
+    df["Status"] = [_slow_status(i, slow_d, dead_d) for i in df["idle_days"]]
+    df = df[df["Status"] != "🟢 Cholche"]
+    if stat == "Shudhu Dead":
+        df = df[df["Status"].str.startswith("🔴")]
+    elif stat == "Shudhu Slow":
+        df = df[df["Status"] == "🟡 Slow"]
+    if term:
+        m = df[["item_name", "prod_id", "category"]].astype(str).apply(lambda c: c.str.lower().str.contains(term, regex=False)).any(axis=1)
+        df = df[m]
+    if df.empty:
+        st.success("🎉 Ei shortey kono Slow / Dead item nei.")
+        return
+    # other unit: does it still use this item?  (from the Stock Cover base that is already cached)
+    other_stock, other_use = {}, {}
+    try:
+        cv = load_cover_df()
+        if cv is not None and not cv.empty:
+            for r in cv.to_dict("records"):
+                other_stock[(r["ident"], r["factory_name"])] = float(r["stock"] or 0)
+                other_use[(r["ident"], r["factory_name"])] = float(r["q90"] or 0)
+    except Exception:
+        pass
+    rows = []
+    for r in df.to_dict("records"):
+        ident = _ident(r["prod_id"], r["item_name"], r["size"])
+        oth = [f for f in FACTORIES if f != r["factory_name"]]
+        o_f = oth[0] if oth else None
+        o_use = other_use.get((ident, o_f), 0.0) if o_f else 0.0
+        o_stk = other_stock.get((ident, o_f)) if o_f else None
+        rows.append({"Unit": short_fac(r["factory_name"]), "ERP Code": r["prod_id"], "Item": r["item_name"], "Size": r["size"],
+                     "Category": r["category"], "Stock": float(r["stock"]), "UOM": r["unit"], "Rate": float(r["price"]),
+                     "Value (৳)": float(r["value"]),
+                     "Last Issue": r["last_issue"].strftime(DATE_FMT) if pd.notna(r["last_issue"]) else "Kokhono hoy ni",
+                     "Last Stock-in": r["last_in"].strftime(DATE_FMT) if pd.notna(r["last_in"]) else "-",
+                     "Idle din": (int(r["idle_days"]) if pd.notna(r["idle_days"]) else None), "Status": r["Status"],
+                     "Onno unit": (f"🔁 {short_fac(o_f)}-e {o_use:g} {r['unit']} babohar (90 din) - transfer kora jay" if o_use > 0
+                                   else (f"{short_fac(o_f)}-e stock {o_stk:g}" if o_stk else "-"))})
+    out = pd.DataFrame(rows).sort_values(["Value (৳)"], ascending=False).reset_index(drop=True)
+    dead = out[out["Status"].str.startswith("🔴")]
+    slow = out[out["Status"] == "🟡 Slow"]
+    k = st.columns(4)
+    k[0].metric("🔴 Dead item", f"{len(dead):,}")
+    k[1].metric("🔴 Dead stock value", f"৳{dead['Value (৳)'].sum():,.0f}")
+    k[2].metric("🟡 Slow item", f"{len(slow):,}")
+    k[3].metric("🟡 Slow stock value", f"৳{slow['Value (৳)'].sum():,.0f}")
+    n_tr = int(out["Onno unit"].astype(str).str.startswith("🔁").sum())
+    if n_tr:
+        st.info(f"🔁 {n_tr}-ti item onno unit-e babohar hocche - ager 'Transfer History → Je kono item-er stock theke transfer' diye pathale kena komte pare.")
+    st.dataframe(out.head(1000), hide_index=True, use_container_width=True, height=520,
+                 column_config={"Stock": st.column_config.NumberColumn(format="%g"), "Rate": st.column_config.NumberColumn(format="%.2f"),
+                                "Value (৳)": st.column_config.NumberColumn(format="%.0f")})
+    if len(out) > 1000:
+        st.caption(f"Prothom 1000-ti dekhano holo (mot {len(out):,}) - Excel-e shob pawa jabe.")
+    export_buttons(out, "slow_dead_stock", "Slow / Dead stock")
+
+
+def _overdue_data(fac):
+    """Counts + short lists for the dashboard panel. Tiny queries, cached by the normal data-version cache."""
+    today = pd.Timestamp(local_now().date())
+    fsql, fp = fw(fac)
+    res = {"hb_n": None, "hb_df": None, "rp_n": None, "rp_df": None, "min_n": None, "dead_n": None, "dead_val": None}
+    try:
+        run_once_per_process("hold_bill_table", ensure_hold_bill_table)
+        hb = qdf_c(f"""SELECT id, factory_name, received_date, challan_no, supplier_name, item_name, COALESCE(qty,0) AS qty
+                       FROM hold_bills WHERE COALESCE(status,'Open')<>'Resolved'{fsql}""", fp)
+        if not hb.empty:
+            hb["days"] = (today - _parse_dates(hb["received_date"])).dt.days
+            hb = hb[hb["days"] > HB_OVERDUE_DAYS].sort_values("days", ascending=False)
+        res["hb_n"], res["hb_df"] = len(hb), hb
+    except Exception:
+        pass
+    try:
+        rp = qdf_c(f"""SELECT factory_name, tracking_code, gate_pass_no, item_name, COALESCE(qty,0) AS qty, supplier_name, sent_date
+                       FROM repair_returns WHERE status='Pending Return'{fsql}""", fp)
+        if not rp.empty:
+            rp["days"] = (today - _parse_dates(rp["sent_date"])).dt.days
+            rp = rp[rp["days"] > _RPX_OVERDUE_DAYS].sort_values("days", ascending=False)
+        res["rp_n"], res["rp_df"] = len(rp), rp
+    except Exception:
+        pass
+    try:
+        res["min_n"] = int(q_c(f"SELECT COUNT(*) AS n FROM inventory WHERE COALESCE(min_stock,0)>0 AND COALESCE(current_stock,0)<=COALESCE(min_stock,0){fsql}", fp)[0]["n"] or 0)
+    except Exception:
+        pass
+    return res
+
+
+def render_overdue_alert_panel(stamp=None):
+    st.markdown('<div class="section-title">⏰ Overdue / সতর্কতা</div>', unsafe_allow_html=True)
+    d = _overdue_data(FAC)
+    fac_key = "ALL" if (not FAC or "CONSOLIDATED" in FAC) else FAC
+    cards = [
+        (f"Hold Bill {HB_OVERDUE_DAYS} দিনের বেশি Open", d["hb_n"], "টি", "Solved করা বাকি", NAV_HOLD_BILL, "Hold Bill খুলুন →"),
+        (f"Repair/Return {_RPX_OVERDUE_DAYS} দিনের বেশি বাকি", d["rp_n"], "টি", "Gate Pass-এ বাইরে, ফেরত আসেনি", "🛠 Repair & Returns", "Repair & Returns খুলুন →"),
+        ("Minimum stock-এ / নিচে", d["min_n"], "আইটেম", "Item-এ min stock দেওয়া আছে, স্টক তার সমান বা কম", NAV_STOCK_COVER, "Stock Cover খুলুন →"),
+    ]
+    cols = st.columns(4, gap="small")
+    total = 0
+    for i, (col, (title, n, unit, hint, page, btn)) in enumerate(zip(cols[:3], cards)):
+        with col:
+            with st.container(border=True):
+                shown = "—" if n is None else f"{int(n):,}"
+                color = "#94A3B8" if n is None else ("#16A34A" if int(n) == 0 else "#DC2626")
+                total += int(n or 0)
+                st.markdown(f'<div style="font-size:11.5px;font-weight:800;color:#64748B;">{html_lib.escape(title)}</div>'
+                            f'<div style="font-size:34px;font-weight:800;color:{color};line-height:1.2;">{shown}'
+                            f'<span style="font-size:13px;color:#64748B;font-weight:600;"> {unit}</span></div>'
+                            f'<div style="font-size:12px;color:#64748B;margin-bottom:6px;">{html_lib.escape(hint)}</div>', unsafe_allow_html=True)
+                st.button(btn if (n is None or int(n) > 0) else "খুলুন →", key=f"od_go_{i}", on_click=go_page, args=(page, None),
+                          use_container_width=True, type="primary" if (n is not None and int(n) > 0) else "secondary")
+    with cols[3]:
+        with st.container(border=True):
+            st.markdown('<div style="font-size:11.5px;font-weight:800;color:#64748B;">Dead stock (১৮০ দিন+ Issue নেই)</div>', unsafe_allow_html=True)
+            if st.toggle("হিসাব দেখান", key="od_dead_on", help="Tick dile tobei hisab hoy - dashboard druto thake."):
+                try:
+                    b = _slow_stock_base(fac_key, local_now().strftime("%Y-%m-%d"))
+                    dd = b[(b["idle_days"] >= 180) | b["idle_days"].isna()] if b is not None and not b.empty else b
+                    n = 0 if dd is None or dd.empty else len(dd)
+                    v = 0.0 if dd is None or dd.empty else float(dd["value"].sum())
+                    st.markdown(f'<div style="font-size:34px;font-weight:800;color:{"#16A34A" if n == 0 else "#DC2626"};line-height:1.2;">{n:,}'
+                                f'<span style="font-size:13px;color:#64748B;font-weight:600;"> আইটেম</span></div>'
+                                f'<div style="font-size:12px;color:#64748B;margin-bottom:6px;">স্টক মূল্য ৳{v:,.0f}</div>', unsafe_allow_html=True)
+                except Exception as e:
+                    st.caption(f"লোড হয়নি: {e}")
+            else:
+                st.markdown('<div style="font-size:34px;font-weight:800;color:#94A3B8;line-height:1.2;">—</div>'
+                            '<div style="font-size:12px;color:#64748B;margin-bottom:6px;">Toggle chaplei hisab</div>', unsafe_allow_html=True)
+            def _go_sd():
+                st.session_state[NAV_KEY] = NAV_STOCK_COVER
+                st.session_state[SC_VIEW_KEY] = SC_SLOW
+            st.button("Slow / Dead খুলুন →", key="od_go_dead", on_click=_go_sd, use_container_width=True)
+    if total == 0:
+        st.success("🎉 কোনো Overdue নেই।")
+    hb, rp = d["hb_df"], d["rp_df"]
+    if hb is not None and not hb.empty:
+        with st.expander(f"🗂 Overdue Hold Bill ({len(hb)})"):
+            sh = hb.head(30).rename(columns={"factory_name": "Unit", "received_date": "Received", "challan_no": "Challan", "supplier_name": "Supplier",
+                                             "item_name": "Item", "qty": "Qty", "days": "Din"}).drop(columns=["id"])
+            st.dataframe(sh, hide_index=True, use_container_width=True, height=min(60 + 35 * len(sh), 320))
+    if rp is not None and not rp.empty:
+        with st.expander(f"🛠 Overdue Repair / Return ({len(rp)})"):
+            sh = rp.head(30).rename(columns={"factory_name": "Unit", "tracking_code": "Tracking", "gate_pass_no": "Gate Pass", "item_name": "Item",
+                                             "qty": "Qty", "supplier_name": "Supplier", "sent_date": "Sent", "days": "Din"})
+            st.dataframe(sh, hide_index=True, use_container_width=True, height=min(60 + 35 * len(sh), 320))
+
+
 def tab_stock_cover():
     st.title("⏳ Stock Cover")
     st.caption(f"প্রতিটি আইটেমের বর্তমান স্টক ও গত {USAGE_WINDOW_DAYS} দিনের গড় Issue দেখে কত দিন চলবে — "
                "সবচেয়ে আগে ফুরাবে এমন আইটেম সবার ওপরে।")
-    if st.session_state.get(SC_VIEW_KEY) not in (SC_COVER, SC_XFER, SC_HIST):
+    if st.session_state.get(SC_VIEW_KEY) not in (SC_COVER, SC_XFER, SC_HIST, SC_SLOW):
         st.session_state[SC_VIEW_KEY] = SC_COVER
-    view = st.radio("View", [SC_COVER, SC_XFER, SC_HIST], key=SC_VIEW_KEY, horizontal=True, label_visibility="collapsed")
+    view = st.radio("View", [SC_COVER, SC_XFER, SC_SLOW, SC_HIST], key=SC_VIEW_KEY, horizontal=True, label_visibility="collapsed")
+    if view == SC_SLOW:
+        try:
+            slow_dead_view()
+        except Exception as e:
+            st.warning(f"Slow / Dead stock load kora jayni: {e}")
+        return
     df = load_cover_df()
     if df is None or df.empty:
         st.info("Inventory khali.")
