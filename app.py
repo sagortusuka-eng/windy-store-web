@@ -3900,7 +3900,91 @@ def _tab_dashboard_body():
 # ============================================================
 #  TAB 1 - TRANSACTIONS (daily entry, top priority)
 # ============================================================
-def _receipt_core(fac, user, item, qty, ttype, day, notes, date_s, time_s, supplier, challan, po_flag, po_date, rate, rate_mode, req_qty=None):
+# ============================================================
+#  RECEIVE-TIME TRANSFER: receive N pcs, send part of it to the other unit right away (no shortage needed)
+#  Every such transfer remembers the receipt (challan / supplier / receipt row) it came from -> challan-wise report.
+# ============================================================
+def ensure_receipt_transfer_columns():
+    """Additive only: which receipt (row / challan / supplier) a transfer was taken from."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""ALTER TABLE inter_factory_transfers
+                           ADD COLUMN IF NOT EXISTS src_tx_id INTEGER,
+                           ADD COLUMN IF NOT EXISTS src_challan TEXT,
+                           ADD COLUMN IF NOT EXISTS src_supplier TEXT""")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+
+def _rx_xfer_ui(key, fac, item, rcv_qty, has_pack=False, compact=False):
+    """'Also transfer part of this receipt to the other unit' box. Returns (qty_to_transfer, blocked)."""
+    dest = other_factory(fac)
+    box = st.container(border=not compact)
+    with box:
+        on = st.checkbox(f"🔁 Receive-er sathe-i {short_fac(dest)}-e kichu transfer korbo", key=key + "_on",
+                         help="Receive hoye jawa maal theke ei-ei muhurte onno unit-e pathan. Challan-er against-e record thakbe.")
+        if not on:
+            return 0.0, False
+        if is_no_transfer(item["item_name"]):
+            st.error("🚫 Ei item printing item - onno unit-e transfer kora jay na.")
+            return 0.0, True
+        other = find_transferable_in_other(item["prod_id"], item["item_name"], dest, item.get("size") or "")
+        if not other:
+            st.error(f"{short_fac(dest)}-e ei item (same name/size/code) paoa jacche na - age oi unit-e item add korun.")
+            return 0.0, True
+        xq = st.number_input(f"{short_fac(dest)}-e transfer qty (stock unit-e)", min_value=0.0, step=1.0, format="%g", key=key + "_q")
+        st.caption(f"Match: {other['item_name']} [{other.get('size') or '-'}] · {short_fac(dest)} stock ekhon {float(other['stock'] or 0):g}")
+        if other.get("level") == "fuzzy":
+            st.info("ℹ️ Nam hubohu ek noy - dui unit-er item same kina dekhe nin.")
+        if xq <= 0:
+            st.warning("Transfer qty din, na hole tick uthiye din.")
+            return 0.0, True
+        if not has_pack and xq > float(rcv_qty) + 1e-9:
+            st.error(f"Transfer qty ({xq:g}) receive qty ({float(rcv_qty):g})-er cheye beshi hote pare na.")
+            return float(xq), True
+        if not has_pack:
+            st.caption(f"✅ Receive {float(rcv_qty):g} → {short_fac(dest)}-e {xq:g}, ei unit-e thakbe {float(rcv_qty) - xq:g}")
+        return float(xq), False
+
+
+def _rx_transfer(fac, item, xqty, rcv_qty, challan, supplier, date_s, time_s, user):
+    """Moves `xqty` of a just-received item to the other unit and links the transfer to the receipt. Runs inside the caller's tx."""
+    xqty = float(xqty or 0)
+    if xqty <= 0:
+        return None
+    if is_no_transfer(item["item_name"]):
+        raise ValueError(f"{item['item_name']}: printing item - onno unit-e transfer kora jay na.")
+    if xqty > float(rcv_qty) + 1e-9:
+        raise ValueError(f"{item['item_name']}: transfer qty ({xqty:g}) receive qty ({float(rcv_qty):g})-er cheye beshi.")
+    dest = other_factory(fac)
+    other = find_transferable_in_other(item["prod_id"], item["item_name"], dest, item.get("size") or "")
+    if not other:
+        raise ValueError(f"{item['item_name']}: {dest}-e same item paoa jayni - transfer hoy nai, receive-o save hoy nai.")
+    live = run("SELECT COALESCE(current_stock,0) FROM inventory WHERE sl_no=%s AND factory_name=%s FOR UPDATE", (item["sl_no"], fac))
+    if not live or xqty > float(live[0][0] or 0) + 1e-9:
+        raise ValueError(f"{item['item_name']}: stock-e {xqty:g} nei.")
+    run("UPDATE inventory SET current_stock=current_stock-%s WHERE sl_no=%s AND factory_name=%s", (xqty, item["sl_no"], fac))
+    run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (xqty, other["sl_no"], dest))
+    _r = run("SELECT MAX(id) FROM transactions WHERE factory_name=%s AND sl_no=%s AND trans_type='Supplier. Rec'", (fac, item["sl_no"]))
+    rx_id = int(_r[0][0]) if _r and _r[0][0] is not None else None
+    ref_no = f"TRF-{datetime.now():%Y%m%d%H%M%S%f}-R{item['sl_no']}"
+    run("""INSERT INTO inter_factory_transfers (transfer_ref, source_factory, dest_factory, prod_id, item_name, qty,
+           transfer_date, transfer_time, initiated_by, status, notes, size, src_tx_id, src_challan, src_supplier)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'Completed',%s,%s,%s,%s,%s)""",
+        (ref_no, fac, dest, item["prod_id"], item["item_name"], xqty, date_s, time_s, user,
+         f"Transfer right after receipt (Challan {challan or '-'}, Supplier {supplier or '-'}) "
+         f"(source item: {item['item_name']} [{item['prod_id']}]) | Size: {item.get('size') or '-'}",
+         item.get("size") or "", rx_id, challan or "", supplier or ""))
+    audit("RECEIPT_TRANSFER", f"{xqty:g} of {item['prod_id']} ({item['item_name']}) {fac} -> {dest} from Challan {challan or '-'} ({ref_no})")
+    _t = f"{item['item_name']} {xqty:g} → {short_fac(dest)}"
+    _prev = st.session_state.get("_rx_xfer_note", "")
+    st.session_state["_rx_xfer_note"] = (_prev + ", " + _t) if _prev else "🔁 Receive theke transfer: " + _t
+    return ref_no
+
+
+def _receipt_core(fac, user, item, qty, ttype, day, notes, date_s, time_s, supplier, challan, po_flag, po_date, rate, rate_mode, req_qty=None, xfer_qty=0):
     """Everything a received item needs: stock, purchase rate -> unit price, the receipt row and the requisition Received qty.
     Runs inside the caller's transaction (used by the single Transactions form and by the multi-item receipt slip)."""
     sl, pid, name = item["sl_no"], item["prod_id"], item["item_name"]
@@ -3934,11 +4018,16 @@ def _receipt_core(fac, user, item, qty, ttype, day, notes, date_s, time_s, suppl
             _txt = ", ".join(f"{n} +{v:g}" for n, v in _got)
             _prev = st.session_state.get("_req_auto_note", "")
             st.session_state["_req_auto_note"] = (_prev + ", " + _txt) if _prev else "Requisition Received qty auto-update: " + _txt
+        if xfer_qty and float(xfer_qty) > 0:
+            _rx_transfer(fac, item, xfer_qty, qty, challan, supplier, date_s, time_s, user)
 
 
 @tx
 def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, supplier="", challan="", po_pending=False,
-                     erp_open=None, price_open=None, rate=None, rate_mode=None, req_no="", pack=None):
+                     erp_open=None, price_open=None, rate=None, rate_mode=None, req_no="", pack=None, xfer_qty=0):
+    if xfer_qty and float(xfer_qty) > 0:
+        run_once_per_process("receipt_transfer_cols", ensure_receipt_transfer_columns)
+        st.session_state.pop("_rx_xfer_note", None)
     user = st.session_state.get("user", "")
     req_no = (req_no or "").strip() if ttype in ISSUE_TYPES else ""
     sl, pid, name = item["sl_no"], item["prod_id"], item["item_name"]
@@ -4005,7 +4094,8 @@ def save_transaction(fac, item, qty, ttype, tx_dt, notes, verified, xfer_ok, sup
             _req_q = qty
             qty, rate, notes = _pk_apply(fac, sl, qty, rate, notes, pack)
             item = q(f"SELECT {INV_COLS} FROM inventory WHERE sl_no=%s AND factory_name=%s", (sl, fac))[0]
-        _receipt_core(fac, user, item, qty, ttype, day, notes, date_s, time_s, supplier, challan, po_flag, po_date, rate, rate_mode, req_qty=_req_q)
+        _receipt_core(fac, user, item, qty, ttype, day, notes, date_s, time_s, supplier, challan, po_flag, po_date, rate, rate_mode, req_qty=_req_q,
+                      xfer_qty=(xfer_qty if ttype == "Supplier. Rec" else 0))
     else:
         if qty > stock:
             st.error(f"Available stock ({stock:g}) kom ache requested qty ({qty:g}) theke.")
@@ -4025,13 +4115,16 @@ def save_supplier_receipt(fac, lines, tx_dt, supplier, challan, notes, po_pendin
     date_s, time_s, day = tx_dt.strftime(DATE_FMT), datetime.now().strftime("%I:%M %p"), tx_dt.day
     po_flag, po_date = ("Pending", date_s) if po_pending else ("", None)
     st.session_state.pop("_req_auto_note", None)
+    if any(float(ln.get("xfer") or 0) > 0 for ln in lines):
+        run_once_per_process("receipt_transfer_cols", ensure_receipt_transfer_columns)
+        st.session_state.pop("_rx_xfer_note", None)
     _pm = pre_opening_msg(fac, [int(ln["sl"]) for ln in lines], tx_dt)
     if _pm:
         st.error(_pm)
         return 0
     n = 0
     for ln in lines:
-        line_notes, req_q = notes, None
+        line_notes, req_q, line_xfer = notes, None, float(ln.get("xfer") or 0)
         if ln.get("pack"):   # Pkt/Box/Roll -> Pcs/Yds (see RECEIVE-TIME PACK PROMPT)
             ln = dict(ln)
             req_q = float(ln["qty"])
@@ -4043,7 +4136,7 @@ def save_supplier_receipt(fac, lines, tx_dt, supplier, challan, notes, po_pendin
         if qty <= 0:
             raise ValueError(f"{item['item_name']}: quantity 0-r beshi din.")
         _receipt_core(fac, user, item, qty, "Supplier. Rec", day, line_notes, date_s, time_s, supplier, challan, po_flag, po_date,
-                      (float(ln.get("rate") or 0) or None), rate_mode, req_qty=req_q)
+                      (float(ln.get("rate") or 0) or None), rate_mode, req_qty=req_q, xfer_qty=line_xfer)
         audit("TRANSACTION", f"{fac}: Supplier. Rec {qty:g} of {item['prod_id']} ({item['item_name']}) [Challan {challan}]"
               + (" [ERP PO Pending ticked]" if po_pending else ""))
         n += 1
@@ -4054,6 +4147,13 @@ def save_supplier_receipt(fac, lines, tx_dt, supplier, challan, notes, po_pendin
 @tx
 def delete_transaction(tid):
     t = q("SELECT * FROM transactions WHERE id=%s", (tid,))[0]
+    if t["trans_type"] == "Supplier. Rec":
+        run_once_per_process("receipt_transfer_cols", ensure_receipt_transfer_columns)
+        _lk = q("SELECT transfer_ref, qty, dest_factory FROM inter_factory_transfers WHERE src_tx_id=%s", (tid,))
+        if _lk:
+            st.error("🚫 Ei receive theke onno unit-e transfer hoyeche (" + ", ".join(f"{x['transfer_ref']}: {float(x['qty']):g} → {x['dest_factory']}" for x in _lk)
+                     + "). Age Transfer History theke oi transfer delete korun, tarpor receive delete korun.")
+            return False
     if t["trans_type"] in RECEIPT_TYPES:
         run("UPDATE inventory SET current_stock=current_stock-%s WHERE sl_no=%s AND factory_name=%s", (t["qty"], t["sl_no"], t["factory_name"]))
     elif t["trans_type"] in ISSUE_TYPES + (ADJ_OUT,):
@@ -4420,6 +4520,10 @@ def tab_transactions():
             if ttype == "Supplier. Rec" and item is not None:   # Pkt/Box/Roll question (only for such items)
                 _pack, _pack_bad = _pk_ui(f"tx_pk_{g}_{item['sl_no']}", _pk_states(fac, [item["sl_no"]]).get(int(item["sl_no"])), float(qty))
                 blocked = blocked or _pack_bad
+            rx_xfer = 0.0
+            if ttype == "Supplier. Rec" and item is not None and not is_cons_view:   # receive + send part to the other unit at once
+                rx_xfer, _rx_bad = _rx_xfer_ui(f"tx_rxx_{g}_{item['sl_no']}", fac, item, float(qty), has_pack=bool(_pack))
+                blocked = blocked or _rx_bad
             erp_open, price_open = None, None
             if ttype == OPENING_TYPE:
                 # Shown ONLY for Opening Balance - Issue / Receipt forms never see these boxes.
@@ -4528,14 +4632,16 @@ def tab_transactions():
                                      "Quantity / remarks bodle ba kichukkhon por abar korun.")
                         elif save_transaction(fac, item, qty, ttype, tx_date, notes, verified, xfer_ok,
                                               supplier.strip(), challan.strip(), po_pending, erp_open=erp_open,
-                                              price_open=price_open, rate=rate_in, rate_mode=rate_mode, req_no=req_no, pack=_pack):
+                                              price_open=price_open, rate=rate_in, rate_mode=rate_mode, req_no=req_no, pack=_pack,
+                                              xfer_qty=rx_xfer):
                             if ttype in ISSUE_TYPES:
                                 st.session_state["last_req_no"] = req_no.strip()
                             st.session_state["tx_saved_gen"] = g
                             st.session_state["tx_gen"] = g + 1
                             _rn = st.session_state.pop("_req_auto_note", "")
+                            _rxn = st.session_state.pop("_rx_xfer_note", "")
                             done("✅ Transaction saved, stock updated. Form reset hoyeche - porer transaction-er jonno ready."
-                                 + (f" {_rn}" if _rn else ""))
+                                 + (f" {_rn}" if _rn else "") + (f" {_rxn}" if _rxn else ""))
 
     with left:
         _tx_entry_form()
@@ -7898,7 +8004,253 @@ def _erp_tracker():
             export_buttons(out, "erp_item_reconciliation", "ERP vs Software - Item-wise")
 
 
+def _rx_challan_tracking(psql, pp):
+    """Which receipt / challan each transfer came from, how many pcs were sent, how many stayed."""
+    with st.expander("📦 Challan-wise tracking: kon challan-er receive theke koto pcs transfer holo", expanded=False):
+        fsql, fp = "", []
+        if FAC and "CONSOLIDATED" not in FAC:
+            fsql, fp = " AND (t.factory_name=%s OR x.dest_factory=%s)", [FAC, FAC]
+        df = qdf(f"""SELECT t.id AS receipt_id, t.date AS received_on, t.factory_name AS received_in,
+                            COALESCE(t.challan_no,'') AS challan_no, COALESCE(t.supplier_name,'') AS supplier, t.item_name,
+                            t.qty AS received_qty, SUM(x.qty) AS transferred_qty, MIN(x.dest_factory) AS transferred_to,
+                            t.qty - SUM(x.qty) AS kept_in_unit,
+                            string_agg(x.transfer_ref || ' (' || COALESCE(x.transfer_date,'') || ')', ', ' ORDER BY x.id) AS transfer_refs
+                     FROM transactions t JOIN inter_factory_transfers x ON x.src_tx_id = t.id
+                     WHERE 1=1{fsql}{psql}
+                     GROUP BY t.id, t.date, t.factory_name, t.challan_no, t.supplier_name, t.item_name, t.qty
+                     ORDER BY t.id DESC""", tuple(fp) + tuple(pp) or None)
+        if df.empty:
+            st.info("Ei somoy-e receive-er sathe kono transfer nei. (Supplier Receipt-e '🔁 Receive-er sathe-i ... transfer korbo' tick dile ekhane dekhabe.)")
+            return
+        k = st.columns(3)
+        k[0].metric("Challan", int(df["challan_no"].replace("", pd.NA).nunique()))
+        k[1].metric("Receive hoyechilo (ei lines)", f"{float(df['received_qty'].sum()):g}")
+        k[2].metric("Onno unit-e transfer", f"{float(df['transferred_qty'].sum()):g}")
+        st.markdown("**Challan-wise total**")
+        g = (df.groupby(["challan_no", "supplier", "received_in", "transferred_to"], as_index=False)
+               .agg(items=("item_name", "nunique"), received_qty=("received_qty", "sum"),
+                    transferred_qty=("transferred_qty", "sum"), kept_in_unit=("kept_in_unit", "sum")))
+        st.dataframe(g, hide_index=True, use_container_width=True, height=min(300, 60 + 35 * len(g)))
+        st.markdown("**Item-wise detail**")
+        st.dataframe(df, hide_index=True, use_container_width=True, height=360)
+        export_buttons(df, "challan_transfer_tracking")
+
+
+# ============================================================
+#  CHALLAN FIFO TRACKING (read-only report: nothing is written, no stock / transaction logic is touched)
+#  Per item the stock is a queue: older stock first, every challan receipt joins at the back, every Issue / Transfer takes
+#  from the front.  Result per challan line: received -> transferred (with the receipt / other transfers) -> issued -> still in stock.
+# ============================================================
+def _rx_fifo_compute(lots):
+    """lots = Supplier. Rec transaction rows (dicts). Returns ({tx_id: numbers}, [allocation rows])."""
+    facs = tuple(sorted({r["factory_name"] for r in lots}))
+    sls = tuple(sorted({int(r["sl_no"]) for r in lots}))
+    items = {(r["factory_name"], int(r["sl_no"])) for r in lots}
+    txs = q_c("""SELECT id, factory_name, sl_no, trans_type, qty, date, COALESCE(req_no,'') AS req_no, COALESCE(officer_name,'') AS officer
+                 FROM transactions WHERE factory_name IN %s AND sl_no IN %s""", (facs, sls))
+    inv = q_c("""SELECT sl_no, factory_name, prod_id, item_name, COALESCE(size,'') AS size, COALESCE(current_stock,0) AS stock
+                 FROM inventory WHERE factory_name IN %s""", (facs,))
+    xf = q_c("""SELECT id, transfer_ref, source_factory, dest_factory, prod_id, item_name, COALESCE(size,'') AS size, qty, transfer_date,
+                       COALESCE(notes,'') AS notes, src_tx_id
+                FROM inter_factory_transfers
+                WHERE (source_factory IN %s OR dest_factory IN %s) AND COALESCE(status,'Completed')='Completed'""", (facs, facs))
+    by_ns, by_ps, by_p, stock_now = {}, {}, {}, {}
+    for r in inv:
+        f_, sl_ = r["factory_name"], int(r["sl_no"])
+        stock_now[(f_, sl_)] = float(r["stock"] or 0)
+        by_ns.setdefault((f_, norm_name(r["item_name"]), norm_size(r["size"])), sl_)
+        if r["prod_id"] and not is_blank_code(r["prod_id"]) and not str(r["prod_id"]).upper().startswith("TEMP-"):
+            by_ps.setdefault((f_, r["prod_id"], norm_size(r["size"])), sl_)
+            by_p.setdefault((f_, r["prod_id"]), sl_)
+
+    def sl_of(f_, name, pid, size):
+        return (by_ns.get((f_, norm_name(name), norm_size(size))) or by_ps.get((f_, pid, norm_size(size))) or by_p.get((f_, pid)))
+
+    EPS = 1e-9
+    ev, openings = {}, {}
+    seq = [0]
+
+    def add(key, d, order, kind, qty, ref="", who="", label="", lot=None):
+        seq[0] += 1
+        ev.setdefault(key, []).append((d, order, seq[0], kind, float(qty or 0), ref, who, label, lot))
+
+    for t in txs:
+        key = (t["factory_name"], int(t["sl_no"]))
+        d = parse_date(t["date"])
+        if d is None:
+            continue
+        tt, qv = t["trans_type"], float(t["qty"] or 0)
+        if tt == OPENING_TYPE:
+            o = openings.get(key)
+            if o is None or (d, int(t["id"])) > (o[0], o[1]):
+                openings[key] = (d, int(t["id"]), qv)
+        elif tt == "Supplier. Rec":
+            add(key, d, 0, "lot", qv, lot=int(t["id"]))
+        elif tt in RECEIPT_TYPES:
+            add(key, d, 0, "in", qv)
+        elif tt in ISSUE_TYPES:
+            add(key, d, 1, "iss", qv, ref=t["req_no"], who=t["officer"], label=tt)
+        elif tt == ADJ_OUT:
+            add(key, d, 1, "adj", qv, label=tt)
+    for x in xf:
+        d = parse_date(x["transfer_date"])
+        if d is None:
+            continue
+        qv = float(x["qty"] or 0)
+        m = re.search(r"source item:\s*(.+?)\s*\[([^\]]*)\]", x["notes"])
+        s_name, s_pid = (m.group(1).strip(), m.group(2).strip()) if m else (x["item_name"], x["prod_id"])
+        s_sl = sl_of(x["source_factory"], s_name, s_pid, x["size"])
+        if s_sl is not None and (x["source_factory"], s_sl) in items:
+            if x["src_tx_id"]:
+                add((x["source_factory"], s_sl), d, 1, "xl", qv, ref=x["transfer_ref"], label="Transfer (receive-er sathe)", lot=int(x["src_tx_id"]))
+            else:
+                add((x["source_factory"], s_sl), d, 1, "xo", qv, ref=x["transfer_ref"], label="Transfer out")
+        d_sl = sl_of(x["dest_factory"], x["item_name"], x["prod_id"], x["size"])
+        if d_sl is not None and (x["dest_factory"], d_sl) in items:
+            add((x["dest_factory"], d_sl), d, 0, "tin", qv, ref=x["transfer_ref"])
+
+    res = {int(r["id"]): {"xl": 0.0, "xo": 0.0, "iss": 0.0, "adj": 0.0, "left": None, "basis": float(r["qty"] or 0), "pre": False} for r in lots}
+    alloc = []
+    for key in items:
+        evs = sorted(ev.get(key, []), key=lambda e: (e[0], e[1], e[2]))
+        op = openings.get(key)
+        if op:
+            evs = [e for e in evs if e[0] >= op[0]]
+            queue = [[None, op[2]]] if op[2] > EPS else []
+        else:
+            tin = sum(e[4] for e in evs if e[3] in ("lot", "in", "tin"))
+            tout = sum(e[4] for e in evs if e[3] in ("iss", "adj", "xl", "xo"))
+            est = max(stock_now.get(key, 0.0) - tin + tout, 0.0)       # stock that was already there before the first record
+            queue = [[None, est]] if est > EPS else []
+        seen_lots = set()
+
+        def take_front(need, kind, e):
+            while need > EPS and queue:
+                head = queue[0]
+                tk = min(need, head[1])
+                if head[0] is not None and tk > 0:
+                    res[head[0]][kind] += tk
+                    alloc.append({"lot": head[0], "date": e[0].strftime(DATE_FMT), "type": e[7] or kind, "ref": e[5], "qty": tk, "who": e[6]})
+                head[1] -= tk
+                need -= tk
+                if head[1] <= EPS:
+                    queue.pop(0)
+
+        for e in evs:
+            d, _o, _s, kind, qv, ref, who, label, lot = e
+            if kind == "lot":
+                if lot in res:
+                    seen_lots.add(lot)
+                queue.append([lot, qv])
+            elif kind in ("in", "tin"):
+                queue.append([None, qv])
+            elif kind == "xl":
+                need = qv
+                for q_ in queue:
+                    if q_[0] == lot and need > EPS:
+                        tk = min(need, q_[1])
+                        q_[1] -= tk
+                        need -= tk
+                        res[lot]["xl"] += tk
+                        alloc.append({"lot": lot, "date": d.strftime(DATE_FMT), "type": label, "ref": ref, "qty": tk, "who": who})
+                queue[:] = [q_ for q_ in queue if q_[1] > EPS or q_[0] is None and q_[1] > EPS]
+                if need > EPS:
+                    take_front(need, "xo", e)
+            elif kind == "xo":
+                take_front(qv, "xo", e)
+            elif kind == "iss":
+                take_front(qv, "iss", e)
+            elif kind == "adj":
+                take_front(qv, "adj", e)
+        for r in lots:
+            i = int(r["id"])
+            if (r["factory_name"], int(r["sl_no"])) == key:
+                if i in seen_lots:
+                    res[i]["left"] = sum(q_[1] for q_ in queue if q_[0] == i)
+                else:
+                    res[i]["pre"] = True            # received before the item's Opening Balance -> part of the opening stock
+    return res, alloc
+
+
+def _rx_fifo_report():
+    with st.expander("📊 Challan FIFO: kon challan-er maal theke koto Transfer / Issue holo, koto Baki", expanded=False):
+        if not st.checkbox("📊 FIFO hisab dekhan (ei tick dile tobei hisab hobe - page druto thake)", key="rxf_on"):
+            st.caption("Rule: prottek item-er stock ekta line - purono maal age beriye jay. Challan-er maal line-er pichone joma hoy; "
+                       "Issue / Transfer shamner dik theke kome. Ekhane kono data change hoy na - shudhu dekhano hoy.")
+            return
+        run_once_per_process("receipt_transfer_cols", ensure_receipt_transfer_columns)
+        d1, d2, _lbl = report_period("rxf", label="📅 Receive Date somoykal")
+        fsql, fp = fw(FAC)
+        df = qdf_c(f"""SELECT id, factory_name, sl_no, prod_id, item_name, COALESCE(qty,0) AS qty, date,
+                              COALESCE(challan_no,'') AS challan_no, COALESCE(supplier_name,'') AS supplier
+                       FROM transactions WHERE trans_type='Supplier. Rec'{fsql} ORDER BY id DESC LIMIT 3000""", fp)
+        if df.empty:
+            st.info("Supplier receive nei.")
+            return
+        df = period_filter_df(df, "date", d1, d2)
+        c1, c2 = st.columns([2, 1.4])
+        term = c1.text_input("🔍 Challan / Supplier / Item", key="rxf_term").strip().lower()
+        stat = c2.radio("Status", ["সব", "Baki ache", "Shesh"], horizontal=True, key="rxf_stat")
+        if term and not df.empty:
+            m = df[["challan_no", "supplier", "item_name"]].astype(str).apply(lambda c: c.str.lower().str.contains(term, regex=False)).any(axis=1)
+            df = df[m]
+        if df.empty:
+            st.info("Ei shortey kono challan nei.")
+            return
+        if len(df) > 800:
+            st.caption("Prothom 800-ti line-er hisab - aro choto somoy / search diye nin.")
+            df = df.head(800)
+        res, alloc = _rx_fifo_compute(df.to_dict("records"))
+        rows = []
+        for r in df.to_dict("records"):
+            n = res[int(r["id"])]
+            outs = n["xl"] + n["xo"] + n["iss"] + n["adj"]
+            left = n["left"]
+            rows.append({"LotID": int(r["id"]), "Received On": r["date"], "Unit": r["factory_name"], "Challan": r["challan_no"],
+                         "Supplier": r["supplier"], "Item": r["item_name"], "Received": float(r["qty"]),
+                         "Transfer (receive-er sathe)": n["xl"], "Onno Transfer": n["xo"], "Issued": n["iss"], "Adj (-)": n["adj"],
+                         "Baki (ei challan-er)": (left if left is not None else None),
+                         "Status": ("— Opening-er age-r" if n["pre"] else ("✅ Shesh" if (left or 0) <= 1e-9 else "🟠 Baki ache"))})
+        out = pd.DataFrame(rows)
+        if stat == "Baki ache":
+            out = out[out["Status"] == "🟠 Baki ache"]
+        elif stat == "Shesh":
+            out = out[out["Status"] == "✅ Shesh"]
+        if out.empty:
+            st.info("Ei shortey kono line nei.")
+            return
+        k = st.columns(5)
+        k[0].metric("Challan", int(out["Challan"].replace("", pd.NA).nunique()))
+        k[1].metric("Received", f"{out['Received'].sum():g}")
+        k[2].metric("Transfer", f"{(out['Transfer (receive-er sathe)'] + out['Onno Transfer']).sum():g}")
+        k[3].metric("Issued", f"{out['Issued'].sum():g}")
+        k[4].metric("Baki", f"{out['Baki (ei challan-er)'].fillna(0).sum():g}")
+        st.markdown("**Challan-wise total**")
+        g = (out.groupby(["Challan", "Supplier", "Unit"], as_index=False)
+                .agg(Lines=("LotID", "count"), Received=("Received", "sum"), Transfer_at_receipt=("Transfer (receive-er sathe)", "sum"),
+                     Other_Transfer=("Onno Transfer", "sum"), Issued=("Issued", "sum"), Baki=("Baki (ei challan-er)", "sum")))
+        st.dataframe(g, hide_index=True, use_container_width=True, height=min(320, 60 + 35 * len(g)))
+        st.markdown("**Item-wise (line-wise) detail**")
+        show = out.drop(columns=["LotID"])
+        st.dataframe(show, hide_index=True, use_container_width=True, height=min(420, 60 + 35 * len(show)))
+        export_buttons(show, "challan_fifo_tracking")
+        st.markdown("**🔎 Ek challan line-er Issue / Transfer-er details**")
+        lab = {f"#{r['LotID']} · {r['Challan'] or '-'} · {r['Supplier']} · {r['Item']} · {r['Received']:g}": int(r["LotID"]) for r in out.head(300).to_dict("records")}
+        pick = st.selectbox("Challan line", list(lab), key="rxf_pick")
+        det = [a for a in alloc if a["lot"] == lab[pick]]
+        if not det:
+            st.caption("Ei challan theke ekhono kono Issue / Transfer hoy ni.")
+        else:
+            dd = pd.DataFrame(det).rename(columns={"date": "Date", "type": "Type", "ref": "SR / Transfer Ref", "qty": "Qty", "who": "Officer"})
+            st.dataframe(dd[["Date", "Type", "SR / Transfer Ref", "Qty", "Officer"]], hide_index=True, use_container_width=True,
+                         height=min(300, 60 + 35 * len(dd)))
+        st.caption("⚠️ FIFO ekta hisab-er niyom (kon maal age beriyeche dhora) - bastob-e kon pcs gese setar proman noy. "
+                   "Opening Balance deya item-e oi tarikh theke hisab shuru; na thakle ager stock estimate kora hoy. "
+                   "Transfer-er shathe item miliye neya hoy nam + size + ERP code diye.")
+
+
 def tab_transfer_history():
+    run_once_per_process("receipt_transfer_cols", ensure_receipt_transfer_columns)
     run_once_per_process("transfer_size_column", ensure_transfer_size_column)
     run_once_per_process("transfer_erp_columns", ensure_transfer_erp_columns)
     cols_sql = """SELECT id, transfer_ref, source_factory, dest_factory, prod_id, item_name,
@@ -7909,6 +8261,7 @@ def tab_transfer_history():
                            (SELECT i.size FROM inventory i WHERE i.prod_id=inter_factory_transfers.prod_id
                               AND i.factory_name=inter_factory_transfers.dest_factory LIMIT 1), '') AS size,
                   qty, transfer_date, transfer_time, initiated_by, status, notes,
+                   COALESCE(src_challan,'') AS challan_no, COALESCE(src_supplier,'') AS supplier,
                    COALESCE(erp_status,'Pending') AS erp_status, COALESCE(erp_ref,'') AS erp_ref,
                    COALESCE(erp_done_date,'') AS erp_date, COALESCE(erp_done_by,'') AS erp_by,
                    erp_snap_qty, COALESCE(erp_snap_date,'') AS erp_snap_date FROM inter_factory_transfers"""
@@ -7931,6 +8284,14 @@ def tab_transfer_history():
                  hide_index=True, use_container_width=True, height=380)
     export_buttons(view.assign(erp_status=view["erp_status"].astype(str).str.replace(r"^[^A-Za-z]+", "", regex=True))
                    if "erp_status" in view.columns else view, "transfer_history")
+    try:
+        _rx_challan_tracking(_psql, _pp)
+    except Exception as _e:
+        st.warning(f"Challan tracking load kora jayni: {_e}")
+    try:
+        _rx_fifo_report()
+    except Exception as _e:
+        st.warning(f"Challan FIFO load kora jayni: {_e}")
     _erp_tracker()
     with st.expander("🔐 Manager: Delete / Edit transfer"):
         if view.empty:
@@ -9546,6 +9907,8 @@ def add_repair(fac, d):
          st.session_state.get("user", ""), d.get("approved", ""), d.get("carrier", "")))
     new_id = run("SELECT MAX(id) FROM repair_returns WHERE factory_name=%s AND tracking_code='TMP'", (fac,))[0][0]
     tracking = d["track"] or f"REP-{new_id:04d}"
+    if re.fullmatch(r"REP-\d+", tracking) and run("SELECT 1 FROM repair_returns WHERE tracking_code=%s AND id<>%s", (tracking, new_id)):
+        tracking = f"REP-{new_id:04d}"          # auto code already taken by someone else a moment ago -> give the next free one
     run("UPDATE repair_returns SET tracking_code=%s WHERE id=%s", (tracking, new_id))
     audit("ADD_REPAIR", f"{tracking} ({d['item']}, qty {d['qty']:g}) for {fac}; permission by {d.get('approved') or '-'}, "
                         f"gate pass brought to store by {d.get('carrier') or '-'}")
@@ -9685,33 +10048,39 @@ def _tab_repair_body():
     if not guard():
         return
     with st.expander("➕ Add repair / return"):
-        with st.form("rp_add"):
-            c1, c2, c3 = st.columns(3)
-            gate = c1.text_input("Gate Pass No*")
-            track = c2.text_input("Tracking Code (blank = auto REP-xxxx)")
-            rtype = c3.selectbox("Return Type", ["Returnable", "Non-Returnable"])
-            item = c1.text_input("Item Description*")
-            qty = c2.number_input("Qty*", min_value=0.0, step=1.0)
-            stype = c3.selectbox("Type", ["Repair", "Warranty Claim", "Rejected Return", "Other"])
-            supplier = c1.text_input("Supplier Name*")
-            sent = c2.date_input("Sent Date", value=date.today())
-            status = c3.selectbox("Status", ["Pending Return", "Returned", "Closed"])
-            ret = c2.date_input("Return Date (if returned)", value=date.today())
-            approved = c3.text_input("কার অনুমতিতে বাইরে যাচ্ছে* (নাম)")
-            carrier = c1.text_input("কে Gate Pass স্টোরে এনেছে* (নাম)")
-            if st.form_submit_button("Add"):
-                if not gate or not item or not supplier or qty <= 0:
-                    st.error("Gate Pass, Item, Supplier ar Qty (>0) lagbe.")
-                elif not approved.strip() or not carrier.strip():
-                    st.error("কার অনুমতিতে যাচ্ছে এবং কে Gate Pass স্টোরে এনেছে — দুটো নামই লিখুন।")
-                else:
-                    d = dict(gate=gate.strip(), track=track.strip(), item=item.strip(), qty=qty, stype=stype, rtype=rtype,
-                             supplier=supplier.strip(), sent=sent.strftime(DATE_FMT),
-                             ret=ret.strftime(DATE_FMT) if status != "Pending Return" else None, status=status,
-                             approved=approved.strip(), carrier=carrier.strip())
-                    tr = add_repair(FAC, d)
-                    if tr:
-                        done(f"Item added. Tracking Code: {tr}")
+        _g = st.session_state.get("rp_gen", 0)
+        try:
+            _auto = f"REP-{int(q_c('SELECT COALESCE(MAX(id),0)+1 AS n FROM repair_returns')[0]['n']):04d}"
+        except Exception:
+            _auto = ""
+        c1, c2, c3 = st.columns(3)
+        gate = c1.text_input("Gate Pass No*", key=f"rp_gate_{_g}")
+        track = c2.text_input("Tracking Code (auto - lagle bodlan)", value=_auto, key=f"rp_track_{_g}",
+                              help="Gate Pass-er sathe sathe-i auto code boshe jay, alada kore likhte hobe na.")
+        rtype = c3.selectbox("Return Type", ["Returnable", "Non-Returnable"], key=f"rp_rtype_{_g}")
+        item = c1.text_input("Item Description*", key=f"rp_item_{_g}")
+        qty = c2.number_input("Qty*", min_value=0.0, step=1.0, key=f"rp_qty_{_g}")
+        stype = c3.selectbox("Type", ["Repair", "Warranty Claim", "Rejected Return", "Other"], key=f"rp_stype_{_g}")
+        supplier = c1.text_input("Supplier Name*", key=f"rp_sup_{_g}")
+        sent = c2.date_input("Sent Date", value=date.today(), key=f"rp_sent_{_g}")
+        status = c3.selectbox("Status", ["Pending Return", "Returned", "Closed"], key=f"rp_status_{_g}")
+        ret = c2.date_input("Return Date (if returned)", value=date.today(), key=f"rp_ret_{_g}")
+        approved = c3.text_input("কার অনুমতিতে বাইরে যাচ্ছে* (নাম)", key=f"rp_appr_{_g}")
+        carrier = c1.text_input("কে Gate Pass স্টোরে এনেছে* (নাম)", key=f"rp_car_{_g}")
+        if st.button("Add", key=f"rp_add_btn_{_g}", type="primary"):
+            if not gate or not item or not supplier or qty <= 0:
+                st.error("Gate Pass, Item, Supplier ar Qty (>0) lagbe.")
+            elif not approved.strip() or not carrier.strip():
+                st.error("কার অনুমতিতে যাচ্ছে এবং কে Gate Pass স্টোরে এনেছে — দুটো নামই লিখুন।")
+            else:
+                d = dict(gate=gate.strip(), track=track.strip(), item=item.strip(), qty=qty, stype=stype, rtype=rtype,
+                         supplier=supplier.strip(), sent=sent.strftime(DATE_FMT),
+                         ret=ret.strftime(DATE_FMT) if status != "Pending Return" else None, status=status,
+                         approved=approved.strip(), carrier=carrier.strip())
+                tr = add_repair(FAC, d)
+                if tr:
+                    st.session_state["rp_gen"] = _g + 1
+                    done(f"Item added. Tracking Code: {tr}")
 
     if not rp.empty:
         with st.expander("✏️ Update / 🗑 Delete record"):
@@ -18566,6 +18935,7 @@ def _rr_form():
         for col, t in zip(h, ["#", "আইটেম", "ERP Code", "স্টক", "Unit (বদলানো যায়)", "রিসিভ পরিমাণ", "Rate (৳)", "অবস্থা", ""]):
             col.markdown(f'<div class="pv-th">{t}</div>', unsafe_allow_html=True)
         remove, qtys, rates, bad = None, [], [], False
+        xfers = []
         uoms = get_uoms()
         _pks, packs = _pk_states(fac, [x["sl"] for x in lines]), []
         can_write_ui = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
@@ -18604,6 +18974,10 @@ def _rr_form():
             _pk, _pk_bad = _pk_ui(f"rr_pk_{gen}_{ln['sl']}", _pks.get(int(ln["sl"])), float(q_))   # Pkt/Box/Roll question
             packs.append(_pk)
             bad = bad or _pk_bad
+            _xq, _xbad = _rx_xfer_ui(f"rr_xf_{gen}_{ln['sl']}", fac, {"item_name": ln["name"], "prod_id": ln["pid"], "size": ln["size"]},
+                                     float(q_), has_pack=bool(_pk), compact=True)
+            xfers.append(_xq)
+            bad = bad or _xbad
     if remove is not None:
         lines.pop(remove)
         st.session_state["rr_lines"] = lines
@@ -18632,11 +19006,13 @@ def _rr_form():
         elif not confirm_existing:
             st.error("এই challan আগে রিসিভ হয়েছে — নিশ্চিত করার টিক দিন।")
         elif guard():
-            n = save_supplier_receipt(fac, [{"sl": ln["sl"], "qty": q_, "rate": rt_, "pack": pk_} for ln, q_, rt_, pk_ in zip(lines, qtys, rates, packs)],
+            n = save_supplier_receipt(fac, [{"sl": ln["sl"], "qty": q_, "rate": rt_, "pack": pk_, "xfer": xf_} for ln, q_, rt_, pk_, xf_ in zip(lines, qtys, rates, packs, xfers)],
                                       tx_date, supplier, challan, notes.strip(), po_pending, rate_mode)
             if n:
                 who = st.session_state.get("user", "")
                 _rn = st.session_state.pop("_req_auto_note", "")
+                _rxn = st.session_state.pop("_rx_xfer_note", "")
+                _rn = (_rn + " " + _rxn).strip() if _rxn else _rn
                 st.session_state["ri_saved"] = {"user": who, "sr": challan, "kind": "rcv", "n": int(n), "qty": float(sum(qtys)),
                                                 "detail": supplier, "time": local_now().strftime("%d-%b-%Y %I:%M %p")}
                 st.session_state["rr_lines"] = []
@@ -20849,7 +21225,113 @@ def _hb_supplier_view(df):
 
 
 @_frag
+@tx
+def solve_hold_bills(ids, date_s, note=""):
+    """One click, many bills: marks every still-Open bill in `ids` as Resolved (same fields as the single Resolve)."""
+    ids = [int(i) for i in ids]
+    if not ids:
+        return False
+    who = st.session_state.get("user", "")
+    nt = (note or "Solved").strip()
+    nt = f"{nt} (by {who})" if who else nt
+    run("UPDATE hold_bills SET status='Resolved', resolved_date=%s, resolved_note=%s WHERE id = ANY(%s) AND COALESCE(status,'Open')='Open'",
+        (date_s, nt, ids))
+    audit("HOLD_BILL_RESOLVED", f"{len(ids)} hold bill(s) solved in one click: #{', #'.join(str(i) for i in sorted(ids)[:40])} - {nt}")
+    return True
+
+
+@tx
+def reopen_hold_bills(ids):
+    ids = [int(i) for i in ids]
+    if not ids:
+        return False
+    run("UPDATE hold_bills SET status='Open', resolved_date=NULL, resolved_note=NULL WHERE id = ANY(%s)", (ids,))
+    audit("HOLD_BILL_REOPEN", f"{len(ids)} hold bill(s) re-opened: #{', #'.join(str(i) for i in sorted(ids)[:40])}")
+    return True
+
+
+@_frag
+def _hb_solved_banner(can_write):
+    """Always-visible scoreboard: how many bills are still Open and how many got solved (today / this month / total)."""
+    fsql, fp = fw(FAC)
+    rows = q_c(f"SELECT COALESCE(status,'Open') AS status, COALESCE(resolved_date,'') AS rd FROM hold_bills WHERE 1=1{fsql}", fp)
+    today = local_now().date()
+    n_open = sum(1 for r in rows if r["status"] != "Resolved")
+    solved = [parse_date(r["rd"]) for r in rows if r["status"] == "Resolved"]
+    s_today = sum(1 for d in solved if d and d.date() == today)
+    s_month = sum(1 for d in solved if d and (d.year, d.month) == (today.year, today.month))
+    k = st.columns(4)
+    k[0].metric("🟠 এখনো Open", f"{n_open:,}")
+    k[1].metric("✅ আজ Solved", f"{s_today:,}")
+    k[2].metric("✅ এই মাসে Solved", f"{s_month:,}")
+    k[3].metric("✅ মোট Solved", f"{len(solved):,}")
+    with st.expander("🕘 সম্প্রতি Solved হয়েছে (ভুল হলে আবার Open করুন)"):
+        rs = qdf_c(f"""SELECT id, challan_no, invoice_no, supplier_name, item_name, COALESCE(qty,0) AS qty,
+                              COALESCE(resolved_date,'') AS resolved_date, COALESCE(resolved_note,'') AS resolved_note
+                       FROM hold_bills WHERE status='Resolved'{fsql} ORDER BY id DESC LIMIT 300""", fp)
+        if rs.empty:
+            st.caption("এখনো কোনো Hold Bill Solved হয়নি।")
+            return
+        rs = rs.copy()
+        rs["_d"] = [parse_date(x) for x in rs["resolved_date"]]
+        rs["_d"] = pd.to_datetime(rs["_d"], errors="coerce")
+        rs = rs.sort_values("_d", ascending=False, na_position="last").head(40)
+        gen = st.session_state.get("hbq_re_gen", 0)
+        ed = st.data_editor(pd.DataFrame({"↩ Reopen": False, "ID": rs["id"].values, "Solved on": rs["resolved_date"].values,
+                                          "Challan": rs["challan_no"].values, "Invoice": rs["invoice_no"].values,
+                                          "Supplier": rs["supplier_name"].values, "Item": rs["item_name"].values,
+                                          "Qty": rs["qty"].astype(float).values, "How solved": rs["resolved_note"].values}),
+                            hide_index=True, use_container_width=True, height=min(90 + 35 * len(rs), 380), key=f"hbq_re_ed_{gen}",
+                            disabled=["ID", "Solved on", "Challan", "Invoice", "Supplier", "Item", "Qty", "How solved"],
+                            column_config={"↩ Reopen": st.column_config.CheckboxColumn("↩ Reopen"),
+                                           "Qty": st.column_config.NumberColumn(format="%g")})
+        ids = [int(x) for x in ed.loc[ed["↩ Reopen"].astype(bool), "ID"]]
+        if st.button(f"↩ {len(ids)}টি আবার Open করুন", key=f"hbq_re_btn_{gen}", disabled=(not ids or not can_write)):
+            if guard() and reopen_hold_bills(ids):
+                st.session_state["hbq_re_gen"] = gen + 1
+                done(f"↩ {len(ids)}টি Hold Bill আবার Open করা হয়েছে।")
+
+
+@_frag
+def _hb_quick_solve(df, can_write):
+    """Tick the bills that are now solved, press ONE button - no need to open each bill."""
+    op = df[df["status"] == "Open"] if not df.empty else df
+    with st.expander("⚡ এক ক্লিকে Solved — টিক দিন, একবার চাপুন", expanded=True):
+        if not can_write:
+            st.caption("এর জন্য login + নির্দিষ্ট Unit নির্বাচন (CONSOLIDATED নয়) + non-Auditor role লাগবে।")
+            return
+        if op.empty:
+            st.caption("এই ফিল্টারে Open বিল নেই। (Status = Open রেখে ফিল্টার করুন)")
+            return
+        op = op.head(300)
+        gen = st.session_state.get("hbq_gen", 0)
+        c1, c2, c3 = st.columns([1.1, 1.3, 2.4])
+        sel_all = c1.checkbox("সব দেখানো লাইন টিক", key=f"hbq_all_{gen}", help="নিচের তালিকার সব লাইন একসাথে Solved ধরা হবে (ফিল্টার/সার্চ করে নিন)।")
+        sd = c2.date_input("সমাধানের তারিখ", value=local_now().date(), max_value=local_now().date(), key=f"hbq_dt_{gen}")
+        note = c3.text_input("Note (ঐচ্ছিক)", key=f"hbq_note_{gen}", placeholder="e.g. Bill pass hoyeche / ERP-te entry hoyeche")
+        tbl = pd.DataFrame({"Solved ✔": [bool(sel_all)] * len(op), "ID": op["id"].values, "Received": op["received_date"].values,
+                            "Challan": op["challan_no"].values, "Invoice": op["invoice_no"].values, "Supplier": op["supplier_name"].values,
+                            "Item": op["item_name"].values, "Qty": op["qty"].astype(float).values, "Problem": op["problem_type"].values,
+                            "Responsible": op["responsible"].values, "Days Held": op["days_held"].values})
+        ed = st.data_editor(tbl, hide_index=True, use_container_width=True, height=min(90 + 35 * len(tbl), 420),
+                            key=f"hbq_ed_{gen}_{int(sel_all)}", disabled=[c for c in tbl.columns if c != "Solved ✔"],
+                            column_config={"Solved ✔": st.column_config.CheckboxColumn("✅ Solved"),
+                                           "Qty": st.column_config.NumberColumn(format="%g")})
+        ids = [int(x) for x in ed.loc[ed["Solved ✔"].astype(bool), "ID"]]
+        if len(df[df["status"] == "Open"]) > len(op):
+            st.caption(f"প্রথম {len(op)}টি দেখানো হচ্ছে — বাকিগুলো ফিল্টার / সার্চ করে নিন।")
+        if st.button(f"✅ {len(ids)}টি Solved করুন", key=f"hbq_btn_{gen}", type="primary", disabled=not ids, use_container_width=True):
+            if guard() and solve_hold_bills(ids, sd.strftime(DATE_FMT), note.strip()):
+                st.session_state["hbq_gen"] = gen + 1
+                done(f"✅ {len(ids)}টি Hold Bill Solved হয়েছে।")
+
+
 def _hb_list():
+    _can_w = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES and not is_cons_view
+    try:
+        _hb_solved_banner(_can_w)
+    except Exception as _e:
+        st.caption(f"Solved summary load kora jayni: {_e}")
     df, lbl = _hb_load("hbl", "Open")
     if df.empty:
         st.info("এই শর্তে কোনো Hold Bill নেই।")
@@ -20880,6 +21362,7 @@ def _hb_list():
         export_buttons(show, "hold_bills")
 
     can_write = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES and not is_cons_view
+    _hb_quick_solve(df, can_write)
     with st.expander("✏️ Edit / ✅ Resolve / 🗑 Delete"):
         if not can_write:
             st.caption("এর জন্য login + নির্দিষ্ট Unit নির্বাচন (CONSOLIDATED নয়) + non-Auditor role লাগবে।")
