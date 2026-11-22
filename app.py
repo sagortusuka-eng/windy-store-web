@@ -8020,6 +8020,72 @@ def post_receipt_transfers(fac, rows, date_s, time_s, note):
 
 
 @_frag
+def _rx_item_transfer_panel():
+    """Direct transfer of ANY item that is in stock here (e.g. 100 pcs received long ago -> send 30 to the other unit)."""
+    can_w = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
+    with st.expander("🔁 Je kono item-er stock theke onno unit-e transfer (purono receive-kora maal-o)", expanded=False):
+        if not FAC or "CONSOLIDATED" in FAC:
+            st.caption("Upore nirdisto ekta Unit select korun - CONSOLIDATED-e eta kaj kore na.")
+            return
+        if not can_w:
+            st.caption("Login + non-Auditor role lagbe.")
+            return
+        dest = other_factory(FAC)
+        gen = st.session_state.get("rxi_gen", 0)
+        st.caption(f"{short_fac(FAC)}-er je kono item-er ekhon-er stock theke {short_fac(dest)}-e pathan. "
+                   "Kon challan-e receive hoyechilo seta lagbe na - FIFO hisabe purono challan theke jabe dhora hoy.")
+        term = st.text_input("🔍 Item khujun (nam / ERP code / size / serial)", key=f"rxi_term_{gen}").strip()
+        if len(term) < 2:
+            st.caption("Kom-pokkhe 2 ta okkhor likhun.")
+            return
+        cands = [r for r in search_items(FAC, term, in_stock_only=True)[:40]]
+        if not cands:
+            st.info("Stock ache emon kono item paoa jayni.")
+            return
+        labels = {f"{r['item_name']} [{r['size'] or '-'}] · {r['prod_id']} · স্টক {float(r['stock']):g}": r for r in cands}
+        item = labels[st.selectbox(f"Item ({len(labels)}টি)", list(labels), key=f"rxi_pick_{gen}")]
+        if is_no_transfer(item["item_name"]):
+            st.error("🚫 Ei item printing item - onno unit-e transfer kora jay na.")
+            return
+        other = find_transferable_in_other(item["prod_id"], item["item_name"], dest, item["size"])
+        if not other:
+            st.error(f"{short_fac(dest)}-e ei item (same name / size / ERP code) paoa jacche na - age oi unit-e item add korun.")
+            return
+        unit = _unit_of(FAC, item["sl_no"]) or "Pcs"
+        integer = str(unit).strip().lower() in INTEGER_UOMS
+        stock = float(item["stock"] or 0)
+        m1, m2, m3 = st.columns(3)
+        m1.metric(f"{short_fac(FAC)} stock", f"{stock:g} {unit}")
+        m2.metric(f"{short_fac(dest)} stock", f"{float(other['stock'] or 0):g} {unit}")
+        m3.metric("Match", f"{other['item_name'][:22]}")
+        if other.get("level") == "fuzzy":
+            st.info(f"ℹ️ Nam hubohu ek noy: ei unit-e **{item['item_name']}**, onno unit-e **{other['item_name']}** - same item kina dekhe nin.")
+        c1, c2 = st.columns(2)
+        qty = c1.number_input(f"{short_fac(dest)}-e transfer qty ({unit})", min_value=0.0, step=1.0 if integer else 0.5, format="%g", key=f"rxi_qty_{gen}")
+        tdate = c2.date_input("Transfer tarikh", value=local_now().date(), max_value=local_now().date(), key=f"rxi_dt_{gen}")
+        note = st.text_input("Remarks (ঐচ্ছিক)", key=f"rxi_note_{gen}", placeholder="e.g. Windy-te bearing sesh")
+        leave = st.checkbox("📌 Note Board-e reminder rakhun: ERP-te transfer entry din", value=True, key=f"rxi_leave_{gen}")
+        if qty > stock + 1e-9:
+            st.error(f"Stock-e matro {stock:g} {unit} ache.")
+        elif qty > 0:
+            st.caption(f"✅ Transfer-er por: {short_fac(FAC)} {stock - qty:g} · {short_fac(dest)} {float(other['stock'] or 0) + qty:g} {unit}")
+        if st.button(f"🔁 {qty:g} {unit} → {short_fac(dest)} transfer korun", key=f"rxi_btn_{gen}", type="primary",
+                     disabled=(qty <= 0 or qty > stock + 1e-9), use_container_width=True):
+            sug = {"item_name": other["item_name"], "size": item["size"], "prod_id": other["prod_id"], "unit": unit,
+                   "dst_factory": dest, "dst_sl": int(other["sl_no"]), "src_factory": FAC, "src_sl": int(item["sl_no"]),
+                   "src_prod_id": item["prod_id"], "src_item_name": item["item_name"], "qty": float(qty)}
+            if guard():
+                ref = do_manual_transfer(sug, float(qty), tdate.strftime(DATE_FMT), note.strip(), leave)
+                if ref:
+                    try:
+                        _cover_base.clear()
+                    except Exception:
+                        pass
+                    st.session_state["rxi_gen"] = gen + 1
+                    done(f"✅ {float(qty):g} {unit} {item['item_name']} → {short_fac(dest)} transfer hoyeche (Ref {ref}).")
+
+
+@_frag
 def _rx_post_transfer_panel():
     """Pick yesterday's (or any day's) challan lines, type how many pcs go to the other unit, one button."""
     can_w = bool(st.session_state.get("user")) and st.session_state.get("role") not in READ_ONLY_ROLES
@@ -8381,6 +8447,10 @@ def tab_transfer_history():
                  hide_index=True, use_container_width=True, height=380)
     export_buttons(view.assign(erp_status=view["erp_status"].astype(str).str.replace(r"^[^A-Za-z]+", "", regex=True))
                    if "erp_status" in view.columns else view, "transfer_history")
+    try:
+        _rx_item_transfer_panel()
+    except Exception as _e:
+        st.warning(f"Item transfer panel load kora jayni: {_e}")
     try:
         _rx_post_transfer_panel()
     except Exception as _e:
