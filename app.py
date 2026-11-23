@@ -8172,9 +8172,52 @@ def _rx_post_transfer_panel():
                     done(f"✅ {n}টি line transfer hoyeche ({tot:g} → {short_fac(dest)}). Challan-wise tracking-e dekhte paben.")
 
 
-def _rx_challan_tracking(psql, pp):
+def _rx_challan_totals(d1, d2):
+    """Every received challan in the period: how many pcs were transferred, issued (FIFO) and are still in stock."""
+    fsql, fp = fw(FAC)
+    df = qdf_c(f"""SELECT id, factory_name, sl_no, prod_id, item_name, COALESCE(qty,0) AS qty, date,
+                          COALESCE(challan_no,'') AS challan_no, COALESCE(supplier_name,'') AS supplier
+                   FROM transactions WHERE trans_type='Supplier. Rec'{fsql} ORDER BY id DESC LIMIT 3000""", fp)
+    if not df.empty:
+        df = period_filter_df(df, "date", d1, d2)
+    if df.empty:
+        st.info("Ei somoy-e kono Supplier receive nei.")
+        return
+    total_lines = len(df)
+    df = df.head(250)
+    res, _alloc = _rx_fifo_compute(df.to_dict("records"))
+    rows = []
+    for r in df.to_dict("records"):
+        n = res[int(r["id"])]
+        rows.append({"Challan": r["challan_no"] or "(challan nei)", "Supplier": r["supplier"], "Unit": short_fac(r["factory_name"]),
+                     "Received On": r["date"], "Received": float(r["qty"]), "Transfer": n["xl"] + n["xo"], "Issued": n["iss"],
+                     "Adj (-)": n["adj"], "Baki": float(n["left"] or 0.0), "_pre": n["pre"]})
+    out = pd.DataFrame(rows)
+    g = (out.groupby(["Challan", "Supplier", "Unit"], as_index=False, sort=False)
+            .agg(**{"Received On": ("Received On", "first"), "Lines": ("Received", "count"), "Received": ("Received", "sum"),
+                    "Transfer": ("Transfer", "sum"), "Issued": ("Issued", "sum"), "Adj (-)": ("Adj (-)", "sum"), "Baki": ("Baki", "sum")}))
+    g["Status"] = ["✅ Shesh" if b <= 1e-9 else "🟠 Baki ache" for b in g["Baki"]]
+    k = st.columns(5)
+    k[0].metric("Challan", f"{len(g):,}")
+    k[1].metric("Received", f"{g['Received'].sum():g}")
+    k[2].metric("Transfer", f"{g['Transfer'].sum():g}")
+    k[3].metric("Issued", f"{g['Issued'].sum():g}")
+    k[4].metric("Baki", f"{g['Baki'].sum():g}")
+    st.dataframe(g, hide_index=True, use_container_width=True, height=min(440, 70 + 35 * len(g)),
+                 column_config={c: st.column_config.NumberColumn(format="%g") for c in ("Received", "Transfer", "Issued", "Adj (-)", "Baki")})
+    st.caption("Issued / Baki FIFO hisabe (purono maal age beray dhora). Line-wise detail ar kon SR-e koto gelo dekhte niche '📊 Challan FIFO' khulun."
+               + (f" Prothom 250-ti line dekhano holo (mot {total_lines:,}) - somoy choto korun." if total_lines > 250 else ""))
+    export_buttons(g, "challan_totals")
+
+
+def _rx_challan_tracking(psql, pp, d1=None, d2=None):
     """Which receipt / challan each transfer came from, how many pcs were sent, how many stayed."""
-    with st.expander("📦 Challan-wise tracking: kon challan-er receive theke koto pcs transfer holo", expanded=False):
+    with st.expander("📦 Challan-wise tracking: kon challan-er receive theke koto pcs transfer holo ba koto pcs issue holo", expanded=True):
+        try:
+            _rx_challan_totals(d1, d2)
+        except Exception as _e:
+            st.warning(f"Challan hisab load kora jayni: {_e}")
+        st.markdown("**🔁 Challan-er sathe link kora transfer-er list**")
         fsql, fp = "", []
         if FAC and "CONSOLIDATED" not in FAC:
             fsql, fp = " AND (t.factory_name=%s OR x.dest_factory=%s)", [FAC, FAC]
@@ -8440,9 +8483,9 @@ def tab_transfer_history():
     else:
         tf = qdf(cols_sql + " WHERE (source_factory=%s OR dest_factory=%s)" + _psql + " ORDER BY id DESC", (FAC, FAC) + tuple(_pp))
     if not tf.empty:                       # ERP status column (🔴 Pending / ✅ Done / ⚠ changed after Done) + days pending
-        _pp = _erp_prepare(tf.rename(columns={"erp_date": "erp_done_date", "erp_by": "erp_done_by"}))
-        tf["erp_status"] = _erp_status_text(_pp)
-        tf["pending_days"] = _pp["pending_days"]
+        _erp_df = _erp_prepare(tf.rename(columns={"erp_date": "erp_done_date", "erp_by": "erp_done_by"}))
+        tf["erp_status"] = _erp_status_text(_erp_df)
+        tf["pending_days"] = _erp_df["pending_days"]
     tf = tf.drop(columns=["erp_snap_qty", "erp_snap_date"])
     term = st.text_input("🔍 Search (ref / item / code / factory / date)", key="tf_search")
     view = tf
@@ -8461,7 +8504,7 @@ def tab_transfer_history():
     except Exception as _e:
         st.warning(f"Challan transfer panel load kora jayni: {_e}")
     try:
-        _rx_challan_tracking(_psql, _pp)
+        _rx_challan_tracking(_psql, _pp, _d1, _d2)
     except Exception as _e:
         st.warning(f"Challan tracking load kora jayni: {_e}")
     try:
@@ -10074,6 +10117,76 @@ def tab_requisition():
 # ============================================================
 #  TAB 7 - REPAIR & RETURNS
 # ============================================================
+def ensure_repair_partial():
+    """Additive: partly returned qty per line + a small log of every return entry."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE repair_returns ADD COLUMN IF NOT EXISTS returned_qty REAL DEFAULT 0")
+            cur.execute("""CREATE TABLE IF NOT EXISTS repair_return_log (
+                id SERIAL PRIMARY KEY, repair_id INTEGER, factory_name TEXT, tracking_code TEXT, gate_pass_no TEXT,
+                item_name TEXT, qty REAL, return_date TEXT, note TEXT DEFAULT '', entered_by TEXT, created_at TEXT)""")
+            cur.execute("CREATE INDEX IF NOT EXISTS ix_rrl_repair ON repair_return_log(repair_id)")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+@tx
+def add_repair_multi(fac, d, lines):
+    """ONE gate pass, many items: one row per item, all sharing the gate pass no and ONE tracking code."""
+    user = st.session_state.get("user", "")
+    ids = []
+    for ln in lines:
+        rid = run("""INSERT INTO repair_returns (factory_name, tracking_code, gate_pass_no, item_name, qty, source_type, return_type,
+                     supplier_name, sent_date, return_date, status, remarks, officer_name, approved_by, gatepass_carrier, returned_qty)
+                     VALUES (%s,'TMP',%s,%s,%s,%s,%s,%s,%s,NULL,'Pending Return','',%s,%s,%s,0) RETURNING id""",
+                  (fac, d["gate"], ln["item"], ln["qty"], d["stype"], d["rtype"], d["supplier"], d["sent"], user,
+                   d.get("approved", ""), d.get("carrier", "")))[0][0]
+        ids.append(int(rid))
+    tracking = d["track"] or f"REP-{ids[0]:04d}"
+    if re.fullmatch(r"REP-\d+", tracking) and run("SELECT 1 FROM repair_returns WHERE tracking_code=%s AND id<>ALL(%s)", (tracking, ids)):
+        tracking = f"REP-{ids[0]:04d}"
+    run("UPDATE repair_returns SET tracking_code=%s WHERE id = ANY(%s)", (tracking, ids))
+    audit("ADD_REPAIR", f"{tracking}: gate pass {d['gate']} with {len(lines)} item(s) "
+                        + "; ".join(f"{ln['item']} x{ln['qty']:g}" for ln in lines)[:300]
+                        + f" for {fac}; permission by {d.get('approved') or '-'}, brought by {d.get('carrier') or '-'}")
+    return tracking
+
+
+@tx
+def record_repair_return(rows, date_s, note):
+    """rows = [(repair_id, qty_returned_now)]. Partly returned lines stay 'Pending Return' with the rest still due."""
+    user = st.session_state.get("user", "")
+    n = 0
+    for rid, q_ in rows:
+        q_ = float(q_)
+        if q_ <= 0:
+            continue
+        r = run("""SELECT COALESCE(qty,0), CASE WHEN status IN ('Returned','Closed') THEN COALESCE(qty,0) ELSE COALESCE(returned_qty,0) END,
+                          status, tracking_code, gate_pass_no, item_name, factory_name, COALESCE(remarks,'')
+                   FROM repair_returns WHERE id=%s FOR UPDATE""", (int(rid),))
+        if not r:
+            raise ValueError(f"Record {rid} paoa jayni.")
+        qty, got, status, trk, gp, item, fac, rem = float(r[0][0]), float(r[0][1]), r[0][2], r[0][3], r[0][4], r[0][5], r[0][6], r[0][7]
+        if status != "Pending Return":
+            raise ValueError(f"{item}: ei line already {status}.")
+        if q_ > qty - got + 1e-9:
+            raise ValueError(f"{item}: baki matro {qty - got:g}, {q_:g} ferot dewa jabe na.")
+        new = got + q_
+        full = new >= qty - 1e-9
+        tag = f"[{date_s}: {q_:g} ferot]"
+        run("UPDATE repair_returns SET returned_qty=%s, status=%s, return_date=%s, remarks=%s WHERE id=%s",
+            (new, "Returned" if full else "Pending Return", date_s if full else None, (rem + " " + tag).strip()[-900:], int(rid)))
+        run("""INSERT INTO repair_return_log (repair_id, factory_name, tracking_code, gate_pass_no, item_name, qty, return_date, note, entered_by, created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (int(rid), fac, trk, gp, item, q_, date_s, note or "", user, local_now().strftime("%d-%b-%Y %I:%M %p")))
+        audit("REPAIR_RETURN", f"{trk} / GP {gp}: {item} {q_:g} returned ({new:g} of {qty:g}){' - FULL' if full else ' - partial'}")
+        n += 1
+    return n
+
+
 @tx
 def add_repair(fac, d):
     run("""INSERT INTO repair_returns (factory_name, tracking_code, gate_pass_no, item_name, qty, source_type, return_type,
@@ -10097,6 +10210,7 @@ def update_repair(rid, d):
            supplier_name=%s, sent_date=%s, return_date=%s, status=%s, approved_by=%s, gatepass_carrier=%s WHERE id=%s""",
         (d["gate"], d["item"], d["qty"], d["stype"], d["rtype"], d["supplier"], d["sent"], d["ret"], d["status"],
          d.get("approved", ""), d.get("carrier", ""), rid))
+    run("UPDATE repair_returns SET returned_qty=COALESCE(qty,0) WHERE id=%s AND status IN ('Returned','Closed')", (rid,))
     audit("EDIT_REPAIR", f"Edited repair record {rid}: {d['item']}; permission by {d.get('approved') or '-'}, "
                          f"gate pass brought by {d.get('carrier') or '-'}")
     return True
@@ -10104,6 +10218,7 @@ def update_repair(rid, d):
 
 @tx
 def delete_repair(rid):
+    run("DELETE FROM repair_return_log WHERE repair_id=%s", (rid,))
     run("DELETE FROM repair_returns WHERE id=%s", (rid,))
     audit("DELETE_REPAIR", f"Deleted repair record {rid}")
     return True
@@ -10161,10 +10276,13 @@ def _rpx_table(rp, show_unit):
             late = str(r.get("status")) == "Pending Return" and float(ag) > _RPX_OVERDUE_DAYS
             ag_html = f"<span class='rpx-age' style='color:{'#B91C1C' if late else '#172033'}'>{int(ag)} d{' ⚠' if late else ''}</span>"
         q = float(r.get("qty") or 0)
+        _ret = float(r.get("returned_qty") or 0)
+        _qcell = f"{q:g}" + (f"<br><small style='color:#92400E'>ferot {_ret:g} · baki {max(q - _ret, 0):g}</small>"
+                             if (0 < _ret < q and str(r.get("status")) == "Pending Return") else "")
         h.append(f"<tr><td class='rpx-code'>{e(str(r.get('tracking_code') or ''))}</td>"
                  + (f"<td>{e(short_fac(str(r.get('factory_name') or '')))}</td>" if show_unit else "")
                  + f"<td>{e(str(r.get('gate_pass_no') or ''))}</td><td><b>{e(str(r.get('item_name') or ''))}</b></td>"
-                 f"<td class='n'>{q:g}</td><td><span class='rpx-chip'>{e(str(r.get('source_type') or ''))}</span></td>"
+                 f"<td class='n'>{_qcell}</td><td><span class='rpx-chip'>{e(str(r.get('source_type') or ''))}</span></td>"
                  f"<td>{e(str(r.get('return_type') or ''))}</td><td>{e(str(r.get('supplier_name') or ''))}</td>"
                  f"<td>{e(str(r.get('sent_date') or ''))}</td><td>{e(str(r.get('return_date') or ''))}</td>"
                  f"<td><span class='rpx-pill' style='background:{bg};color:{fg}'>{e(str(r.get('status') or ''))}</span></td>"
@@ -10190,9 +10308,11 @@ def _tab_repair_body():
         except Exception as e:
             st.error(f"Return to Store load kora jayni: {e}")
         return
+    run_once_per_process("repair_partial_cols", ensure_repair_partial)
     rp = qdf_c(f"""SELECT id, tracking_code, factory_name, gate_pass_no, item_name, COALESCE(qty,0) AS qty, source_type,
                  return_type, supplier_name, COALESCE(approved_by,'') AS approved_by,
-                 COALESCE(gatepass_carrier,'') AS gatepass_carrier, sent_date, return_date, status, officer_name
+                 COALESCE(gatepass_carrier,'') AS gatepass_carrier, sent_date, return_date, status, officer_name,
+                 CASE WHEN status IN ('Returned','Closed') THEN COALESCE(qty,0) ELSE COALESCE(returned_qty,0) END AS returned_qty
                  FROM repair_returns WHERE 1=1{FSQL} ORDER BY id DESC""", FP)
     _d1, _d2, _lbl = report_period("rp", label="📅 Sent Date সময়কাল (মাস / তারিখ)")
     rp = period_filter_df(rp, "sent_date", _d1, _d2)
@@ -10205,7 +10325,8 @@ def _tab_repair_body():
         rp["aging_days"] = rp.apply(lambda r: age_days(r["sent_date"], r["return_date"]), axis=1)
         _n_pend = int((rp["status"] == "Pending Return").sum())
         _n_late = int(((rp["status"] == "Pending Return") & (pd.to_numeric(rp["aging_days"], errors="coerce").fillna(0) > _RPX_OVERDUE_DAYS)).sum())
-        _q_pend = float(pd.to_numeric(rp.loc[rp["status"] == "Pending Return", "qty"], errors="coerce").fillna(0).sum())
+        _pm = rp["status"] == "Pending Return"
+        _q_pend = float((pd.to_numeric(rp.loc[_pm, "qty"], errors="coerce").fillna(0) - pd.to_numeric(rp.loc[_pm, "returned_qty"], errors="coerce").fillna(0)).sum())
         st.markdown("<div class='rpx-kpis'>"
                     f"<div class='rpx-k' style='--c:#13367F'><div class='l'>মোট Record</div><div class='v'>{len(rp):,}</div></div>"
                     f"<div class='rpx-k' style='--c:#D99A06'><div class='l'>ফেরত বাকি (Pending)</div><div class='v'>{_n_pend:,}</div><div class='d'>মোট Qty {_q_pend:g}</div></div>"
@@ -10221,9 +10342,21 @@ def _tab_repair_body():
         st.info("এই সময়ে কোনো Repair / Gate Pass record নেই।")
     export_buttons(rp, "repair_returns")
 
+    if not rp.empty:
+        with st.expander("📦 Gate Pass-wise summary (ek Gate Pass-e koto item, koto pathano, koto ferot, koto baki)"):
+            gp = rp.copy()
+            gp["returned_qty"] = pd.to_numeric(gp["returned_qty"], errors="coerce").fillna(0.0)
+            gs = (gp.groupby(["gate_pass_no", "tracking_code", "supplier_name", "sent_date"], as_index=False, sort=False)
+                    .agg(Items=("item_name", "count"), Pathano=("qty", "sum"), Ferot=("returned_qty", "sum")))
+            gs["Baki"] = (gs["Pathano"] - gs["Ferot"]).clip(lower=0)
+            gs["Status"] = ["✅ Shob ferot" if b <= 1e-9 else ("🟡 Partial" if f > 0 else "🟠 Ferot baki") for b, f in zip(gs["Baki"], gs["Ferot"])]
+            st.dataframe(gs.rename(columns={"gate_pass_no": "Gate Pass", "tracking_code": "Tracking", "supplier_name": "Supplier", "sent_date": "Sent"}),
+                         hide_index=True, use_container_width=True, height=min(80 + 35 * len(gs), 380),
+                         column_config={c: st.column_config.NumberColumn(format="%g") for c in ("Pathano", "Ferot", "Baki")})
+
     if not guard():
         return
-    with st.expander("➕ Add repair / return"):
+    with st.expander("➕ Add repair / return  (ek Gate Pass-e ek-er beshi item)"):
         _g = st.session_state.get("rp_gen", 0)
         try:
             _auto = f"REP-{int(q_c('SELECT COALESCE(MAX(id),0)+1 AS n FROM repair_returns')[0]['n']):04d}"
@@ -10232,31 +10365,90 @@ def _tab_repair_body():
         c1, c2, c3 = st.columns(3)
         gate = c1.text_input("Gate Pass No*", key=f"rp_gate_{_g}")
         track = c2.text_input("Tracking Code (auto - lagle bodlan)", value=_auto, key=f"rp_track_{_g}",
-                              help="Gate Pass-er sathe sathe-i auto code boshe jay, alada kore likhte hobe na.")
+                              help="Ek Gate Pass-er shob item-er ek-i Tracking Code hoy. Gate Pass-er sathe sathe auto boshe jay.")
         rtype = c3.selectbox("Return Type", ["Returnable", "Non-Returnable"], key=f"rp_rtype_{_g}")
-        item = c1.text_input("Item Description*", key=f"rp_item_{_g}")
-        qty = c2.number_input("Qty*", min_value=0.0, step=1.0, key=f"rp_qty_{_g}")
-        stype = c3.selectbox("Type", ["Repair", "Warranty Claim", "Rejected Return", "Other"], key=f"rp_stype_{_g}")
         supplier = c1.text_input("Supplier Name*", key=f"rp_sup_{_g}")
         sent = c2.date_input("Sent Date", value=date.today(), key=f"rp_sent_{_g}")
-        status = c3.selectbox("Status", ["Pending Return", "Returned", "Closed"], key=f"rp_status_{_g}")
-        ret = c2.date_input("Return Date (if returned)", value=date.today(), key=f"rp_ret_{_g}")
-        approved = c3.text_input("কার অনুমতিতে বাইরে যাচ্ছে* (নাম)", key=f"rp_appr_{_g}")
-        carrier = c1.text_input("কে Gate Pass স্টোরে এনেছে* (নাম)", key=f"rp_car_{_g}")
-        if st.button("Add", key=f"rp_add_btn_{_g}", type="primary"):
-            if not gate or not item or not supplier or qty <= 0:
-                st.error("Gate Pass, Item, Supplier ar Qty (>0) lagbe.")
+        stype = c3.selectbox("Type", ["Repair", "Warranty Claim", "Rejected Return", "Other"], key=f"rp_stype_{_g}")
+        approved = c1.text_input("কার অনুমতিতে বাইরে যাচ্ছে* (নাম)", key=f"rp_appr_{_g}")
+        carrier = c2.text_input("কে Gate Pass স্টোরে এনেছে* (নাম)", key=f"rp_car_{_g}")
+        st.markdown("**Item lines** — ei Gate Pass-er prottek item ek line-e (niche '+' diye aro line jug korun)")
+        lines_df = st.data_editor(pd.DataFrame({"Item": ["", "", ""], "Qty": [0.0, 0.0, 0.0]}), num_rows="dynamic", hide_index=True,
+                                  use_container_width=True, key=f"rp_lines_{_g}",
+                                  column_config={"Item": st.column_config.TextColumn("Item Description"),
+                                                 "Qty": st.column_config.NumberColumn("Qty", min_value=0.0, step=1.0, format="%g")})
+        _items = []
+        _half = False
+        for r_ in lines_df.to_dict("records"):
+            nm = str(r_.get("Item") or "").strip()
+            qv = r_.get("Qty")
+            qv = 0.0 if qv is None or pd.isna(qv) else float(qv)
+            if nm and qv > 0:
+                _items.append({"item": nm, "qty": qv})
+            elif nm or qv > 0:
+                _half = True
+        if _half:
+            st.warning("Kono line-e Item ba Qty khali - duto-i dile tobe line-ti dhora hobe.")
+        if st.button(f"Add ({len(_items)} item)", key=f"rp_add_btn_{_g}", type="primary", disabled=not _items):
+            if not gate.strip() or not supplier.strip():
+                st.error("Gate Pass ar Supplier lagbe.")
             elif not approved.strip() or not carrier.strip():
                 st.error("কার অনুমতিতে যাচ্ছে এবং কে Gate Pass স্টোরে এনেছে — দুটো নামই লিখুন।")
             else:
-                d = dict(gate=gate.strip(), track=track.strip(), item=item.strip(), qty=qty, stype=stype, rtype=rtype,
-                         supplier=supplier.strip(), sent=sent.strftime(DATE_FMT),
-                         ret=ret.strftime(DATE_FMT) if status != "Pending Return" else None, status=status,
-                         approved=approved.strip(), carrier=carrier.strip())
-                tr = add_repair(FAC, d)
+                d = dict(gate=gate.strip(), track=track.strip(), stype=stype, rtype=rtype, supplier=supplier.strip(),
+                         sent=sent.strftime(DATE_FMT), approved=approved.strip(), carrier=carrier.strip())
+                tr = add_repair_multi(FAC, d, _items)
                 if tr:
                     st.session_state["rp_gen"] = _g + 1
-                    done(f"Item added. Tracking Code: {tr}")
+                    done(f"✅ Gate Pass {gate.strip()}: {len(_items)}টি item add hoyeche. Tracking Code: {tr}")
+
+    with st.expander("↩️ Return entry — ferot ashle (partial ba full) ekhane likhun"):
+        pend = qdf_c(f"""SELECT id, tracking_code, gate_pass_no, item_name, COALESCE(qty,0) AS qty, COALESCE(returned_qty,0) AS returned_qty,
+                                supplier_name, sent_date
+                         FROM repair_returns WHERE status='Pending Return'{FSQL} ORDER BY id DESC LIMIT 600""", FP)
+        if pend.empty:
+            st.info("Ferot baki kono item nei.")
+        else:
+            pend = pend.copy()
+            pend["gkey"] = pend["gate_pass_no"].astype(str) + " ¦ " + pend["tracking_code"].astype(str)
+            grp = pend.groupby("gkey", sort=False)
+            glab = {k: f"GP {v['gate_pass_no'].iloc[0]} · {v['tracking_code'].iloc[0]} · {v['supplier_name'].iloc[0]} · {len(v)}টি item baki"
+                    for k, v in grp}
+            gsel = st.selectbox("Gate Pass", list(glab), format_func=lambda k: glab.get(k, k), key="rpr_gp")
+            sub = pend[pend["gkey"] == gsel]
+            _rg = st.session_state.get("rpr_gen", 0)
+            allb = st.checkbox("সব baki ekbare ferot", key=f"rpr_all_{_rg}")
+            tbl = pd.DataFrame({"Ekhon ferot": (sub["qty"] - sub["returned_qty"]).astype(float).values if allb else 0.0,
+                                "Item": sub["item_name"].values, "Pathano": sub["qty"].astype(float).values,
+                                "Ager ferot": sub["returned_qty"].astype(float).values,
+                                "Baki": (sub["qty"] - sub["returned_qty"]).astype(float).values, "ID": sub["id"].values})
+            ed = st.data_editor(tbl, hide_index=True, use_container_width=True, key=f"rpr_ed_{_rg}_{int(allb)}_{abs(hash(gsel)) % 100000}",
+                                disabled=["Item", "Pathano", "Ager ferot", "Baki", "ID"],
+                                column_config={"Ekhon ferot": st.column_config.NumberColumn("↩ Ekhon ferot", min_value=0.0, step=1.0, format="%g"),
+                                               "Pathano": st.column_config.NumberColumn(format="%g"),
+                                               "Ager ferot": st.column_config.NumberColumn(format="%g"),
+                                               "Baki": st.column_config.NumberColumn(format="%g")})
+            pk = ed[ed["Ekhon ferot"].fillna(0).astype(float) > 0]
+            over = pk[pk["Ekhon ferot"].astype(float) > pk["Baki"].astype(float) + 1e-9]
+            if not over.empty:
+                st.error("Baki-r cheye beshi: " + ", ".join(f"{r['Item']} ({r['Ekhon ferot']:g} > {r['Baki']:g})" for r in over.to_dict("records")))
+            e1, e2 = st.columns([1.2, 2.4])
+            rdate = e1.date_input("Ferot-er tarikh", value=local_now().date(), max_value=local_now().date(), key=f"rpr_dt_{_rg}")
+            rnote = e2.text_input("Note (ঐচ্ছিক)", key=f"rpr_note_{_rg}")
+            if st.button(f"↩ {len(pk)}টি item-er ferot save korun", key=f"rpr_btn_{_rg}", type="primary", disabled=(pk.empty or not over.empty),
+                         use_container_width=True):
+                n_ = record_repair_return([(int(r["ID"]), float(r["Ekhon ferot"])) for r in pk.to_dict("records")], rdate.strftime(DATE_FMT), rnote.strip())
+                if n_:
+                    st.session_state["rpr_gen"] = _rg + 1
+                    done(f"✅ {n_}টি item-er ferot save hoyeche. Baki thakle porer bar abar likhte paren.")
+        with st.expander("🕘 Shomprotik ferot entry (log)"):
+            lg = qdf_c(f"""SELECT return_date AS date, tracking_code, gate_pass_no, item_name, qty, note, entered_by
+                           FROM repair_return_log WHERE 1=1{FSQL} ORDER BY id DESC LIMIT 60""", FP)
+            if lg.empty:
+                st.caption("Ekhono kono ferot entry nei.")
+            else:
+                st.dataframe(lg, hide_index=True, use_container_width=True, height=min(80 + 35 * len(lg), 340),
+                             column_config={"qty": st.column_config.NumberColumn(format="%g")})
 
     if not rp.empty:
         with st.expander("✏️ Update / 🗑 Delete record"):
@@ -12047,7 +12239,7 @@ STAMP_SQL = """(SELECT COALESCE(MAX(id),0) FROM transactions) AS tx_max,
  (SELECT COUNT(*) FROM inventory) AS inv_n,
  (SELECT COALESCE(SUM(hashtext(COALESCE(category,'')||'|'||COALESCE(unit_price,0)::text)),0) FROM inventory) AS inv_h,
  (SELECT COUNT(*)||':'||COALESCE(SUM(hashtext(id::text||'|'||COALESCE(department_name,'')||'|'||COALESCE(category_name,'')||'|'||COALESCE(allocated_budget,0)::text)),0) FROM category_budgets) AS bud_h,
- (SELECT COUNT(*)||':'||COALESCE(MAX(id),0)||':'||COALESCE(SUM(hashtext(COALESCE(status,'')||'|'||COALESCE(return_date,'')||'|'||COALESCE(qty,0)::text||'|'||COALESCE(item_name,'')||'|'||COALESCE(gate_pass_no,''))),0) FROM repair_returns) AS rep_h"""
+ (SELECT COUNT(*)||':'||COALESCE(MAX(id),0)||':'||COALESCE(SUM(hashtext(COALESCE(status,'')||'|'||COALESCE(return_date,'')||'|'||COALESCE(qty,0)::text||'|'||COALESCE(item_name,'')||'|'||COALESCE(gate_pass_no,'')||'|'||COALESCE(remarks,''))),0) FROM repair_returns) AS rep_h"""
 STAMP_KEYS = ("tx_max", "tx_n", "tf_n", "tf_max", "s_a", "s_b", "erp_sum", "inv_n", "inv_h", "bud_h", "rep_h")
 
 
