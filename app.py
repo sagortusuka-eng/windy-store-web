@@ -31137,6 +31137,9 @@ if NAV_ASSET not in TAB_NAMES:          # must be registered BEFORE the guard be
     TAB_NAMES.append(NAV_ASSET)
 if ACL_SETTINGS_ROUTE not in TAB_NAMES:  # Settings: registered right after Asset Items -> its renderer (tab_settings) is appended right after tab_asset
     TAB_NAMES.append(ACL_SETTINGS_ROUTE)
+NAV_SUBCON = "🧪 Sub-Contract Chemicals"
+if NAV_SUBCON not in TAB_NAMES:          # after Settings -> existing RENDERERS indexes are unchanged; it is dispatched by name below
+    TAB_NAMES.append(NAV_SUBCON)         # must be registered BEFORE the guard below, else a click on it is reset to Dashboard
 if st.session_state.get(NAV_KEY) not in TAB_NAMES:
     st.session_state[NAV_KEY] = TAB_NAMES[0]  # Dashboard is the first page for new sessions.
 
