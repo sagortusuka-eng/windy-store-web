@@ -1908,7 +1908,7 @@ UNIT_LOCK_ROLES = ("Store Officer",)   # roles that must pick one unit after log
 # and Executive can write.  ("Auditor" is the old name of the Audit role.)
 READ_ONLY_ROLES = ("Auditor", "Maintenance", "Admin", "Accounts")
 NEW_RO_ROLES = ("Maintenance", "Admin", "Accounts")
-_RO_TX_ALLOW = ("scx_add_bill", "scx_add_payment", "scx_delete_payment", "scx_delete_bill",
+_RO_TX_ALLOW = ("scx_add_bill", "scx_add_payment", "scx_delete_payment", "scx_delete_bill", "scx_pay_lines", "scx_delete_line_payment",
                 "create_login_session", "save_session_factory", "end_login_session", "log_event", "change_password",
                 "request_password_reset", "register_user")
 REG_ROLE_CHOICES = {"Store Officer": "Store Officer", "Maintenance": "Maintenance", "Audit": "Auditor", "Admin": "Admin", "Accounts": "Accounts"}
@@ -23958,6 +23958,25 @@ def rp_audit_stock(P):
     return blocks, notes, kpis
 
 
+def rp_subcon(P):
+    """SUB-CONTRACT CHEMICAL REPORT for the Reports page (read-only) - same numbers as the module dashboard"""
+    run_once_per_process("subcon_tables", ensure_subcon_tables)
+    df = _scx_load()
+    if not df.empty:
+        df = df[df["factory_name"].isin(list(P["units"]))]
+        if not df.empty:
+            df = period_filter_df(df, "issue_date", P["d1"], P["d2"])
+        if P.get("subcon") and not df.empty:
+            df = df[df["subcon_name"] == P["subcon"]]
+        stt = P.get("status") or "All"
+        if not df.empty and stt == "Rate Pending":
+            df = df[df["rate_status"] == "Rate Pending"]
+        elif not df.empty and stt in SCX_PAY_STATUS:
+            df = df[df["pay_status"] == stt]
+    blocks = _rp_blocks(P, lambda u: _scx_sections(df[df["factory_name"] == u] if len(df) else df, u))
+    return blocks, _scx_notes(), _scx_doc_kpis(df if len(df) else pd.DataFrame({"qty": [], "total": [], "paid": [], "pending": [], "subcon_name": [], "rate_status": []}))
+
+
 RP_REGISTRY = [
     dict(key="stock", label="Current Stock Report", type="Stock Report", dates=False, flt=("pcat", "bcat", "item", "status"), orient="P", fn=rp_current_stock, status=RP_STOCK_STATUS),
     dict(key="stockqv", label="Stock Quantity and Stock Value Report", type="Stock Report (ERP vs Physical)", dates=False, flt=("pcat", "bcat", "item", "status"), orient="L", fn=rp_stock_qty_value, status=RP_STOCK_STATUS),
@@ -23990,6 +24009,9 @@ RP_REGISTRY = [
          status=["All", "OVER LIMIT", "WARNING", "SAFE", "NO LIMIT SET"]),
     dict(key="repairret", label="Repair & Returns Report (Management)", title="REPAIR & RETURNS REPORT - GATE PASS, REPAIR, WARRANTY & RETURN",
          type="Repair & Returns Management Report", dates=True, flt=("item", "status"), orient="L", fn=rp_repair_returns, status=RP_REPAIR_STATUS),
+    dict(key="subcon", label="Sub-Contract Chemical Report (Gate Pass, Bill & Payment)", title="SUB-CONTRACT CHEMICAL REPORT - GATE PASS, BILL & PAYMENT",
+         type="Sub-Contract Chemical Management Report", dates=True, flt=("subcon", "status"), orient="L", fn=rp_subcon,
+         status=["All", "Rate Pending", "Unpaid", "Partially Paid", "Paid", "Unpriced"]),
     dict(key="auditstock", label="Audit Stock Report (Opening, Receipt, Issue & Closing)", title="AUDIT STOCK REPORT", type="Audit Stock Report (Opening, Receipt, Issue, Internal Transfer & Closing)",
          dates=True, flt=("item", "pcat", "bcat"), orient="L", fn=rp_audit_stock),
 ]
@@ -24100,7 +24122,7 @@ def _tab_reports_body():
         top[3].markdown(f"**{today:%d-%b-%Y}**")
     fl = list(R["flt"]) + (["alld"] if R["dates"] else [])
     cols = st.columns(len(fl))
-    P = {"units": units, "d1": d1, "d2": d2, "item": "", "sup_raw": None, "pcat": None, "bcat": None, "ttypes": None, "status": None, "section": None, "group": None, "itemwise": False, "dept": None}
+    P = {"units": units, "d1": d1, "d2": d2, "item": "", "sup_raw": None, "pcat": None, "bcat": None, "ttypes": None, "status": None, "section": None, "group": None, "itemwise": False, "dept": None, "subcon": None}
     lines = []
     for c, f in zip(cols, fl):
         if f == "alld":
@@ -24156,6 +24178,16 @@ def _tab_reports_body():
         elif f == "group":
             P["group"] = c.selectbox("Group by", ["Budget Category", "Section"], key="rp_group")
             lines.append(("Grouped by", P["group"]))
+        elif f == "subcon":
+            try:
+                run_once_per_process("subcon_tables", ensure_subcon_tables)
+                _sn = _scx_subcons()
+            except Exception:
+                _sn = []
+            sel = c.selectbox("Sub-Contract Factory", ["All factories"] + _sn, key="rp_subcon")
+            if sel != "All factories":
+                P["subcon"] = sel
+                lines.append(("Sub-Contract Factory", sel))
         elif f == "ttype":
             names = [RP_NAMES[t] for t in R["tt"]]
             chosen = c.multiselect("Transaction Type", names, default=[RP_NAMES[t] for t in R["tt_def"]], key=f"rp_tt_{R['key']}")
@@ -24167,7 +24199,7 @@ def _tab_reports_body():
             if P["status"] not in ("All", "All items"):
                 lines.append(("Status", P["status"]))
     period = (f"{d1:%d-%b-%Y} to {d2:%d-%b-%Y}" if d1 else "All dates") if R["dates"] else f"As on {today:%d-%b-%Y} (current balance)"
-    sig = repr((R["key"], units, d1, d2, P["item"], P["sup_raw"], P["pcat"], P["bcat"], P["ttypes"], P["status"], P["section"], P["group"], P["itemwise"], P["dept"]))
+    sig = repr((R["key"], units, d1, d2, P["item"], P["sup_raw"], P["pcat"], P["bcat"], P["ttypes"], P["status"], P["section"], P["group"], P["itemwise"], P["dept"], P["subcon"]))
     if st.button("▶ Generate Report", type="primary", key="rp_gen"):
         with st.spinner("Preparing report..."):
             try:
@@ -33579,6 +33611,15 @@ def ensure_subcon_tables():
                 created_by TEXT, created_at TEXT)""")
             cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_scx_chem_name ON subcon_chemicals (LOWER(name))")
             cur.execute("ALTER TABLE subcon_issues ADD COLUMN IF NOT EXISTS chemical_id INTEGER")
+            for _c in ("supplier_name TEXT DEFAULT ''", "challan_no TEXT DEFAULT ''", "updated_by TEXT", "updated_at TEXT"):
+                cur.execute(f"ALTER TABLE subcon_issues ADD COLUMN IF NOT EXISTS {_c}")
+            cur.execute("""CREATE TABLE IF NOT EXISTS subcon_tx_payments (
+                id SERIAL PRIMARY KEY, issue_id INTEGER NOT NULL, pay_date TEXT, amount REAL DEFAULT 0, method TEXT DEFAULT '',
+                reference TEXT DEFAULT '', remarks TEXT DEFAULT '', entered_by TEXT, created_at TEXT)""")
+            cur.execute("CREATE INDEX IF NOT EXISTS ix_scx_txpay_issue ON subcon_tx_payments(issue_id)")
+            cur.execute("""CREATE TABLE IF NOT EXISTS subcon_rate_log (
+                id SERIAL PRIMARY KEY, issue_id INTEGER NOT NULL, old_rate REAL, new_rate REAL, changed_by TEXT, changed_at TEXT)""")
+            cur.execute("CREATE INDEX IF NOT EXISTS ix_scx_ratelog_issue ON subcon_rate_log(issue_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS ix_scx_iss_gp ON subcon_issues(subcon_name, gate_pass_no)")
             cur.execute("CREATE INDEX IF NOT EXISTS ix_scx_iss_bill ON subcon_issues(bill_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS ix_scx_pay_bill ON subcon_payments(bill_id)")
@@ -33611,17 +33652,24 @@ def scx_add_subcon(name, contact=""):
 
 
 @tx
-def scx_save_issue(fac, subcon, gp, date_s, lines, remarks):
+def scx_save_issue(fac, subcon, gp, date_s, lines, remarks, supplier="", challan=""):
     """One gate pass, many chemicals - all saved together or none. Record only: no stock / inventory is touched."""
     user = st.session_state.get("user", "")
     for ln in lines:
+        if run("""SELECT 1 FROM subcon_issues WHERE factory_name=%s AND LOWER(subcon_name)=LOWER(%s) AND gate_pass_no=%s AND issue_date=%s
+                  AND LOWER(item_name)=LOWER(%s) AND ABS(COALESCE(qty,0)-%s)<0.000001""", (fac, subcon, gp, date_s, ln["name"], float(ln["qty"]))):
+            raise ValueError(f"Duplicate: Gate Pass {gp} / {date_s} / {ln['name']} / {float(ln['qty']):g} age-i entry kora ache.")
+    for ln in lines:
         rate = float(ln["rate"]) if ln.get("rate") not in (None, "") and float(ln["rate"]) > 0 else None
-        run("""INSERT INTO subcon_issues (factory_name, subcon_name, gate_pass_no, issue_date, prod_id, item_name, unit, qty, rate, rate_by, rate_date,
-               remarks, entered_by, created_at, chemical_id)
-               VALUES (%s,%s,%s,%s,'',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (fac, subcon, gp, date_s, ln["name"], ln.get("unit") or "", float(ln["qty"]), rate, user if rate else "",
-             date_s if rate else None, remarks or "", user, _scx_now(), ln.get("cid")))
-    audit("SUBCON_ISSUE", f"Gate Pass {gp} to {subcon}: " + "; ".join(f"{ln['name']} x{float(ln['qty']):g}" for ln in lines)[:300])
+        iid = int(run("""INSERT INTO subcon_issues (factory_name, subcon_name, gate_pass_no, issue_date, prod_id, item_name, unit, qty, rate, rate_by, rate_date,
+                         remarks, entered_by, created_at, chemical_id, supplier_name, challan_no)
+                         VALUES (%s,%s,%s,%s,'',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                       (fac, subcon, gp, date_s, ln["name"], ln.get("unit") or "", float(ln["qty"]), rate, user if rate else "",
+                        date_s if rate else None, remarks or "", user, _scx_now(), ln.get("cid"), supplier or "", challan or ""))[0][0])
+        if rate:
+            run("INSERT INTO subcon_rate_log (issue_id, old_rate, new_rate, changed_by, changed_at) VALUES (%s,NULL,%s,%s,%s)", (iid, rate, user, _scx_now()))
+    audit("SUBCON_ISSUE", f"Gate Pass {gp} to {subcon}" + (f" (supplier {supplier})" if supplier else "") + ": "
+          + "; ".join(f"{ln['name']} x{float(ln['qty']):g}" for ln in lines)[:300])
     return len(lines)
 
 
@@ -33670,20 +33718,101 @@ def scx_update_chemicals(changes):
 
 @tx
 def scx_save_rates(rows, by, date_s):
-    """rows = [(issue_id, rate)] - only lines that are not billed yet."""
+    """rows = [(issue_id, rate)] - Sourcing gives / updates the unit rate. Every change is logged. Billed or already-paid lines are locked."""
+    user = st.session_state.get("user", "")
     n = 0
     for iid, rate in rows:
-        r = run("SELECT bill_id, tx_id FROM subcon_issues WHERE id=%s FOR UPDATE", (int(iid),))
+        r = run("SELECT bill_id, tx_id, rate FROM subcon_issues WHERE id=%s FOR UPDATE", (int(iid),))
         if not r:
             continue
         if r[0][0]:
             raise ValueError(f"Line {iid} already billed - rate bodlano jabe na.")
+        if int(run("SELECT COUNT(*) FROM subcon_tx_payments WHERE issue_id=%s", (int(iid),))[0][0]):
+            raise ValueError(f"Line {iid}-e payment hoye gese - rate bodlano jabe na (age payment delete korun).")
+        old = r[0][2]
         run("UPDATE subcon_issues SET rate=%s, rate_by=%s, rate_date=%s WHERE id=%s", (float(rate), by, date_s, int(iid)))
         if r[0][1]:
             run("UPDATE transactions SET unit_price_at_tx=%s WHERE id=%s", (float(rate), int(r[0][1])))
+        if old is None or abs(float(old) - float(rate)) > 1e-9:
+            run("INSERT INTO subcon_rate_log (issue_id, old_rate, new_rate, changed_by, changed_at) VALUES (%s,%s,%s,%s,%s)",
+                (int(iid), old, float(rate), f"{by} (entered by {user})" if user and user != by else by, _scx_now()))
         n += 1
     audit("SUBCON_RATE", f"{n} sub-contract line rate(s) set by Sourcing contact '{by}'")
     return n
+
+
+def _scx_bill_share(iid):
+    """part of an OLD bill-level payment that belongs to this line (by value) - keeps old data counted"""
+    r = run("SELECT bill_id FROM subcon_issues WHERE id=%s", (int(iid),))
+    if not r or not r[0][0]:
+        return 0.0
+    bid = int(r[0][0])
+    pb = float(run("SELECT COALESCE(SUM(amount),0) FROM subcon_payments WHERE bill_id=%s", (bid,))[0][0] or 0)
+    if pb <= 0:
+        return 0.0
+    ls = run("SELECT id, COALESCE(qty,0), CASE WHEN COALESCE(rate,0)>0 THEN COALESCE(qty,0)*rate ELSE 0 END FROM subcon_issues WHERE bill_id=%s", (bid,))
+    w = {int(a): float(c) for a, b, c in ls}
+    tot = sum(w.values())
+    if tot <= 0:
+        w = {int(a): float(b) for a, b, c in ls}
+        tot = sum(w.values())
+    return pb * w.get(int(iid), 0.0) / tot if tot > 0 else 0.0
+
+
+@tx
+def scx_pay_lines(rows, date_s, method, ref, remarks):
+    """rows = [(issue_id, amount)] - one payment record per line (partial payments allowed, old records are never overwritten)"""
+    user = st.session_state.get("user", "")
+    n, total = 0, 0.0
+    for iid, amt in rows:
+        amt = round(float(amt), 2)
+        if amt <= 0:
+            continue
+        r = run("SELECT COALESCE(qty,0), rate, item_name FROM subcon_issues WHERE id=%s FOR UPDATE", (int(iid),))
+        if not r:
+            raise ValueError(f"Transaction {iid} paoa jayni.")
+        qty, rate, name = float(r[0][0]), r[0][1], r[0][2]
+        if rate is None or float(rate) <= 0:
+            raise ValueError(f"{name}: rate deya hoy ni - payment kora jabe na.")
+        direct = float(run("SELECT COALESCE(SUM(amount),0) FROM subcon_tx_payments WHERE issue_id=%s", (int(iid),))[0][0] or 0)
+        pend = qty * float(rate) - direct - _scx_bill_share(iid)
+        if amt > pend + 0.005:
+            raise ValueError(f"{name}: pending matro {max(pend, 0):,.2f}, {amt:,.2f} deya jabe na.")
+        if ref and run("""SELECT 1 FROM subcon_tx_payments WHERE issue_id=%s AND pay_date=%s AND ABS(amount-%s)<0.005
+                          AND LOWER(COALESCE(reference,''))=LOWER(%s)""", (int(iid), date_s, amt, ref)):
+            raise ValueError(f"{name}: ei Voucher/Ref ({ref}) diye ei tarikhe ei amount age-i save kora ache (duplicate).")
+        run("""INSERT INTO subcon_tx_payments (issue_id, pay_date, amount, method, reference, remarks, entered_by, created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""", (int(iid), date_s, amt, method, ref or "", remarks or "", user, _scx_now()))
+        n += 1
+        total += amt
+    audit("SUBCON_LINE_PAYMENT", f"{n} transaction(s), total {total:,.2f} ({method}{' ' + ref if ref else ''})")
+    return n
+
+
+@tx
+def scx_delete_line_payment(pid):
+    r = run("SELECT p.amount, i.subcon_name, i.item_name FROM subcon_tx_payments p JOIN subcon_issues i ON i.id=p.issue_id WHERE p.id=%s", (int(pid),))
+    run("DELETE FROM subcon_tx_payments WHERE id=%s", (int(pid),))
+    audit("SUBCON_PAYMENT_DEL", f"Payment deleted: {r[0][1] if r else ''} / {r[0][2] if r else ''} amount {float(r[0][0]) if r else 0:,.2f}")
+    return True
+
+
+@tx
+def scx_update_issue(iid, d):
+    """edit date / supplier / challan / remarks (and quantity only while there is no bill, payment or stock entry on the line)"""
+    user = st.session_state.get("user", "")
+    r = run("SELECT bill_id, tx_id, gate_pass_no, item_name FROM subcon_issues WHERE id=%s FOR UPDATE", (int(iid),))
+    if not r:
+        raise ValueError("Transaction paoa jayni.")
+    paid = float(run("SELECT COALESCE(SUM(amount),0) FROM subcon_tx_payments WHERE issue_id=%s", (int(iid),))[0][0] or 0)
+    qty = d.get("qty")
+    if qty is not None and (r[0][0] or r[0][1] or paid > 0):
+        raise ValueError("Bill / payment ache - quantity bodlano jabe na.")
+    run("""UPDATE subcon_issues SET issue_date=%s, supplier_name=%s, challan_no=%s, remarks=%s, updated_by=%s, updated_at=%s"""
+        + (", qty=%s" if qty is not None else "") + " WHERE id=%s",
+        tuple([d["issue_date"], d["supplier_name"], d["challan_no"], d["remarks"], user, _scx_now()] + ([float(qty)] if qty is not None else []) + [int(iid)]))
+    audit("SUBCON_EDIT", f"Transaction #{iid} (GP {r[0][2]} / {r[0][3]}) edited" + (f", qty -> {float(qty):g}" if qty is not None else ""))
+    return True
 
 
 @tx
@@ -33694,10 +33823,13 @@ def scx_delete_issue(iid):
     bill_id, tx_id, fac, sl, qty, gp, name = r[0]
     if bill_id:
         raise ValueError("Ei line-er Bill hoye gese - age Bill delete korun.")
+    if int(run("SELECT COUNT(*) FROM subcon_tx_payments WHERE issue_id=%s", (int(iid),))[0][0]):
+        raise ValueError("Ei transaction-e payment ache - age payment delete korun.")
     if tx_id and sl:                                   # only lines saved by the very first version (when stock was reduced)
         if run("SELECT id FROM transactions WHERE id=%s", (int(tx_id),)):
             run("UPDATE inventory SET current_stock=current_stock+%s WHERE sl_no=%s AND factory_name=%s", (float(qty), int(sl), fac))
             run("DELETE FROM transactions WHERE id=%s", (int(tx_id),))
+    run("DELETE FROM subcon_rate_log WHERE issue_id=%s", (int(iid),))
     run("DELETE FROM subcon_issues WHERE id=%s", (int(iid),))
     audit("SUBCON_DELETE", f"Sub-contract line deleted: GP {gp} {name} x{float(qty):g}")
     return True
@@ -33769,21 +33901,62 @@ def _scx_month(s):
 
 
 _SCX_CSS = """<style>
-.scx-pipe{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:2px 0 16px}
-.scx-st{position:relative;background:linear-gradient(180deg,#fff,#F8FAFC);border:1px solid #E2E8F0;border-radius:16px;padding:13px 16px;
-  box-shadow:0 4px 14px rgba(15,23,42,.06);overflow:hidden}
-.scx-st:before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--c)}
-.scx-st .l{font-size:11px;font-weight:800;letter-spacing:.6px;color:#64748B;text-transform:uppercase}
-.scx-st .v{font-size:28px;font-weight:800;color:var(--c);line-height:1.2}
-.scx-st .d{font-size:11.5px;color:#94A3B8}
-.scx-arrow{position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#CBD5E1;font-size:22px}
-.st-key-scxp_root div[data-testid="stDataFrame"],.st-key-scxp_root div[data-testid="stDataEditor"]{border-radius:14px;overflow:hidden;
-  box-shadow:0 3px 14px rgba(15,23,42,.07);border:1px solid #E2E8F0}
-.st-key-scxp_root div[data-testid="stVerticalBlockBorderWrapper"]{border-radius:16px;box-shadow:0 3px 14px rgba(15,23,42,.05)}
-.st-key-scxp_root button[kind="primary"]{border-radius:12px;font-weight:700;letter-spacing:.2px;
-  background:linear-gradient(135deg,#0F766E,#0D9488);border:0;box-shadow:0 6px 16px rgba(13,148,136,.28)}
-.st-key-scxp_root button[kind="primary"]:hover{filter:brightness(1.07)}
-@media (max-width:900px){.scx-pipe{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.scxh{display:flex;align-items:center;gap:16px;background:#fff;border:1px solid #E2E8F0;border-radius:18px;padding:14px 20px;box-shadow:0 2px 12px rgba(11,36,71,.07);margin:2px 0 12px}
+.scxh .ic{width:58px;height:58px;border-radius:16px;background:linear-gradient(135deg,#1D4ED8,#2563EB);color:#fff;font-size:28px;display:flex;align-items:center;justify-content:center;
+  box-shadow:0 8px 18px rgba(29,78,216,.35);flex:0 0 auto}
+.scxh .t{font-size:24px;font-weight:800;color:#0B2447;line-height:1.2}.scxh .s{font-size:13px;color:#475569;margin-top:2px}
+.scx-kpis{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin:0 0 14px}
+.scx-k{display:flex;gap:11px;align-items:center;background:#fff;border:1px solid #E2E8F0;border-radius:16px;padding:13px 14px;box-shadow:0 2px 12px rgba(11,36,71,.06);
+  transition:transform .16s ease,box-shadow .16s ease}
+.scx-k:hover{transform:translateY(-2px);box-shadow:0 10px 24px rgba(11,36,71,.12)}
+.scx-k .ic{width:46px;height:46px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:23px;background:var(--bg);flex:0 0 auto}
+.scx-k .l{font-size:11.5px;font-weight:700;color:#475569;line-height:1.25}.scx-k .v{font-size:21px;font-weight:800;color:var(--vc,#0B2447);line-height:1.2}
+.scx-k .d{font-size:10.5px;color:#94A3B8}
+.scx-tw{overflow-x:auto;border:1px solid #E2E8F0;border-radius:14px;box-shadow:0 2px 12px rgba(11,36,71,.06);background:#fff;margin-bottom:8px}
+.scx-tb{width:100%;border-collapse:collapse;font-size:12.5px}
+.scx-tb th{background:#0B2447;color:#fff;text-align:left;padding:9px 10px;font-weight:700;white-space:nowrap}
+.scx-tb td{padding:7px 10px;border-bottom:1px solid #EEF2F7;white-space:nowrap;color:#0F172A}
+.scx-tb tbody tr:nth-child(even) td{background:#F8FAFC}
+.scx-tb tbody tr:hover td{background:#EAF1FF}
+.scx-tb td.n,.scx-tb th.n{text-align:right;font-variant-numeric:tabular-nums}
+.scx-tb tfoot td{background:#E8EEF8;font-weight:800;border-top:2px solid #0B2447;color:#0B2447}
+.scx-tb .neg{color:#DC2626;font-weight:700}
+.pl{display:inline-block;padding:2px 10px;border-radius:999px;font-size:11.5px;font-weight:700}
+.pl.paid{background:#DCFCE7;color:#166534}.pl.pend{background:#FEF3C7;color:#92400E}.pl.part{background:#FFEDD5;color:#9A3412}
+.pl.unp{background:#E2E8F0;color:#475569}.pl.rate{background:#DBEAFE;color:#1E40AF}
+.scx-panel{background:#fff;border:1px solid #E2E8F0;border-radius:16px;padding:14px 16px;box-shadow:0 2px 12px rgba(11,36,71,.06);margin-bottom:10px}
+.scx-panel h4{margin:0 0 8px;font-size:14px;color:#0B2447;font-weight:800}
+.scx-kv{display:grid;grid-template-columns:150px 1fr;gap:4px 12px;font-size:13px}.scx-kv b{color:#475569;font-weight:600}.scx-kv span{color:#0F172A;font-weight:600}
+.scx-tl{border-left:3px solid #CBD5E1;margin:4px 0 0 6px;padding-left:14px;font-size:12.5px}
+.scx-tl div{margin:0 0 8px;position:relative}.scx-tl div:before{content:"";position:absolute;left:-20px;top:4px;width:10px;height:10px;border-radius:50%;background:#1D4ED8}
+.scx-tl small{color:#64748B;display:block}
+.scx-band{display:flex;align-items:center;gap:12px;margin:2px 0 10px}
+.scx-band .bi{width:38px;height:38px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:19px;color:#fff;
+  background:linear-gradient(135deg,#0B2447,#1D4ED8);box-shadow:0 6px 14px rgba(29,78,216,.25)}
+.scx-band b{display:block;font-size:16px;color:#0B2447}.scx-band span{font-size:12.5px;color:#64748B}
+.scx-empty{text-align:center;padding:34px 20px;border:2px dashed #CBD5E1;border-radius:20px;background:linear-gradient(180deg,#F8FAFC,#fff);margin-bottom:14px}
+.scx-empty .e{font-size:46px}.scx-empty b{display:block;font-size:18px;color:#0B2447;margin:6px 0 3px}.scx-empty span{color:#64748B;font-size:13.5px}
+.st-key-scxp_root div[data-testid="stVerticalBlockBorderWrapper"]{border-radius:16px;box-shadow:0 2px 12px rgba(11,36,71,.05);border-color:#E2E8F0;background:#fff}
+.st-key-scxp_root div[data-testid="stDataFrame"],.st-key-scxp_root div[data-testid="stDataEditor"]{border-radius:14px;overflow:hidden;border:1px solid #E2E8F0;box-shadow:0 2px 12px rgba(11,36,71,.06)}
+.st-key-scxp_root button[kind="primary"]{border-radius:11px;font-weight:700;color:#fff;border:0;background:linear-gradient(135deg,#0B2447,#1D4ED8);
+  box-shadow:0 6px 16px rgba(29,78,216,.30);transition:transform .15s ease,filter .15s ease}
+.st-key-scxp_root button[kind="primary"]:hover{filter:brightness(1.12);transform:translateY(-1px)}
+.st-key-scxp_root button[kind="primary"]:disabled{background:#CBD5E1;box-shadow:none;color:#fff}
+.st-key-scxp_root div[data-testid="stRadio"] div[role="radiogroup"]{gap:6px;flex-wrap:wrap;background:#fff;padding:6px;border-radius:14px;border:1px solid #E2E8F0;box-shadow:0 2px 10px rgba(11,36,71,.05)}
+.st-key-scxp_root div[data-testid="stRadio"] div[role="radiogroup"] label{background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:6px 14px;margin:0;cursor:pointer;transition:all .15s ease}
+.st-key-scxp_root div[data-testid="stRadio"] div[role="radiogroup"] label:hover{background:#EAF1FF;border-color:#BFD3FF}
+.st-key-scxp_root div[data-testid="stRadio"] div[role="radiogroup"] label:has(input:checked){background:linear-gradient(135deg,#1D4ED8,#2563EB);border-color:#1D4ED8;box-shadow:0 5px 14px rgba(29,78,216,.30)}
+.st-key-scxp_root div[data-testid="stRadio"] div[role="radiogroup"] label:has(input:checked) p{color:#fff!important;font-weight:700}
+.st-key-scxp_root div[data-testid="stRadio"] div[role="radiogroup"] label>div:first-child{display:none}
+.st-key-scx_qa_new button,.st-key-scx_qa_pay button,.st-key-scx_qa_rep button,.st-key-scx_qa_prt button,.st-key-scx_qa_rate button{height:78px;border:0;border-radius:14px;color:#fff;font-weight:700;
+  box-shadow:0 8px 18px rgba(11,36,71,.18);transition:transform .15s ease}
+.st-key-scx_qa_new button{background:linear-gradient(135deg,#1D4ED8,#2563EB)}.st-key-scx_qa_pay button{background:linear-gradient(135deg,#15803D,#22C55E)}
+.st-key-scx_qa_rate button{background:linear-gradient(135deg,#B45309,#F59E0B)}
+.st-key-scx_qa_rep button{background:linear-gradient(135deg,#6D28D9,#8B5CF6)}.st-key-scx_qa_prt button{background:linear-gradient(135deg,#0E7490,#06B6D4)}
+.st-key-scx_qa_new button:hover,.st-key-scx_qa_pay button:hover,.st-key-scx_qa_rep button:hover,.st-key-scx_qa_prt button:hover,.st-key-scx_qa_rate button:hover{transform:translateY(-2px)}
+.st-key-scx_qa_new button p,.st-key-scx_qa_pay button p,.st-key-scx_qa_rep button p,.st-key-scx_qa_prt button p,.st-key-scx_qa_rate button p{color:#fff!important;font-weight:700}
+@media (max-width:1100px){.scx-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:640px){.scx-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.scxh .t{font-size:19px}}
 </style>"""
 
 
@@ -33807,35 +33980,338 @@ def _scx_gp_stage_df(iss, bills):
     return pd.DataFrame(rows)
 
 
-def _scx_top():
-    """KPI strip + the Gate Pass -> Rate -> Bill -> Payment pipeline (small tables, one pass)"""
-    iss = qdf("SELECT subcon_name, gate_pass_no, factory_name, issue_date, COALESCE(qty,0) AS qty, rate, bill_id FROM subcon_issues")
-    bills = _scx_bill_table()
-    st.markdown(_SCX_CSS, unsafe_allow_html=True)
+SCX_PAY_STATUS = ["Unpaid", "Partially Paid", "Paid", "Unpriced"]
+SCX_BLUES = ["#1D4ED8", "#16A34A", "#F59E0B", "#7C3AED", "#0EA5E9", "#64748B"]
+
+
+def _inr(x, dec=0):
+    """Indian digit grouping (2,45,780) - the way Bangladeshi accounts read numbers"""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return "-"
+    if pd.isna(v):
+        return "-"
+    neg, v = v < 0, abs(v)
+    ip, _, fp = f"{v:.{dec}f}".partition(".")
+    if len(ip) > 3:
+        head, tail, parts = ip[:-3], ip[-3:], []
+        while len(head) > 2:
+            parts.insert(0, head[-2:])
+            head = head[:-2]
+        if head:
+            parts.insert(0, head)
+        ip = ",".join(parts + [tail])
+    return ("-" if neg else "") + ip + (("." + fp) if dec else "")
+
+
+def _inrq(x):
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return ""
+    if pd.isna(v):
+        return ""
+    return _inr(v, 0) if abs(v - round(v)) < 1e-9 else f"{v:,.3f}".rstrip("0").rstrip(".")
+
+
+def _bdt(x, dec=0):
+    return "৳ " + _inr(x, dec)
+
+
+def _scx_pill(v):
+    m = {"Paid": "paid", "Unpaid": "pend", "Partially Paid": "part", "Unpriced": "unp", "Rate Pending": "pend", "Rate Assigned": "rate"}
+    return f"<span class='pl {m.get(v, 'unp')}'>{html_lib.escape(str(v))}</span>"
+
+
+def _scx_table(cols, rows, foot=None):
+    """navy-header HTML table. cols = [(header, key, kind)] kind: t text | sl serial | n qty | m money | pill | neg (red money)"""
+    e = html_lib.escape
+    th = "".join(f"<th class='{'n' if k in ('n', 'm', 'neg') else ''}'>{e(h)}</th>" for h, _, k in cols)
+    body = []
+    for i, r in enumerate(rows, 1):
+        tds = []
+        for _h, key, k in cols:
+            v = r.get(key)
+            blank = v is None or (isinstance(v, float) and pd.isna(v))
+            if k == "sl":
+                txt = str(i)
+            elif k == "n":
+                txt = "" if blank else _inrq(v)
+            elif k in ("m", "neg"):
+                txt = "-" if blank else _inr(v, 2)
+            elif k == "pill":
+                txt = _scx_pill(v)
+            else:
+                txt = "" if blank else e(str(v))
+            cls = ("n " if k in ("n", "m", "neg") else "") + ("neg" if k == "neg" and not blank and float(v) > 0.005 else "")
+            tds.append(f"<td class='{cls.strip()}'>{txt}</td>")
+        body.append("<tr>" + "".join(tds) + "</tr>")
+    tf = ""
+    if foot:
+        tf = "<tfoot><tr>" + "".join(
+            f"<td class='{'n' if k in ('n', 'm', 'neg') else ''}'>" + ("" if foot.get(key) is None else (
+                _inrq(foot[key]) if k == "n" else (_inr(foot[key], 2) if k in ("m", "neg") else e(str(foot[key]))))) + "</td>"
+            for _h, key, k in cols) + "</tr></tfoot>"
+    return f"<div class='scx-tw'><table class='scx-tb'><thead><tr>{th}</tr></thead><tbody>{''.join(body)}</tbody>{tf}</table></div>"
+
+
+def _scx_band(icon, title, sub=""):
+    e = html_lib.escape
+    return f"<div class='scx-band'><div class='bi'>{icon}</div><div><b>{e(title)}</b>" + (f"<span>{e(sub)}</span>" if sub else "") + "</div></div>"
+
+
+def _scx_suppliers():
+    names = set()
+    try:
+        for r in q_c("SELECT DISTINCT TRIM(supplier_name) AS n FROM transactions WHERE COALESCE(TRIM(supplier_name),'')<>'' LIMIT 1500"):
+            names.add(r["n"])
+    except Exception:
+        pass
+    try:
+        for r in q("SELECT DISTINCT TRIM(supplier_name) AS n FROM subcon_issues WHERE COALESCE(TRIM(supplier_name),'')<>''"):
+            names.add(r["n"])
+    except Exception:
+        pass
+    return sorted(names, key=str.lower)
+
+
+def _scx_load():
+    """One enriched row per transaction (= one chemical line on a gate pass).
+    total = qty x rate (only when a rate is given - otherwise the line is UNPRICED, never zero-cost)
+    paid  = its own payments + its share of any old bill-level payments;  pending = total - paid (never shown negative)."""
+    iss = qdf("SELECT * FROM subcon_issues")
     if iss.empty:
-        return
-    today = local_now().date()
+        return iss
+    iss = iss.copy()
+    for c in ("supplier_name", "challan_no", "updated_by", "updated_at", "rate_by", "remarks", "unit", "entered_by", "created_at", "gate_pass_no", "item_name"):
+        iss[c] = iss[c].fillna("").astype(str) if c in iss.columns else ""
+    iss["id"] = iss["id"].astype(int)
     iss["qty"] = pd.to_numeric(iss["qty"], errors="coerce").fillna(0.0)
     iss["rate"] = pd.to_numeric(iss["rate"], errors="coerce")
-    iss["value"] = iss["qty"] * iss["rate"].fillna(0.0)
-    mon = iss[[(_scx_month(d) == today.strftime("%Y-%m")) for d in iss["issue_date"]]]
-    stg = _scx_gp_stage_df(iss, bills)
-    cnt = stg["stage"].value_counts().to_dict() if not stg.empty else {}
-    due = float(bills["due"].sum()) if not bills.empty else 0.0
-    n_unpaid = int((bills["due"] > 0.005).sum()) if not bills.empty else 0
-    st.markdown(_px_kpis([
-        ("এই মাসে Gate Pass", f"{mon['gate_pass_no'].nunique():,}", f"Qty {mon['qty'].sum():,.0f}", "#0F766E"),
-        ("এই মাসের Chemical value", f"৳{mon['value'].sum():,.0f}", "Rate × Qty", "#2563EB"),
-        ("মোট Factory", f"{iss['subcon_name'].nunique():,}", f"Gate Pass {stg.shape[0]:,}", "#7C3AED"),
-        ("Bill hoyeche", f"{len(bills):,}", f"৳{bills['amount'].sum() if not bills.empty else 0:,.0f}", "#D97706"),
-        ("🔴 Payment Due", f"৳{due:,.0f}", f"{n_unpaid}-ti Bill baki", "#DC2626"),
-    ]), unsafe_allow_html=True)
-    boxes = [("Gate Pass (mot)", len(stg), "shob entry", "#0F766E"), ("Rate baki", cnt.get("rate", 0), "Sourcing-er rate dorkar", "#DC2626"),
-             ("Bill baki", cnt.get("bill", 0), "Accounts Bill dorkar", "#D97706"),
-             ("Payment baki", cnt.get("pay", 0), "Bill hoyeche, taka baki", "#7C3AED"), ("✅ Paid", cnt.get("paid", 0), "shob taka dewa", "#16A34A")]
-    st.markdown("<div class='scx-pipe'>" + "".join(
-        f"<div class='scx-st' style='--c:{c}'><div class='l'>{l}</div><div class='v'>{v:,}</div><div class='d'>{d}</div>"
-        + ("<span class='scx-arrow'>›</span>" if i < 4 else "") + "</div>" for i, (l, v, d, c) in enumerate(boxes)) + "</div>", unsafe_allow_html=True)
+    has = iss["rate"].fillna(0) > 0
+    iss["total"] = (iss["qty"] * iss["rate"]).where(has)
+    direct, last = {}, {}
+    tp = qdf("SELECT issue_id, amount, pay_date FROM subcon_tx_payments")
+    if not tp.empty:
+        tp["amount"] = pd.to_numeric(tp["amount"], errors="coerce").fillna(0.0)
+        direct = {int(k): float(v) for k, v in tp.groupby("issue_id")["amount"].sum().items()}
+        for r in tp.itertuples():
+            d = parse_date(r.pay_date)
+            if d and (int(r.issue_id) not in last or d > last[int(r.issue_id)]):
+                last[int(r.issue_id)] = d
+    bpaid, blast = {}, {}
+    bp = qdf("SELECT bill_id, amount, pay_date FROM subcon_payments")
+    if not bp.empty:
+        bp["amount"] = pd.to_numeric(bp["amount"], errors="coerce").fillna(0.0)
+        bpaid = {int(k): float(v) for k, v in bp.groupby("bill_id")["amount"].sum().items()}
+        for r in bp.itertuples():
+            d = parse_date(r.pay_date)
+            if d and (int(r.bill_id) not in blast or d > blast[int(r.bill_id)]):
+                blast[int(r.bill_id)] = d
+    bn = {int(r.id): r.bill_no for r in qdf("SELECT id, bill_no FROM subcon_bills").itertuples()}
+    alloc = {}
+    for bid, g in iss[iss["bill_id"].notna()].groupby("bill_id"):
+        pb = bpaid.get(int(bid), 0.0)
+        w = g["total"].fillna(0.0)
+        if pb <= 0:
+            continue
+        if w.sum() <= 0:
+            w = g["qty"]
+        if w.sum() <= 0:
+            continue
+        for iid, sh in zip(g["id"], (w / w.sum() * pb)):
+            alloc[int(iid)] = float(sh)
+    iss["paid"] = [direct.get(i, 0.0) + alloc.get(i, 0.0) for i in iss["id"]]
+    iss["pending"] = (iss["total"] - iss["paid"]).clip(lower=0)
+    iss["overpaid"] = iss["total"].notna() & (iss["paid"] > iss["total"] + 0.005)
+    iss["rate_status"] = ["Rate Assigned" if h else "Rate Pending" for h in has]
+    stt = []
+    for t, p in zip(iss["total"], iss["paid"]):
+        if pd.isna(t):
+            stt.append("Unpriced")
+        elif p >= t - 0.005:
+            stt.append("Paid")
+        elif p > 0.005:
+            stt.append("Partially Paid")
+        else:
+            stt.append("Unpaid")
+    iss["pay_status"] = stt
+    iss["d"] = pd.to_datetime([parse_date(x) for x in iss["issue_date"]], errors="coerce")
+    iss["month"] = iss["d"].dt.strftime("%Y-%m").fillna("")
+    iss["supplier"] = [x.strip() or "(Not specified)" for x in iss["supplier_name"]]
+    iss["ref"] = [(c.strip() or g) for c, g in zip(iss["challan_no"], iss["gate_pass_no"])]
+    iss["bill_no"] = [bn.get(int(b), "") if pd.notna(b) else "" for b in iss["bill_id"]]
+    lp = []
+    for i, b in zip(iss["id"], iss["bill_id"]):
+        c = [x for x in (last.get(i), blast.get(int(b)) if pd.notna(b) else None) if x]
+        lp.append(max(c) if c else None)
+    iss["last_pay"] = lp
+    return iss.sort_values(["d", "id"], ascending=[False, False]).reset_index(drop=True)
+
+
+def _scx_reset_filters():
+    for k in [k for k in st.session_state if str(k).startswith("scxf_")]:
+        del st.session_state[k]
+
+
+def _scx_filter_ui(df):
+    """returns (filtered df, [(label, value)] for print / Excel)"""
+    today = local_now().date()
+    fl = []
+    with st.container(border=True):
+        c = st.columns([2.1, 0.9, 1.4, 1.6, 1.6])
+        rng = c[0].date_input("📅 Date range", value=(today.replace(day=1), today), key="scxf_rng")
+        alld = c[1].checkbox("All dates", key="scxf_all")
+        unit_opts = ["All Units"] + list(FACTORIES)
+        if "scxf_unit" not in st.session_state:
+            st.session_state["scxf_unit"] = FAC if (FAC in FACTORIES) else "All Units"
+        unit = c[2].selectbox("🏬 Store / Unit", unit_opts, key="scxf_unit")
+        fac = c[3].selectbox("🏭 Sub-Contract Factory", ["All"] + sorted(df["subcon_name"].unique()), key="scxf_fac")
+        sup = c[4].selectbox("🤝 Supplier", ["All"] + sorted(df["supplier"].unique(), key=str.lower), key="scxf_sup")
+        c2 = st.columns([1.8, 1.3, 1.3, 0.8])
+        chem = c2[0].selectbox("🧪 Chemical Product", ["All"] + sorted(df["item_name"].unique(), key=str.lower), key="scxf_chem")
+        rst = c2[1].selectbox("💲 Rate Status", ["All", "Rate Pending", "Rate Assigned"], key="scxf_rst")
+        pst = c2[2].selectbox("💳 Payment Status", ["All"] + SCX_PAY_STATUS, key="scxf_pst")
+        c2[3].markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        c2[3].button("↺ Reset", key="scxf_reset", on_click=_scx_reset_filters, use_container_width=True)
+    out = df
+    if alld:
+        fl.append(("Date range", "All dates"))
+    else:
+        d1, d2 = (rng[0], rng[-1]) if isinstance(rng, (tuple, list)) and len(rng) else (today.replace(day=1), today)
+        out = out[(out["d"].dt.date >= d1) & (out["d"].dt.date <= d2)]
+        fl.append(("Date range", f"{d1:%d-%b-%Y} to {d2:%d-%b-%Y}"))
+    for lab, col, val in (("Store / Unit", "factory_name", unit if unit != "All Units" else None), ("Sub-Contract Factory", "subcon_name", fac if fac != "All" else None),
+                          ("Supplier", "supplier", sup if sup != "All" else None), ("Chemical", "item_name", chem if chem != "All" else None),
+                          ("Rate Status", "rate_status", rst if rst != "All" else None), ("Payment Status", "pay_status", pst if pst != "All" else None)):
+        if val:
+            out = out[out[col] == val]
+            fl.append((lab, val))
+    return out, fl
+
+
+def _scx_kpis_html(d):
+    nq = d["qty"].sum()
+    units = sorted({u for u in d["unit"] if u})
+    qtxt = f"{_inrq(nq)} {units[0]}" if len(units) == 1 else f"{_inrq(nq)}"
+    qsub = "" if len(units) <= 1 else "mixed units"
+    unp = d[d["rate_status"] == "Rate Pending"]
+    cards = [("🏭", "Total Sub-Contract Factories", f"{d['subcon_name'].nunique():,}", f"{len(d):,} transactions", "#DBEAFE", "#0B2447"),
+             ("🧪", "Total Chemical Quantity Sent", qtxt, qsub or f"{d['item_name'].nunique():,} chemicals", "#DCFCE7", "#0B2447"),
+             ("💰", "Total Chemical Cost", _bdt(d["total"].sum()), "Qty × Rate (priced entries)", "#EDE9FE", "#0B2447"),
+             ("✅", "Total Paid Amount", _bdt(d["paid"].sum()), f"{int((d['pay_status'] == 'Paid').sum())} fully paid", "#DCFCE7", "#15803D"),
+             ("⏳", "Total Pending Amount", _bdt(d["pending"].sum()), f"{int(d['pay_status'].isin(['Unpaid', 'Partially Paid']).sum())} entries open", "#FEF3C7", "#DC2626"),
+             ("🏷️", "Unpriced Entries", f"{len(unp):,}", f"Qty {_inrq(unp['qty'].sum())} · rate pending", "#E2E8F0", "#475569")]
+    return "<div class='scx-kpis'>" + "".join(
+        f"<div class='scx-k' style='--bg:{bg};--vc:{vc}'><div class='ic'>{i}</div><div><div class='l'>{l}</div><div class='v'>{v}</div><div class='d'>{s}</div></div></div>"
+        for i, l, v, s, bg, vc in cards) + "</div>"
+
+
+def _scx_charts(d):
+    try:
+        import altair as alt
+    except Exception:
+        st.caption("Chart-er jonno altair lage.")
+        return
+    c1, c2, c3 = st.columns([1.15, 1.6, 1.1])
+    with c1.container(border=True):
+        st.markdown(_scx_band("📊", "Factory-wise Chemical Distribution"), unsafe_allow_html=True)
+        g = d.groupby("subcon_name", as_index=False)["qty"].sum().sort_values("qty", ascending=False)
+        if g["qty"].sum() <= 0:
+            st.caption("Data nei.")
+        else:
+            top = g.head(5).copy()
+            if len(g) > 5:
+                top = pd.concat([top, pd.DataFrame({"subcon_name": ["Others"], "qty": [g["qty"].iloc[5:].sum()]})])
+            top = top.rename(columns={"subcon_name": "Factory"})
+            top["pct"] = top["qty"] / top["qty"].sum()
+            base = alt.Chart(top).encode(theta=alt.Theta("qty:Q", stack=True),
+                                         color=alt.Color("Factory:N", scale=alt.Scale(range=SCX_BLUES), legend=alt.Legend(orient="bottom", title=None, columns=2)),
+                                         tooltip=["Factory", alt.Tooltip("qty:Q", format=",.0f", title="Qty"), alt.Tooltip("pct:Q", format=".0%")])
+            ring = base.mark_arc(innerRadius=58, outerRadius=100)
+            ctr = alt.Chart(pd.DataFrame({"t": [_inrq(g["qty"].sum())]})).mark_text(size=20, fontWeight="bold", color="#0B2447").encode(text="t:N")
+            st.altair_chart((ring + ctr).properties(height=250), use_container_width=True)
+    with c2.container(border=True):
+        st.markdown(_scx_band("📈", "Monthly Trend", "Quantity (bars) and Cost (line)"), unsafe_allow_html=True)
+        m = d[d["month"] != ""].groupby("month", as_index=False).agg(Qty=("qty", "sum"), Cost=("total", "sum")).sort_values("month").tail(8)
+        if m.empty:
+            st.caption("Data nei.")
+        else:
+            m["Cost"] = m["Cost"].fillna(0.0)
+            bar = alt.Chart(m).mark_bar(color="#1D4ED8", cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
+                x=alt.X("month:N", title=None, sort=None), y=alt.Y("Qty:Q", title="Quantity"), tooltip=["month", alt.Tooltip("Qty:Q", format=",.0f")])
+            line = alt.Chart(m).mark_line(color="#16A34A", point=alt.OverlayMarkDef(color="#16A34A", size=70), strokeWidth=3).encode(
+                x=alt.X("month:N", sort=None), y=alt.Y("Cost:Q", title="Cost (BDT)", axis=alt.Axis(orient="right")),
+                tooltip=["month", alt.Tooltip("Cost:Q", format=",.0f")])
+            st.altair_chart(alt.layer(bar, line).resolve_scale(y="independent").properties(height=250), use_container_width=True)
+    with c3.container(border=True):
+        st.markdown(_scx_band("🏆", "Top Sub-Contract Factories"), unsafe_allow_html=True)
+        t = d.groupby("subcon_name", as_index=False).agg(qty=("qty", "sum"), cost=("total", "sum")).sort_values("qty", ascending=False).head(6)
+        if t.empty:
+            st.caption("Data nei.")
+        else:
+            rows = [{"f": r.subcon_name, "q": r.qty, "c": 0.0 if pd.isna(r.cost) else r.cost} for r in t.itertuples()]
+            st.markdown(_scx_table([("#", "i", "sl"), ("Factory", "f", "t"), ("Qty", "q", "n"), ("Cost (BDT)", "c", "m")], rows), unsafe_allow_html=True)
+
+
+_SCX_TX_COLS = [("SL", "i", "sl"), ("Date", "issue_date", "t"), ("Sub-Contract Factory", "subcon_name", "t"), ("Supplier", "supplier", "t"), ("Chemical", "item_name", "t"),
+                ("Qty", "qty", "n"), ("UOM", "unit", "t"), ("Store", "store", "t"), ("Rate (BDT)", "rate", "m"), ("Total (BDT)", "total", "m"),
+                ("Paid (BDT)", "paid", "m"), ("Pending (BDT)", "pending", "neg"), ("Rate Status", "rate_status", "pill"), ("Payment Status", "pay_status", "pill"),
+                ("Challan / Ref", "ref", "t"), ("Remarks", "rem", "t"), ("ID", "id", "t")]
+
+
+def _scx_rows(d):
+    r = d.copy()
+    r["store"] = [short_fac(x) for x in r["factory_name"]]
+    r["rem"] = [x if len(x) <= 38 else x[:36] + "…" for x in r["remarks"]]
+    return r.to_dict("records")
+
+
+def _scx_tx_table(d, limit=150):
+    rows = _scx_rows(d.head(limit))
+    foot = {"i": f"TOTAL ({len(d):,})", "qty": d["qty"].sum(), "total": d["total"].sum(), "paid": d["paid"].sum(), "pending": d["pending"].sum()}
+    st.markdown(_scx_table(_SCX_TX_COLS, rows, foot), unsafe_allow_html=True)
+    if len(d) > limit:
+        st.caption(f"Prothom {limit}-ti dekhano holo (mot {len(d):,}) - filter diye choto korun ba Excel-e shob pawa jabe.")
+
+
+def _scx_summ(d, key, label):
+    g = d.groupby(key, as_index=False).agg(Qty=("qty", "sum"), Bill=("total", lambda s: s.sum(min_count=1)), Paid=("paid", "sum"), Pending=("pending", lambda s: s.sum(min_count=1)), Txn=("id", "count"))
+    g = g.sort_values("Bill", ascending=False, na_position="last")
+    rows = [{"k": r[key], "qty": r["Qty"], "bill": r["Bill"], "paid": r["Paid"], "pend": r["Pending"], "n": r["Txn"]} for _, r in g.iterrows()]
+    foot = {"k": "TOTAL", "qty": d["qty"].sum(), "bill": d["total"].sum(), "paid": d["paid"].sum(), "pend": d["pending"].sum(), "n": len(d)}
+    cols = [(label, "k", "t"), ("Total Qty", "qty", "n"), ("Total Bill (BDT)", "bill", "m"), ("Total Paid (BDT)", "paid", "m"), ("Pending (BDT)", "pend", "neg"), ("Transactions", "n", "n")]
+    return g, rows, cols, foot
+
+
+def _scx_chart_monthly(m):
+    try:
+        import altair as alt
+        cols = [c for c in ("Value (Rate×Qty)", "Bill amount", "Paid") if c in m.columns]
+        d = m.groupby("Month", as_index=False)[cols].sum().sort_values("Month")
+        lg = d.melt("Month", var_name="Type", value_name="Taka")
+        ch = (alt.Chart(lg).mark_bar(cornerRadiusTopLeft=7, cornerRadiusTopRight=7)
+              .encode(x=alt.X("Month:N", sort=None, title=None), xOffset="Type:N", y=alt.Y("Taka:Q", title="৳"),
+                      color=alt.Color("Type:N", scale=alt.Scale(domain=cols, range=["#0F766E", "#D97706", "#16A34A"][:len(cols)]), legend=alt.Legend(orient="top", title=None)),
+                      tooltip=["Month", "Type", alt.Tooltip("Taka:Q", format=",.0f")]).properties(height=280))
+        st.altair_chart(ch, use_container_width=True)
+    except Exception:
+        pass
+
+
+def _scx_chart_due(bal):
+    try:
+        import altair as alt
+        d = bal[bal["Due"] > 0]
+        if d.empty:
+            return
+        ch = (alt.Chart(d).mark_arc(innerRadius=62, outerRadius=118)
+              .encode(theta="Due:Q", color=alt.Color("Factory:N", legend=alt.Legend(orient="right", title=None)),
+                      tooltip=["Factory", alt.Tooltip("Due:Q", format=",.0f")]).properties(height=270))
+        st.altair_chart(ch, use_container_width=True)
+    except Exception:
+        pass
 
 
 def _scx_search_select(label, options, key):
@@ -33860,15 +34336,21 @@ def _scx_entry():
     subs = _scx_subcons()
     NEWL = "➕ Notun Sub-Contract Factory"
     with st.container(border=True):
-        st.markdown(_px_band("① Gate Pass-er tothyo", "Kon sub-contract factory-te, kon Gate Pass-e chemical jachche"), unsafe_allow_html=True)
+        st.markdown(_scx_band("🚪", "① Gate Pass-er tothyo", "Kon sub-contract factory-te, kon Gate Pass-e chemical jachche"), unsafe_allow_html=True)
         c1, c2, c3 = st.columns([1.7, 1.2, 1.2])
         pick = c1.selectbox("Sub-Contract Factory*", subs + [NEWL], key=f"scx_sub_{gen}")
         newname = c1.text_input("Notun factory-r nam*", key=f"scx_newsub_{gen}").strip() if pick == NEWL else ""
         gp = c2.text_input("Gate Pass No*", key=f"scx_gp_{gen}").strip()
         gdate = c3.date_input("Gate Pass tarikh", value=local_now().date(), max_value=local_now().date(), key=f"scx_dt_{gen}")
-        d1, d2 = st.columns([1.2, 2.4])
-        unit_fac = FAC if (FAC and "CONSOLIDATED" not in FAC) else d1.selectbox("Kon Unit theke", list(FACTORIES), key=f"scx_unit_{gen}")
-        remarks = d2.text_input("Remarks (ঐচ্ছিক)", key=f"scx_rem_{gen}")
+        d1, d2, d3, d4 = st.columns([1.2, 1.7, 1.3, 1.9])
+        unit_fac = FAC if (FAC and "CONSOLIDATED" not in FAC) else d1.selectbox("Store / Unit", list(FACTORIES), key=f"scx_unit_{gen}")
+        if FAC and "CONSOLIDATED" not in FAC:
+            d1.markdown(f"**Store / Unit**<br>{html_lib.escape(short_fac(FAC))}", unsafe_allow_html=True)
+        NOSUP, NEWSUP = "(Supplier nei / lagbe na)", "➕ Notun supplier"
+        sp = d2.selectbox("Supplier (jodi thake)", [NOSUP] + _scx_suppliers() + [NEWSUP], key=f"scx_sup_{gen}")
+        supplier = d2.text_input("Notun supplier-er nam", key=f"scx_newsup_{gen}").strip() if sp == NEWSUP else ("" if sp == NOSUP else sp)
+        challan = d3.text_input("Challan / Reference No", key=f"scx_chl_{gen}", help="Khali rakhle Gate Pass No-i reference hobe.").strip()
+        remarks = d4.text_input("Remarks (ঐচ্ছিক)", key=f"scx_rem_{gen}")
         subname = newname if pick == NEWL else pick
         if gp and subname:
             ex = q("SELECT COUNT(*) AS n FROM subcon_issues WHERE subcon_name=%s AND gate_pass_no=%s", (subname, gp))[0]["n"]
@@ -33877,7 +34359,7 @@ def _scx_entry():
     key_lines = f"scx_lines_{gen}"
     lines = st.session_state.setdefault(key_lines, [])
     with st.container(border=True):
-        st.markdown(_px_band("② Chemical add", "Dropdown-e nam likhe search korun, Qty diye '➕ Line' chapun"), unsafe_allow_html=True)
+        st.markdown(_scx_band("🧪", "② Chemical add", "Dropdown-e nam likhe search korun, Qty diye '➕ Line' chapun"), unsafe_allow_html=True)
         if chems.empty:
             st.warning("Chemical List khali - niche 'List-e nei? Notun chemical add' diye ba '🧴 Chemical List' tab theke age chemical add korun.")
         labels = {f"{r['name']}   ·   {r['unit']}": r for r in chems.to_dict("records")}
@@ -33909,7 +34391,7 @@ def _scx_entry():
     if not lines:
         return
     with st.container(border=True):
-        st.markdown(_px_band("③ Review & Save", f"{len(lines)}-ti chemical"), unsafe_allow_html=True)
+        st.markdown(_scx_band("✅", "③ Review & Save", f"{len(lines)}-ti chemical"), unsafe_allow_html=True)
         tbl = pd.DataFrame({"Remove": False, "Chemical": [x["name"] for x in lines], "Unit": [x["unit"] for x in lines],
                             "Qty": [x["qty"] for x in lines], "Rate (ঐচ্ছিক)": [x["rate"] for x in lines]})
         ed = st.data_editor(tbl, hide_index=True, use_container_width=True, key=f"scx_ed_{gen}_{len(lines)}", disabled=["Chemical", "Unit"],
@@ -33940,7 +34422,7 @@ def _scx_entry():
             elif guard(False):
                 if pick == NEWL:
                     scx_add_subcon(subname)
-                n = scx_save_issue(unit_fac, subname, gp, gdate.strftime(DATE_FMT), final, remarks.strip())
+                n = scx_save_issue(unit_fac, subname, gp, gdate.strftime(DATE_FMT), final, remarks.strip(), supplier, challan)
                 if n:
                     st.session_state["scx_gen"] = gen + 1
                     st.session_state.pop(key_lines, None)
@@ -33968,7 +34450,7 @@ def _scx_chem_list():
                           (SELECT COUNT(*) FROM subcon_issues i WHERE i.chemical_id=c.id OR LOWER(i.item_name)=LOWER(c.name)) AS used
                    FROM subcon_chemicals c ORDER BY LOWER(c.name)""")
     with st.container(border=True):
-        st.markdown(_px_band("🧴 Chemical List", "Chemical store-er shob chemical ekhane ekbar add korun - Gate Pass-e dropdown-e search kore pabe"), unsafe_allow_html=True)
+        st.markdown(_scx_band("🧴", "Chemical List", "Chemical store-er shob chemical ekhane ekbar add korun - Gate Pass-e dropdown-e search kore pabe"), unsafe_allow_html=True)
         k = st.columns(3)
         k[0].metric("Mot chemical", f"{len(chems):,}")
         k[1].metric("Active", f"{int(chems['active'].sum()) if not chems.empty else 0:,}")
@@ -34295,6 +34777,7 @@ def _scx_report():
             st.caption("Issue = Gate Pass tarikh, Bill = Bill tarikh, Paid = Payment tarikh onujayi oi mashe dhora hoy.")
             st.dataframe(m, hide_index=True, use_container_width=True, height=min(120 + 35 * len(m), 520),
                          column_config={c_: st.column_config.NumberColumn(format="%.0f") for c_ in ("Qty", "Value (Rate×Qty)", "Bill amount", "Paid") if c_ in m.columns})
+            _scx_chart_monthly(m)
             export_buttons(m, "subcon_monthly", "Sub-Contract Monthly")
     elif t == 1:
         if iss_p.empty:
@@ -34351,34 +34834,504 @@ def _scx_report():
         st.caption("Shob somoyer hishab (somoykal filter lage na): koto-r chemical gelo, koto-r Bill hoyeche, koto paid, ar koto Due.")
         st.dataframe(bal, hide_index=True, use_container_width=True, height=min(120 + 35 * len(bal), 420),
                      column_config={c_: st.column_config.NumberColumn(format="%.0f") for c_ in bal.columns if c_ not in ("Factory", "Gate Pass", "Rate baki line")})
+        _scx_chart_due(bal)
         export_buttons(bal, "subcon_balance", "Sub-Contract Factory-wise balance")
 
 
+SCX_SECS = ["📊 Dashboard & Reports", "➕ New Transfer (Store)", "💲 Assign Rate (Sourcing)", "💵 Payment (Accounts)", "🧴 Chemical List"]
+SCX_VIEWS = ["📋 All Transactions", "🏭 By Factory", "🤝 By Supplier", "🧪 By Product", "💳 By Payment Status", "🖨 Summary / Print / Excel"]
+
+
+def _scx_go(sec=None, view=None):
+    if sec:
+        st.session_state["lz_scx"] = sec
+    if view:
+        st.session_state["lz_scxv"] = view
+
+
+def _scx_payments_df(d):
+    """every payment (transaction-wise and old bill-wise) behind the shown transactions"""
+    ids = [int(i) for i in d["id"]]
+    if not ids:
+        return pd.DataFrame()
+    a = qdf("""SELECT p.id AS pid, p.pay_date, i.subcon_name, i.supplier_name, i.item_name, i.gate_pass_no, p.amount, p.method, p.reference, p.remarks,
+                      p.entered_by, p.created_at, 'Transaction payment' AS kind
+               FROM subcon_tx_payments p JOIN subcon_issues i ON i.id=p.issue_id WHERE p.issue_id = ANY(%s) ORDER BY p.id DESC""", (ids,))
+    bids = sorted({int(b) for b in d["bill_id"].dropna()})
+    b = pd.DataFrame()
+    if bids:
+        b = qdf("""SELECT p.id AS pid, p.pay_date, bl.subcon_name, '' AS supplier_name, ('Bill ' || bl.bill_no) AS item_name, '' AS gate_pass_no, p.amount,
+                          p.mode AS method, p.reference, p.note AS remarks, p.entered_by, p.created_at, 'Bill payment' AS kind
+                   FROM subcon_payments p JOIN subcon_bills bl ON bl.id=p.bill_id WHERE p.bill_id = ANY(%s) ORDER BY p.id DESC""", (bids,))
+    return pd.concat([x for x in (a, b) if not x.empty], ignore_index=True) if (not a.empty or not b.empty) else pd.DataFrame()
+
+
+def _scx_detail(d_all, iid, fl):
+    r = d_all[d_all["id"] == iid]
+    if r.empty:
+        st.warning("Transaction paoa jayni.")
+        return
+    r = r.iloc[0]
+    E = lambda x: html_lib.escape(str(x)) if x not in (None, "") and not (isinstance(x, float) and pd.isna(x)) else "-"
+    pays = qdf("SELECT * FROM subcon_tx_payments WHERE issue_id=%s ORDER BY id", (int(iid),))
+    rl = qdf("SELECT * FROM subcon_rate_log WHERE issue_id=%s ORDER BY id", (int(iid),))
+    direct = float(pd.to_numeric(pays["amount"], errors="coerce").sum()) if not pays.empty else 0.0
+    kv = lambda pairs: "<div class='scx-kv'>" + "".join(f"<b>{html_lib.escape(k)}</b><span>{v}</span>" for k, v in pairs) + "</div>"
+    st.markdown(f"<div class='scx-panel' style='border-left:6px solid #1D4ED8'><h4>🔎 Transaction #{int(iid)} — {E(r['item_name'])} → {E(r['subcon_name'])} "
+                f"&nbsp; {_scx_pill(r['pay_status'])} {_scx_pill(r['rate_status'])}</h4></div>", unsafe_allow_html=True)
+    if bool(r["overpaid"]):
+        st.warning(f"⚠ Paid amount ({_bdt(r['paid'], 2)}) total bill-er ({_bdt(r['total'], 2)}) cheye beshi - rate/payment check korun.")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("<div class='scx-panel'><h4>📄 Transaction Information</h4>" + kv([
+            ("Date", E(r["issue_date"])), ("Store / Unit", E(r["factory_name"])), ("Gate Pass No", E(r["gate_pass_no"])), ("Challan / Reference", E(r["ref"])),
+            ("Sub-Contract Factory", E(r["subcon_name"])), ("Supplier", E(r["supplier"]))]) + "</div>", unsafe_allow_html=True)
+        st.markdown("<div class='scx-panel'><h4>🧪 Chemical & Amount</h4>" + kv([
+            ("Chemical", E(r["item_name"])), ("Quantity", f"{_inrq(r['qty'])} {E(r['unit'])}"),
+            ("Unit Rate (BDT)", _inr(r["rate"], 2) if pd.notna(r["rate"]) and r["rate"] > 0 else "<i>Rate pending</i>"),
+            ("Total Amount (BDT)", _inr(r["total"], 2) if pd.notna(r["total"]) else "<i>Unpriced</i>"),
+            ("Paid (BDT)", _inr(r["paid"], 2)), ("Pending (BDT)", "<b style='color:#DC2626'>" + _inr(r["pending"], 2) + "</b>" if pd.notna(r["pending"]) else "-"),
+            ("Rate set by / on", f"{E(r['rate_by'])} · {E(r['rate_date'])}" if r["rate_by"] else "-"),
+            ("Bill", E(r["bill_no"]))]) + "</div>", unsafe_allow_html=True)
+        st.markdown("<div class='scx-panel'><h4>📝 Remarks & Audit</h4>" + kv([
+            ("Remarks", E(r["remarks"])), ("Created by", f"{E(r['entered_by'])} · {E(r['created_at'])}"),
+            ("Last updated by", f"{E(r['updated_by'])} · {E(r['updated_at'])}" if r["updated_by"] else "-")]) + "</div>", unsafe_allow_html=True)
+    with c2:
+        st.markdown("<div class='scx-panel'><h4>💳 Payment History</h4>", unsafe_allow_html=True)
+        if pays.empty:
+            st.caption("Ei transaction-e ekhono kono alada payment nei.")
+        else:
+            rows = [{"d": p.pay_date, "a": float(p.amount), "m": p.method, "r": p.reference, "n": p.remarks, "b": p.entered_by, "t": p.created_at} for p in pays.itertuples()]
+            st.markdown(_scx_table([("Date", "d", "t"), ("Amount (BDT)", "a", "m"), ("Method", "m", "t"), ("Voucher / Ref", "r", "t"), ("Remarks", "n", "t"),
+                                    ("Recorded by", "b", "t"), ("Timestamp", "t", "t")], rows, {"d": "TOTAL", "a": direct}), unsafe_allow_html=True)
+        share = float(r["paid"]) - direct
+        if share > 0.005:
+            st.caption(f"Bill {r['bill_no']}-er payment theke ei transaction-er ongsho: {_bdt(share, 2)} (value onupate)")
+        st.markdown("</div>", unsafe_allow_html=True)
+        ev = [(r["created_at"], f"Entry created by <b>{E(r['entered_by'])}</b>")]
+        for x in rl.itertuples():
+            ev.append((x.changed_at, f"Rate {'set' if pd.isna(x.old_rate) else 'changed ' + _inr(x.old_rate, 2) + ' →'} <b>{_inr(x.new_rate, 2)}</b> by {E(x.changed_by)}"))
+        for p in pays.itertuples():
+            ev.append((p.created_at, f"Payment <b>{_bdt(p.amount, 2)}</b> ({E(p.method)}) by {E(p.entered_by)}"))
+        if r["updated_by"]:
+            ev.append((r["updated_at"], f"Details updated by <b>{E(r['updated_by'])}</b>"))
+        st.markdown("<div class='scx-panel'><h4>🕘 Transaction History (audit trail)</h4><div class='scx-tl'>" +
+                    "".join(f"<div>{t}<small>{E(w)}</small></div>" for w, t in ev) + "</div></div>", unsafe_allow_html=True)
+    if _scx_can_store():
+        with st.expander("✏️ Edit / 🗑 Delete (Store)"):
+            locked = bool(pd.notna(r["bill_id"])) or direct > 0 or bool(r.get("tx_id") and pd.notna(r.get("tx_id")))
+            e1, e2 = st.columns(2)
+            nd = e1.date_input("Date", value=(parse_date(r["issue_date"]) or local_now()).date(), max_value=local_now().date(), key=f"scx_ed_d_{iid}")
+            nq = e2.number_input("Quantity", min_value=0.0, value=float(r["qty"]), step=1.0, format="%g", disabled=locked, key=f"scx_ed_q_{iid}",
+                                 help="Bill / payment hole quantity bodlano jay na." if locked else None)
+            e3, e4 = st.columns(2)
+            ns = e3.text_input("Supplier", value=r["supplier_name"], key=f"scx_ed_s_{iid}")
+            nc = e4.text_input("Challan / Reference", value=r["challan_no"], key=f"scx_ed_c_{iid}")
+            nr = st.text_input("Remarks", value=r["remarks"], key=f"scx_ed_r_{iid}")
+            b1, b2 = st.columns(2)
+            if b1.button("💾 Save changes", key=f"scx_ed_save_{iid}", type="primary", use_container_width=True) and guard(False):
+                if nq <= 0:
+                    st.error("Quantity 0 hote pare na.")
+                elif scx_update_issue(int(iid), {"issue_date": nd.strftime(DATE_FMT), "supplier_name": ns.strip(), "challan_no": nc.strip(), "remarks": nr.strip(),
+                                                 "qty": None if locked else float(nq)}):
+                    done(f"✅ Transaction #{int(iid)} updated.")
+            okd = b2.checkbox("Delete korte chai", key=f"scx_ed_dok_{iid}")
+            if b2.button("🗑 Delete", key=f"scx_ed_del_{iid}", disabled=not okd, use_container_width=True) and guard(False):
+                if scx_delete_issue(int(iid)):
+                    done("Transaction deleted.")
+    if st.toggle("🖨 Ei transaction-er Print / PDF", key=f"scx_p1_{iid}"):
+        _rp_show(_scx_doc(d_all[d_all["id"] == iid], [("Transaction", f"#{int(iid)}")]))
+
+
+def _scx_pick_tx(d, d_all, fl):
+    if d.empty:
+        return
+    lab = {f"#{r['id']} · {r['issue_date']} · {r['subcon_name']} · {r['item_name']} · {_inrq(r['qty'])} {r['unit']}": int(r["id"]) for r in d.head(600).to_dict("records")}
+    c = st.columns([3.2, 1.2])
+    pick = _scx_search_select("🔍 Transaction bachun → View Details / Edit / Print", list(lab), "scx_pick_tx")
+    if pick:
+        _scx_detail(d_all, lab[pick], fl)
+
+
+def _scx_views(d, d_all, fl):
+    v = lazy_tab_select(SCX_VIEWS, "lz_scxv")
+    if v == 0:
+        c = st.columns([1, 4])
+        lim = c[0].selectbox("Rows", [50, 100, 200, 500], index=1, key="scx_lim")
+        _scx_tx_table(d, lim)
+        _scx_pick_tx(d, d_all, fl)
+    elif v in (1, 2, 3):
+        key, label = {1: ("subcon_name", "Sub-Contract Factory"), 2: ("supplier", "Supplier"), 3: ("item_name", "Chemical Product")}[v]
+        g, rows, cols, foot = _scx_summ(d, key, label)
+        if g.empty:
+            st.info("Data nei.")
+            return
+        st.markdown(_scx_table([("SL", "k", "sl")] + cols, rows, foot), unsafe_allow_html=True)
+        pick = st.selectbox(f"{label} bachun - tar transaction gulo dekhun", ["—"] + [r["k"] for r in rows], key=f"scx_sum_pick_{v}")
+        if pick != "—":
+            _scx_tx_table(d[d[key] == pick], 100)
+        export_buttons(g.rename(columns={key: label}), f"subcon_{key}", f"Sub-Contract {label}-wise")
+    elif v == 4:
+        x = d.assign(lp=pd.to_datetime(d["last_pay"], errors="coerce"))
+        g = x.groupby(["subcon_name", "supplier"], as_index=False).agg(
+            bill=("total", lambda s: s.sum(min_count=1)), paid=("paid", "sum"), pend=("pending", lambda s: s.sum(min_count=1)), last=("lp", "max"), n=("id", "count"))
+        rows = []
+        for r in g.itertuples():
+            stt = "Unpriced" if pd.isna(r.bill) else ("Paid" if (r.pend or 0) <= 0.005 else ("Partially Paid" if r.paid > 0.005 else "Unpaid"))
+            rows.append({"f": r.subcon_name, "s": r.supplier, "b": r.bill, "p": r.paid, "d": r.pend, "l": r.last.strftime(DATE_FMT) if pd.notna(r.last) else "-", "st": stt})
+        foot = {"f": "TOTAL", "b": d["total"].sum(), "p": d["paid"].sum(), "d": d["pending"].sum()}
+        st.markdown(_scx_band("💳", "Payment Tracking Report", "Factory + Supplier onujayi bill, paid, pending ar last payment"), unsafe_allow_html=True)
+        st.markdown(_scx_table([("SL", "f", "sl"), ("Sub-Contract Factory", "f", "t"), ("Supplier", "s", "t"), ("Total Bill (BDT)", "b", "m"), ("Total Paid (BDT)", "p", "m"),
+                                ("Pending (BDT)", "d", "neg"), ("Last Payment", "l", "t"), ("Payment Status", "st", "pill")], rows, foot), unsafe_allow_html=True)
+        ph = _scx_payments_df(d)
+        st.markdown(_scx_band("🧾", "Payment History", "Prottek payment alada alada - kon transaction-e, ke, kokhon"), unsafe_allow_html=True)
+        if ph.empty:
+            st.caption("Ei filter-e kono payment nei.")
+        else:
+            prow = [{"d": p.pay_date, "f": p.subcon_name, "i": p.item_name, "g": p.gate_pass_no, "a": float(p.amount), "m": p.method, "r": p.reference, "n": p.remarks,
+                     "b": p.entered_by, "k": p.kind} for p in ph.head(300).itertuples()]
+            st.markdown(_scx_table([("Date", "d", "t"), ("Sub-Contract Factory", "f", "t"), ("Chemical / Bill", "i", "t"), ("Gate Pass", "g", "t"), ("Amount (BDT)", "a", "m"),
+                                    ("Method", "m", "t"), ("Voucher / Ref", "r", "t"), ("Remarks", "n", "t"), ("Recorded by", "b", "t"), ("Type", "k", "t")], prow,
+                                   {"d": "TOTAL", "a": float(pd.to_numeric(ph["amount"], errors="coerce").sum())}), unsafe_allow_html=True)
+    else:
+        st.markdown(_scx_band("🖨", "Summary Report, Print & Excel", "Ekhon-er filter onujayi - A4 print, PDF ar Excel (Summary + Detail sheets)"), unsafe_allow_html=True)
+        if d.empty:
+            st.info("Ei filter-e kono transaction nei.")
+            return
+        xmime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        c1, c2 = st.columns([1.3, 3])
+        fn = f"SubContract_Chemicals_{local_now():%Y%m%d}.xlsx"
+        try:
+            import openpyxl  # noqa: F401
+            if not _lazy_download(c1, "⬇ Excel (multi-sheet)", lambda: _scx_xlsx(d, fl), fn, xmime, "scx_dl_x"):
+                c1.download_button("⬇ Excel (multi-sheet)", _scx_xlsx(d, fl), fn, xmime, key="scx_dl_x_b")
+        except ImportError:
+            c1.caption("Excel needs: pip install openpyxl")
+        c2.caption("Excel-e Summary, Factory, Supplier, Chemical, Payment Tracking, Transactions ar Payments sheet thake. Niche A4 report-er PDF / Print.")
+        _rp_show(_scx_doc(d, fl))
+
+
+def _scx_pay_ui(df):
+    can = _scx_can_acc()
+    if df.empty:
+        st.info("Ekhono kono transaction nei.")
+        return
+    st.markdown(_scx_band("💵", "Record Payment", "Transaction-wise payment - partial payment hoy, prottek payment alada thake"), unsafe_allow_html=True)
+    unp = df[df["rate_status"] == "Rate Pending"]
+    if len(unp):
+        st.warning(f"{len(unp)}-ti entry-r rate deya hoy ni (Unpriced) - rate na dile payment kora jay na. 'Assign Rate' tab-e rate din.")
+    if not can:
+        st.info("Payment entry shudhu Accounts (ba Store Manager) korte parben.")
+    else:
+        pend = df[(df["pending"] > 0.005) & (df["rate_status"] == "Rate Assigned")]
+        c1, c2 = st.columns(2)
+        fac = c1.selectbox("Sub-Contract Factory", ["All"] + sorted(pend["subcon_name"].unique()), key="scx_pay_fac")
+        sup = c2.selectbox("Supplier", ["All"] + sorted(pend["supplier"].unique(), key=str.lower), key="scx_pay_sup")
+        if fac != "All":
+            pend = pend[pend["subcon_name"] == fac]
+        if sup != "All":
+            pend = pend[pend["supplier"] == sup]
+        if pend.empty:
+            st.success("🎉 Ei filter-e kono payment baki nei.")
+        else:
+            pend = pend.sort_values("d").head(300)
+            gen = st.session_state.get("scx_payg", 0)
+            full = st.checkbox("সব pending ekbare pay (porichoy tick)", key=f"scx_pf_{gen}")
+            tbl = pd.DataFrame({"Pay now": pend["pending"].astype(float).round(2).values if full else 0.0, "Date": pend["issue_date"].values,
+                                "Factory": pend["subcon_name"].values, "Supplier": pend["supplier"].values, "Chemical": pend["item_name"].values,
+                                "Total": pend["total"].astype(float).values, "Paid": pend["paid"].astype(float).values,
+                                "Pending": pend["pending"].astype(float).values, "ID": pend["id"].values})
+            ed = st.data_editor(tbl, hide_index=True, use_container_width=True, height=min(100 + 35 * len(tbl), 440),
+                                key=f"scx_pay_ed_{gen}_{int(full)}_{fac}_{sup}", disabled=[c for c in tbl.columns if c != "Pay now"],
+                                column_config={"Pay now": st.column_config.NumberColumn("💵 Pay now (BDT)", min_value=0.0, step=100.0, format="%.2f"),
+                                               "Total": st.column_config.NumberColumn(format="%.2f"), "Paid": st.column_config.NumberColumn(format="%.2f"),
+                                               "Pending": st.column_config.NumberColumn(format="%.2f")})
+            sel = ed[ed["Pay now"].fillna(0).astype(float) > 0]
+            over = sel[sel["Pay now"].astype(float) > sel["Pending"].astype(float) + 0.005]
+            if not over.empty:
+                st.error("Pending-er cheye beshi: " + ", ".join(f"{r['Chemical']} ({r['Pay now']:,.2f} > {r['Pending']:,.2f})" for r in over.to_dict("records")))
+            p1, p2, p3, p4 = st.columns([1.1, 1.3, 1.4, 1.8])
+            pdt = p1.date_input("Payment date", value=local_now().date(), max_value=local_now().date(), key=f"scx_pd_{gen}")
+            pm = p2.selectbox("Method", SCX_PAY_MODES, key=f"scx_pm_{gen}")
+            pref = p3.text_input("Voucher / Cheque / Ref No", key=f"scx_pr_{gen}")
+            prem = p4.text_input("Remarks (ঐচ্ছিক)", key=f"scx_prm_{gen}")
+            tot = float(sel["Pay now"].astype(float).sum()) if not sel.empty else 0.0
+            if st.button(f"💵 {len(sel)}-ti line, mot ৳{_inr(tot, 2)} payment save korun", key=f"scx_paybtn_{gen}", type="primary",
+                         disabled=(sel.empty or not over.empty), use_container_width=True):
+                n = scx_pay_lines([(int(r["ID"]), float(r["Pay now"])) for r in sel.to_dict("records")], pdt.strftime(DATE_FMT), pm, pref.strip(), prem.strip())
+                if n:
+                    st.session_state["scx_payg"] = gen + 1
+                    done(f"✅ {n}-ti line-e ৳{_inr(tot, 2)} payment save hoyeche.")
+    with st.expander("🕘 Payment history / vul payment delete"):
+        ph = qdf("""SELECT p.id, p.pay_date, i.subcon_name, i.item_name, i.gate_pass_no, p.amount, p.method, p.reference, p.remarks, p.entered_by, p.created_at
+                    FROM subcon_tx_payments p JOIN subcon_issues i ON i.id=p.issue_id ORDER BY p.id DESC LIMIT 120""")
+        if ph.empty:
+            st.caption("Ekhono kono payment nei.")
+        else:
+            rows = [{"d": p.pay_date, "f": p.subcon_name, "i": p.item_name, "g": p.gate_pass_no, "a": float(p.amount), "m": p.method, "r": p.reference, "n": p.remarks,
+                     "b": p.entered_by, "t": p.created_at} for p in ph.itertuples()]
+            st.markdown(_scx_table([("Date", "d", "t"), ("Factory", "f", "t"), ("Chemical", "i", "t"), ("Gate Pass", "g", "t"), ("Amount (BDT)", "a", "m"), ("Method", "m", "t"),
+                                    ("Voucher / Ref", "r", "t"), ("Remarks", "n", "t"), ("By", "b", "t"), ("Timestamp", "t", "t")], rows), unsafe_allow_html=True)
+            if can:
+                byp = {int(r.id): r for r in ph.itertuples()}
+                pid = st.selectbox("Payment", list(byp), key="scx_ldel", format_func=lambda i: f"{byp[i].subcon_name} · {byp[i].item_name} · {byp[i].pay_date} · ৳{float(byp[i].amount):,.2f}")
+                if st.checkbox("Ami nishchit - ei payment delete", key="scx_ldelok") and st.button("🗑 Payment delete", key="scx_ldelbtn") and guard(False):
+                    if scx_delete_line_payment(pid):
+                        done("Payment deleted.")
+
+
+def _scx_dashboard():
+    df = _scx_load()
+    if df.empty:
+        st.markdown("<div class='scx-empty'><div class='e'>🧪</div><b>Ekhono kono Chemical Transfer nei</b>"
+                    "<span>Prothome '🧴 Chemical List'-e chemical add korun, tarpor '➕ New Transfer (Store)' diye prothom entry likhun.</span></div>", unsafe_allow_html=True)
+        c = st.columns(2)
+        c[0].button("➕ New Transfer", key="scx_qa_new", on_click=_scx_go, args=(SCX_SECS[1],), use_container_width=True)
+        c[1].button("🧴 Chemical List", key="scx_qa_rep", on_click=_scx_go, args=(SCX_SECS[4],), use_container_width=True)
+        return
+    d, fl = _scx_filter_ui(df)
+    if d.empty and len(df):
+        st.info("Ei filter-e kono transaction nei. 'All dates' tick korun ba '↺ Reset' chapun.")
+    st.markdown(_scx_kpis_html(d), unsafe_allow_html=True)
+    try:
+        _scx_charts(d)
+    except Exception as _e:
+        st.caption(f"Chart load hoyni: {_e}")
+    _scx_views(d, df, fl)
+    b1, b2, b3 = st.columns([1.15, 1, 1.1])
+    with b1.container(border=True):
+        st.markdown(_scx_band("🤝", "Supplier-wise Summary"), unsafe_allow_html=True)
+        g, rows, cols, foot = _scx_summ(d, "supplier", "Supplier")
+        if g.empty:
+            st.caption("Data nei.")
+        else:
+            st.markdown(_scx_table([("Supplier", "k", "t"), ("Total Qty", "qty", "n"), ("Total Amount (BDT)", "bill", "m")], rows[:5]), unsafe_allow_html=True)
+    with b2.container(border=True):
+        st.markdown(_scx_band("🥧", "Payment Status"), unsafe_allow_html=True)
+        paid, pend = float(d["paid"].sum()), float(d["pending"].sum())
+        if paid + pend <= 0:
+            st.caption("Data nei.")
+        else:
+            try:
+                import altair as alt
+                pm = pd.DataFrame({"Status": ["Paid", "Pending"], "Taka": [paid, pend]})
+                ch = alt.Chart(pm).mark_arc(innerRadius=42, outerRadius=88).encode(
+                    theta="Taka:Q", color=alt.Color("Status:N", scale=alt.Scale(domain=["Paid", "Pending"], range=["#16A34A", "#F59E0B"]), legend=None),
+                    tooltip=["Status", alt.Tooltip("Taka:Q", format=",.0f")]).properties(height=190)
+                st.altair_chart(ch, use_container_width=True)
+            except Exception:
+                pass
+            st.markdown(f"<div style='font-size:13px'><span class='pl paid'>Paid</span> {_bdt(paid)} &nbsp; <span class='pl pend'>Pending</span> {_bdt(pend)}"
+                        + (f" &nbsp; <span class='pl unp'>Unpriced</span> {int((d['rate_status'] == 'Rate Pending').sum())} entries" if (d["rate_status"] == "Rate Pending").any() else "")
+                        + "</div>", unsafe_allow_html=True)
+    with b3.container(border=True):
+        st.markdown(_scx_band("⚡", "Quick Actions"), unsafe_allow_html=True)
+        q1, q2 = st.columns(2)
+        q1.button("🧪 New Entry\n(Chemical Transfer)", key="scx_qa_new", on_click=_scx_go, args=(SCX_SECS[1],), use_container_width=True)
+        q2.button("💲 Assign Rate", key="scx_qa_rate", on_click=_scx_go, args=(SCX_SECS[2],), use_container_width=True)
+        q3, q4 = st.columns(2)
+        q3.button("💵 Record Payment", key="scx_qa_pay", on_click=_scx_go, args=(SCX_SECS[3],), use_container_width=True)
+        q4.button("🖨 Print / Excel", key="scx_qa_prt", on_click=_scx_go, args=(SCX_SECS[0], SCX_VIEWS[5]), use_container_width=True)
+
+
+# ---------------- printable report + Excel ----------------
+def _scx_doc_kpis(d):
+    nq = d["qty"].sum() if len(d) else 0
+    unp = d[d["rate_status"] == "Rate Pending"] if len(d) else d
+    return [("🏭", "Sub-Contract Factories", f"{d['subcon_name'].nunique() if len(d) else 0:,}", f"{len(d):,} transactions", "blue"),
+            ("🧪", "Chemical Qty Sent", _inrq(nq) or "0", "As entered", "teal"),
+            ("💰", "Total Cost", f"Tk {_inr(d['total'].sum() if len(d) else 0)}", "Qty x Rate", "slate"),
+            ("✅", "Total Paid", f"Tk {_inr(d['paid'].sum() if len(d) else 0)}", "All payments", "green"),
+            ("⏳", "Total Pending", f"Tk {_inr(d['pending'].sum() if len(d) else 0)}", "Bill - Paid", "red"),
+            ("🏷️", "Unpriced Entries", f"{len(unp):,}", "Rate pending", "amber")]
+
+
+def _scx_sections(d, u):
+    if d is None or d.empty:
+        return []
+    def agg(key):
+        g = d.groupby(key, as_index=False).agg(n=("id", "count"), q=("qty", "sum"), b=("total", lambda s: s.sum(min_count=1)), p=("paid", "sum"),
+                                              dd=("pending", lambda s: s.sum(min_count=1)))
+        return g.sort_values("b", ascending=False, na_position="last")
+    tot = lambda extra=None: [f"TOTAL - {u}"] + (extra or [])
+    secs = []
+    for head, key, lab in (("1. SUB-CONTRACT FACTORY-WISE SUMMARY", "subcon_name", "Sub-Contract Factory"), ("2. SUPPLIER-WISE SUMMARY", "supplier", "Supplier"),
+                           ("3. CHEMICAL-WISE SUMMARY", "item_name", "Chemical Product")):
+        g = agg(key)
+        cols = [(lab, "t"), ("Transactions", "i"), ("Total Qty", "q"), ("Total Bill (BDT)", "m"), ("Total Paid (BDT)", "m"), ("Pending (BDT)", "m")]
+        rows = [[r.__getattribute__(key), int(r.n), float(r.q), None if pd.isna(r.b) else float(r.b), float(r.p), None if pd.isna(r.dd) else float(r.dd)] for r in g.itertuples()]
+        secs.append(_rp_sec(cols, rows, tot([len(d), float(d["qty"].sum()), float(d["total"].sum()), float(d["paid"].sum()), float(d["pending"].sum())]), heading=head,
+                            note="Unpriced entries (rate not yet given by Sourcing) are not counted in Bill / Pending." if key == "subcon_name" else None))
+    x = d.assign(lp=pd.to_datetime(d["last_pay"], errors="coerce"))
+    g = x.groupby(["subcon_name", "supplier"], as_index=False).agg(b=("total", lambda s: s.sum(min_count=1)), p=("paid", "sum"), dd=("pending", lambda s: s.sum(min_count=1)), lp=("lp", "max"))
+    rows = []
+    for r in g.itertuples():
+        stt = "Unpriced" if pd.isna(r.b) else ("Paid" if (r.dd or 0) <= 0.005 else ("Partially Paid" if r.p > 0.005 else "Unpaid"))
+        rows.append([r.subcon_name, r.supplier, None if pd.isna(r.b) else float(r.b), float(r.p), None if pd.isna(r.dd) else float(r.dd), r.lp.strftime(DATE_FMT) if pd.notna(r.lp) else None, stt])
+    secs.append(_rp_sec([("Sub-Contract Factory", "t"), ("Supplier", "t"), ("Total Bill (BDT)", "m"), ("Total Paid (BDT)", "m"), ("Pending (BDT)", "m"), ("Last Payment", "d"),
+                         ("Payment Status", "t")], rows, [f"TOTAL - {u}", None, float(d["total"].sum()), float(d["paid"].sum()), float(d["pending"].sum()), None, None],
+                        heading="4. PAYMENT TRACKING REPORT"))
+    cols = [("SL", "i"), ("Date", "d"), ("Sub-Contract Factory", "t"), ("Supplier", "t"), ("Chemical", "t"), ("Qty", "q"), ("UOM", "t"), ("Rate (BDT)", "m"), ("Total (BDT)", "m"),
+            ("Paid (BDT)", "m"), ("Pending (BDT)", "m"), ("Rate Status", "t"), ("Payment Status", "t"), ("Challan / Ref", "t"), ("Remarks", "t")]
+    rows = [[n, r.issue_date, r.subcon_name, r.supplier, r.item_name, float(r.qty), r.unit, None if pd.isna(r.rate) else float(r.rate), None if pd.isna(r.total) else float(r.total),
+             float(r.paid), None if pd.isna(r.pending) else float(r.pending), r.rate_status, r.pay_status, r.ref, r.remarks] for n, r in enumerate(d.itertuples(), 1)]
+    secs.append(_rp_sec(cols, rows, [f"TOTAL - {u} ({len(d)} entries)", None, None, None, None, float(d["qty"].sum()), None, None, float(d["total"].sum()), float(d["paid"].sum()),
+                                     float(d["pending"].sum()), None, None, None, None], heading="5. TRANSACTION DETAIL"))
+    return secs
+
+
+def _scx_notes():
+    return ["This report lists chemicals transferred to Sub-Contract factories, the unit rate given by Sourcing, and every payment recorded by Accounts.",
+            "Total Bill = Quantity x Unit Rate. Entries without a rate are Unpriced - they are NOT treated as zero-cost or paid.",
+            "Pending = Total Bill - Total Paid. Quantities are shown as entered; chemicals with different units are not converted.",
+            "It is a record only - no store stock is changed by these entries."]
+
+
+def _scx_doc(d, fl):
+    units = sorted(set(d["factory_name"])) if len(d) else [FAC or ""]
+    blocks = [{"unit": u, "sections": _scx_sections(d[d["factory_name"] == u], u)} for u in units]
+    period = next((v for k, v in fl if k == "Date range"), "All dates")
+    doc = _rp_doc("SUB-CONTRACT CHEMICALS REPORT", "Sub-Contract Chemical Management Report", units, period, [(k, v) for k, v in fl if k != "Date range"], "L", blocks, _scx_notes())
+    doc["kpis"] = _scx_doc_kpis(d)
+    return doc
+
+
+def _scx_xlsx(d, fl):
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+    NAVY, BDT, QTY = "0B2447", '"BDT" #,##0.00', "#,##0.###"
+    thin = Side(style="thin", color="D5DCE8")
+    wb = Workbook()
+    wb.remove(wb.active)
+    who = st.session_state.get("user", "")
+    stamp = local_now().strftime("%d-%b-%Y %I:%M %p")
+
+    def head(ws, title):
+        ws.cell(1, 1, f"{REPORT_COMPANY} - KC Washing").font = Font(bold=True, size=15, color=NAVY)
+        ws.cell(2, 1, title).font = Font(bold=True, size=12, color="1D4ED8")
+        ws.cell(3, 1, "Filters: " + ("; ".join(f"{k}: {v}" for k, v in fl) or "None")).font = Font(size=9, color="475569")
+        ws.cell(4, 1, f"Prepared by: {who or '-'}   |   Print / export date: {stamp}").font = Font(size=9, color="475569")
+        return 6
+
+    def table(name, title, headers, kinds, rows, total_cols=()):
+        ws = wb.create_sheet(name)
+        r0 = head(ws, title)
+        for j, h in enumerate(headers, 1):
+            c = ws.cell(r0, j, h)
+            c.font, c.fill = Font(bold=True, color="FFFFFF"), PatternFill("solid", fgColor=NAVY)
+            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        first = r0 + 1
+        for i, row in enumerate(rows):
+            for j, v in enumerate(row, 1):
+                if v is not None and isinstance(v, float) and pd.isna(v):
+                    v = None
+                if kinds[j - 1] == "d" and isinstance(v, str):
+                    v = parse_date(v) or v
+                c = ws.cell(first + i, j, v)
+                c.border = Border(bottom=thin)
+                k = kinds[j - 1]
+                if k == "m":
+                    c.number_format = BDT
+                elif k == "q":
+                    c.number_format = QTY
+                elif k == "d":
+                    c.number_format = "dd-mmm-yyyy"
+        last = first + len(rows) - 1
+        if rows and total_cols:
+            tr = last + 1
+            ws.cell(tr, 1, "TOTAL (filtered rows)").font = Font(bold=True, color=NAVY)
+            for j in total_cols:
+                L = get_column_letter(j)
+                c = ws.cell(tr, j, f"=SUBTOTAL(109,{L}{first}:{L}{last})")
+                c.font, c.number_format = Font(bold=True, color=NAVY), (BDT if kinds[j - 1] == "m" else QTY)
+            for j in range(1, len(headers) + 1):
+                ws.cell(tr, j).fill = PatternFill("solid", fgColor="E8EEF8")
+        if rows:
+            ws.auto_filter.ref = f"A{r0}:{get_column_letter(len(headers))}{last}"
+        ws.freeze_panes = ws.cell(first, 1)
+        for j in range(1, len(headers) + 1):
+            mx = max([len(str(headers[j - 1]))] + [len(str(r[j - 1])) if r[j - 1] is not None else 0 for r in rows[:300]])
+            ws.column_dimensions[get_column_letter(j)].width = min(max(11, mx + 2), 46)
+        ws.sheet_view.showGridLines = False
+        ws.page_setup.orientation, ws.page_setup.paperSize, ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = "landscape", 9, 1, 0
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        return ws
+
+    # Summary sheet
+    ws = wb.create_sheet("Summary")
+    r = head(ws, "SUB-CONTRACT CHEMICALS REPORT - SUMMARY")
+    unp = d[d["rate_status"] == "Rate Pending"]
+    for lab, val, fmt in (("Total Sub-Contract Factories", d["subcon_name"].nunique(), "0"), ("Total Transactions", len(d), "0"),
+                          ("Total Chemical Quantity Sent (as entered)", float(d["qty"].sum()), QTY), ("Total Chemical Cost", float(d["total"].sum()), BDT),
+                          ("Total Paid Amount", float(d["paid"].sum()), BDT), ("Total Pending Amount", float(d["pending"].sum()), BDT),
+                          ("Unpriced Entries (rate pending)", len(unp), "0"), ("Unpriced Quantity", float(unp["qty"].sum()), QTY)):
+        ws.cell(r, 1, lab).font = Font(bold=True, color=NAVY)
+        c = ws.cell(r, 2, val)
+        c.number_format, c.font = fmt, Font(bold=True)
+        r += 1
+    ws.column_dimensions["A"].width, ws.column_dimensions["B"].width = 44, 24
+    ws.sheet_view.showGridLines = False
+
+    def agg(key):
+        g = d.groupby(key, as_index=False).agg(n=("id", "count"), q=("qty", "sum"), b=("total", lambda s: s.sum(min_count=1)), p=("paid", "sum"), dd=("pending", lambda s: s.sum(min_count=1)))
+        return [[getattr(x, key), int(x.n), float(x.q), None if pd.isna(x.b) else float(x.b), float(x.p), None if pd.isna(x.dd) else float(x.dd)] for x in g.sort_values("b", ascending=False, na_position="last").itertuples()]
+    for nm, key, lab in (("Factory", "subcon_name", "Sub-Contract Factory"), ("Supplier", "supplier", "Supplier"), ("Chemical", "item_name", "Chemical Product")):
+        table(nm, f"{lab.upper()}-WISE SUMMARY", [lab, "Transactions", "Total Qty", "Total Bill (BDT)", "Total Paid (BDT)", "Pending (BDT)"], ["t", "i", "q", "m", "m", "m"], agg(key), (2, 3, 4, 5, 6))
+    x = d.assign(lp=pd.to_datetime(d["last_pay"], errors="coerce"))
+    g = x.groupby(["subcon_name", "supplier"], as_index=False).agg(b=("total", lambda s: s.sum(min_count=1)), p=("paid", "sum"), dd=("pending", lambda s: s.sum(min_count=1)), lp=("lp", "max"))
+    prow = []
+    for t in g.itertuples():
+        stt = "Unpriced" if pd.isna(t.b) else ("Paid" if (t.dd or 0) <= 0.005 else ("Partially Paid" if t.p > 0.005 else "Unpaid"))
+        prow.append([t.subcon_name, t.supplier, None if pd.isna(t.b) else float(t.b), float(t.p), None if pd.isna(t.dd) else float(t.dd), t.lp.strftime(DATE_FMT) if pd.notna(t.lp) else None, stt])
+    table("Payment Tracking", "PAYMENT TRACKING REPORT", ["Sub-Contract Factory", "Supplier", "Total Bill (BDT)", "Total Paid (BDT)", "Pending (BDT)", "Last Payment", "Payment Status"],
+          ["t", "t", "m", "m", "m", "d", "t"], prow, (3, 4, 5))
+    rows = [[n, t.issue_date, t.subcon_name, t.supplier, t.item_name, float(t.qty), t.unit, short_fac(t.factory_name), None if pd.isna(t.rate) else float(t.rate),
+             None if pd.isna(t.total) else float(t.total), float(t.paid), None if pd.isna(t.pending) else float(t.pending), t.rate_status, t.pay_status, t.ref, t.remarks,
+             t.entered_by, t.created_at] for n, t in enumerate(d.itertuples(), 1)]
+    table("Transactions", "TRANSACTION DETAIL", ["SL", "Date", "Sub-Contract Factory", "Supplier", "Chemical", "Qty", "UOM", "Store", "Rate (BDT)", "Total (BDT)", "Paid (BDT)",
+                                                 "Pending (BDT)", "Rate Status", "Payment Status", "Challan / Ref", "Remarks", "Created by", "Created at"],
+          ["i", "d", "t", "t", "t", "q", "t", "t", "m", "m", "m", "m", "t", "t", "t", "t", "t", "t"], rows, (6, 10, 11, 12))
+    ph = _scx_payments_df(d)
+    prow = [[t.pay_date, t.subcon_name, t.item_name, t.gate_pass_no, float(t.amount), t.method, t.reference, t.remarks, t.entered_by, t.created_at, t.kind] for t in ph.itertuples()] if not ph.empty else []
+    table("Payments", "PAYMENT HISTORY", ["Date", "Sub-Contract Factory", "Chemical / Bill", "Gate Pass", "Amount (BDT)", "Method", "Voucher / Ref", "Remarks", "Recorded by", "Timestamp", "Type"],
+          ["d", "t", "t", "t", "m", "t", "t", "t", "t", "t", "t"], prow, (5,))
+    bio = io.BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+
 def tab_subcon():
-    st.markdown(_px_css("scxp"), unsafe_allow_html=True)
-    st.markdown(_px_hero("🧪", "Sub-Contract Chemicals",
-                         "Gate Pass onujayi chemical sub-contract factory-te → Sourcing rate → Accounts Bill ও Payment → mash-wise full tracking report"),
-                unsafe_allow_html=True)
+    st.markdown(_SCX_CSS, unsafe_allow_html=True)
     try:
         run_once_per_process("subcon_tables", ensure_subcon_tables)
     except Exception as e:
         st.error(f"Sub-Contract table setup failed: {e}")
         return
+    for _k, _opts in (("lz_scx", SCX_SECS), ("lz_scxv", SCX_VIEWS)):          # an old saved choice from the previous layout would break the radio
+        if st.session_state.get(_k) is not None and st.session_state.get(_k) not in _opts:
+            st.session_state.pop(_k, None)
     with st.container(key="scxp_root"):
-        try:
-            _scx_top()
-        except Exception as e:
-            st.caption(f"Summary load hoyni: {e}")
-        sec = lazy_tab_select(["➕ Gate Pass Entry", "💲 Rate (Sourcing)", "🧾 Bill & Payment (Accounts)", "📊 Monthly Report & Tracking", "🧴 Chemical List"], "lz_scx")
+        h1, h2 = st.columns([5, 1.1])
+        h1.markdown("<div class='scxh'><div class='ic'>🧪</div><div><div class='t'>Sub-Contract Chemicals Report</div>"
+                    "<div class='s'>Track, Manage &amp; Report Chemicals Sent to Sub-Contract Factories — Store → Sourcing (rate) → Accounts (payment)</div></div></div>", unsafe_allow_html=True)
+        h2.markdown("<div style='height:22px'></div>", unsafe_allow_html=True)
+        h2.button("⬇ Export", key="scx_hd_exp", type="primary", on_click=_scx_go, args=(SCX_SECS[0], SCX_VIEWS[5]), use_container_width=True)
+        sec = lazy_tab_select(SCX_SECS, "lz_scx")
         try:
             if sec == 0:
-                _scx_entry()
+                _scx_dashboard()
             elif sec == 1:
-                _scx_rates()
+                _scx_entry()
             elif sec == 2:
-                _scx_accounts()
+                _scx_rates()
             elif sec == 3:
-                _scx_report()
+                sub = lazy_tab_select(["💵 Record Payment (transaction-wise)", "🧾 Bill register (optional)"], "lz_scx_acc2")
+                if sub == 0:
+                    _scx_pay_ui(_scx_load())
+                else:
+                    _scx_accounts()
             else:
                 _scx_chem_list()
         except Exception as e:
