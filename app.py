@@ -9350,12 +9350,12 @@ def sourcing_email(rows, fac_label, sender, role):
     return "\n".join(lines)
 
 
-@tx
 def can_set_audit_qty():
     """Any working officer / manager / executive may enter the Audit Approved Qty; the view-only roles may not."""
     return st.session_state.get("role") not in NEW_RO_ROLES
 
 
+@tx
 def set_audit_qty(rid, new_q, old_q, name, req_no):
     run("UPDATE requisition_tracking SET audit_approved_qty=%s WHERE id=%s", (new_q, rid))
     audit("EDIT_AUDIT_APPROVED", f"Req {req_no} / {name}: approved {old_q:g} -> {new_q:g}")
@@ -9954,9 +9954,328 @@ def _req_inv_cat_map():
     return {(r["factory_name"], r["prod_id"]): r["c"] for r in rows if r["c"] and r["c"] != _UNCAT}
 
 
+# ============================================================
+#  REQUISITION APPROVAL TIMELINE  (read-only view: nothing here changes any record)
+#  Requisition -> Audit Approved -> Handed to Sourcing -> PO Issued -> Received (GRN).  Who did each step, when, how many days it took,
+#  and where each requisition is stuck right now.  Dates come from the requisition record itself; "who / when" of the Audit approval
+#  and of the PO update come from the existing audit log.
+# ============================================================
+RQT_ORDER = ["appr", "hand", "po", "recv"]
+RQT_LABEL = {"appr": "Waiting for Audit Approval", "hand": "Waiting for Handover to Sourcing", "po": "Waiting for PO",
+             "recv": "Waiting for Delivery / GRN", "done": "Completed"}
+RQT_COLOR = {"appr": "#DC2626", "hand": "#D97706", "po": "#7C3AED", "recv": "#0EA5E9", "done": "#16A34A"}
+RQT_SLA_LABEL = {"appr": "Audit approval", "hand": "Handover to Sourcing", "po": "PO issue", "recv": "Delivery / GRN"}
+_RQT_CSS = """<style>
+.rqt-pipe{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:2px 0 14px}
+.rqt-st{position:relative;background:#fff;border:1px solid #E2E8F0;border-radius:16px;padding:12px 16px;box-shadow:0 2px 12px rgba(11,36,71,.06);overflow:hidden}
+.rqt-st:before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--c)}
+.rqt-st .l{font-size:11px;font-weight:800;letter-spacing:.4px;color:#475569}.rqt-st .v{font-size:28px;font-weight:800;color:var(--c);line-height:1.2}
+.rqt-st .d{font-size:11.5px;color:#94A3B8}
+.rqt-steps{display:flex;align-items:flex-start;background:#fff;border:1px solid #E2E8F0;border-radius:18px;padding:18px 14px 14px;box-shadow:0 2px 12px rgba(11,36,71,.06);margin:6px 0 12px}
+.rqt-n{flex:0 0 150px;text-align:center}.rqt-n .dot{width:44px;height:44px;border-radius:50%;margin:0 auto 6px;display:flex;align-items:center;justify-content:center;
+  font-size:20px;font-weight:800;color:#fff;background:#CBD5E1;box-shadow:0 4px 10px rgba(15,23,42,.15)}
+.rqt-n.done .dot{background:#16A34A}.rqt-n.cur .dot{background:var(--c,#D97706);animation:rqtp 1.6s ease-in-out infinite}.rqt-n.late .dot{background:#DC2626}
+@keyframes rqtp{0%,100%{box-shadow:0 0 0 0 rgba(217,119,6,.45)}50%{box-shadow:0 0 0 10px rgba(217,119,6,0)}}
+.rqt-n .t{font-size:12.5px;font-weight:800;color:#0B2447}.rqt-n .d{font-size:12px;color:#0F172A;font-weight:600}.rqt-n .b{font-size:11px;color:#64748B}
+.rqt-n .w{display:inline-block;margin-top:4px;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:800;background:#FEF3C7;color:#92400E}
+.rqt-n.late .w{background:#FEE2E2;color:#991B1B}
+.rqt-c{flex:1;min-width:30px;margin-top:21px;height:3px;background:#CBD5E1;position:relative;border-radius:3px}
+.rqt-c.done{background:#16A34A}.rqt-c span{position:absolute;left:50%;top:-20px;transform:translateX(-50%);font-size:11px;font-weight:800;color:#0B2447;white-space:nowrap}
+@media (max-width:900px){.rqt-steps{overflow-x:auto}.rqt-pipe{grid-template-columns:repeat(2,minmax(0,1fr))}}
+</style>"""
+
+
+def _rqt_events():
+    """(approval events, PO-update events, handover events) from the audit log - times shifted to local (Dhaka) time"""
+    rows = q_c("""SELECT timestamp, username, action_type, details FROM audit_logs
+                  WHERE action_type IN ('EDIT_AUDIT_APPROVED','UPDATE_REQ_TRACKING','REQ_HANDOVER_ORDER') ORDER BY id""")
+    try:
+        off = local_now().replace(tzinfo=None) - datetime.now()
+        off = timedelta(minutes=round(off.total_seconds() / 1800) * 30)
+    except Exception:
+        off = timedelta(0)
+    appr, po, hand = {}, {}, {}
+    for r in rows:
+        try:
+            ts = datetime.strptime(str(r["timestamp"])[:19], "%Y-%m-%d %H:%M:%S") + off
+        except Exception:
+            continue
+        u, det = r["username"] or "", r["details"] or ""
+        if r["action_type"] == "EDIT_AUDIT_APPROVED":
+            m = re.match(r"Req (.+?) / (.*): approved ([-\d.eE+]+) -> ([-\d.eE+]+)\s*$", det)
+            if not m:
+                continue
+            try:
+                new = float(m.group(4))
+            except ValueError:
+                continue
+            e = appr.setdefault((m.group(1).strip(), m.group(2).strip()), {"first": None, "last": None})
+            if new > 0:
+                if e["first"] is None:
+                    e["first"] = (ts, u)
+                e["last"] = (ts, u)
+        elif r["action_type"] == "UPDATE_REQ_TRACKING":
+            m = re.match(r"Req (.+?) / (.*): PO=(.*?), received=", det)
+            if m and m.group(3).strip() not in ("", "None", "-"):
+                po[(m.group(1).strip(), m.group(2).strip())] = (ts, u)
+        else:
+            m = re.match(r"Req (.+?): ", det)
+            if m:
+                hand[m.group(1).strip()] = (ts, u)
+    return appr, po, hand
+
+
+def _rqt_build(sla):
+    """one dict per requisition line with every step date, who did it, days taken, current stage and days stuck"""
+    ev_a, ev_p, ev_h = _rqt_events()
+    today = local_now().date()
+    try:
+        hby = {int(r["id"]): r["hb"] for r in q_c("SELECT id, COALESCE(handover_by,'') AS hb FROM requisition_tracking")}
+    except Exception:
+        hby = {}
+    dd = lambda s: (parse_date(s).date() if s and parse_date(s) else None)
+    days = lambda a, b: (max((b - a).days, 0) if (a and b) else None)
+    out = []
+    for r in load_requisitions():
+        key = (str(r["req_no"]).strip(), str(r["item_name"]).strip())
+        rd, hd, pdt, rv = dd(r["req_date"]), dd(r.get("handover_date")), dd(r["po_date"]), dd(r["received_date"])
+        approved = float(r["aud_qty"] or 0) > 0
+        ea = ev_a.get(key) or {}
+        ad, ab = (ea["first"][0].date(), ea["first"][1]) if ea.get("first") else (None, "")
+        pb = ev_p[key][1] if key in ev_p else ""
+        full = r["calc_status"] == "Fully Received"
+        if not approved:
+            cur, since = "appr", rd
+        elif not (hd or pdt):
+            cur, since = "hand", ad or rd
+        elif not pdt:
+            cur, since = "po", hd or ad or rd
+        elif not full:
+            cur, since = "recv", pdt
+        else:
+            cur, since = "done", None
+        stuck = days(since, today) if since else 0
+        out.append({"id": int(r["id"]), "fac": r["factory_name"], "req_no": str(r["req_no"]), "dept": r["department"] or "", "item": r["item_name"], "size": r.get("size") or "",
+                    "req_qty": r["req_qty"], "aud_qty": r["aud_qty"], "rec_qty": r["rec_qty"], "pending": r["pending"], "status": r["calc_status"],
+                    "rd": rd, "ad": ad, "ab": ab, "hd": hd, "hm": r.get("sourcing_manager") or "", "hb": hby.get(int(r["id"]), "") or (ev_h.get(str(r["req_no"]).strip(), (None, ""))[1]),
+                    "pd": pdt, "pb": pb, "sup": r.get("supplier_name") or "", "rv": rv, "approved": approved, "full": full,
+                    "cur": cur, "stuck": stuck or 0, "over": cur != "done" and (stuck or 0) > sla.get(cur, 999),
+                    "d_appr": days(rd, ad), "d_hand": days(ad or rd, hd) if hd else None, "d_po": days(hd or ad or rd, pdt) if pdt else None,
+                    "d_recv": days(pdt, rv) if (pdt and rv and full) else None,
+                    "total": days(rd, rv if (full and rv) else today)})
+    return out
+
+
+def _rqt_group(lines):
+    """one row per requisition: the earliest unfinished step of any line is the requisition's step"""
+    g = {}
+    for x in lines:
+        g.setdefault((x["fac"], x["req_no"]), []).append(x)
+    out = []
+    for (fac, no), ls in g.items():
+        order = [RQT_ORDER.index(x["cur"]) if x["cur"] in RQT_ORDER else 99 for x in ls]
+        mn = min(order)
+        cur = RQT_ORDER[mn] if mn < 99 else "done"
+        cl = [x for x in ls if x["cur"] == cur] if cur != "done" else ls
+        mx = lambda k: max([x[k] for x in ls if x[k]], default=None)
+        who = lambda k: ", ".join(sorted({x[k] for x in ls if x[k]}))
+        allrv = all(x["full"] for x in ls)
+        avg = lambda k: (round(sum(x[k] for x in ls if x[k] is not None) / max(sum(1 for x in ls if x[k] is not None), 1)) if any(x[k] is not None for x in ls) else None)
+        out.append({"fac": fac, "req_no": no, "dept": ls[0]["dept"], "n": len(ls), "rd": min([x["rd"] for x in ls if x["rd"]], default=None),
+                    "n_appr": sum(1 for x in ls if x["approved"]), "ad": mx("ad"), "ab": who("ab"), "n_po": sum(1 for x in ls if x["pd"]),
+                    "hd": mx("hd"), "hm": who("hm"), "hb": who("hb"), "pd": mx("pd"), "pb": who("pb"), "sup": who("sup"), "rv": mx("rv") if allrv else None,
+                    "n_full": sum(1 for x in ls if x["full"]), "pending": sum(x["pending"] for x in ls), "cur": cur,
+                    "stuck": max([x["stuck"] for x in cl], default=0), "over": any(x["over"] for x in ls),
+                    "d_appr": avg("d_appr"), "d_hand": avg("d_hand"), "d_po": avg("d_po"), "d_recv": avg("d_recv"),
+                    "total": max([x["total"] for x in ls if x["total"] is not None], default=None)})
+    out.sort(key=lambda r: (r["cur"] == "done", -r["stuck"]))
+    return out
+
+
+def _rqt_stage_pill(cur, over=False, stuck=0):
+    c = RQT_COLOR[cur]
+    txt = RQT_LABEL[cur] + (f" · {stuck}d" if cur != "done" else "")
+    return (f"<span class='pl' style='background:{'#FEE2E2' if over else '#F1F5F9'};color:{'#991B1B' if over else c};border:1px solid {c}55'>"
+            f"{'⚠ ' if over else ''}{html_lib.escape(txt)}</span>")
+
+
+def _rqt_dt(d):
+    return d.strftime(DATE_FMT) if d else "-"
+
+
+def _rqt_stepper(g):
+    """horizontal timeline for one requisition: who, when, days between steps, and where it is stuck"""
+    e = html_lib.escape
+    nodes = [("📝", "Requisition", g["rd"], "", g["rd"] is not None, ""),
+             ("✔️", "Audit Approved", g["ad"] if g["n_appr"] else None, g["ab"], g["n_appr"] == g["n"], f"{g['n_appr']}/{g['n']} lines"),
+             ("🤝", "Handed to Sourcing", g["hd"], g["hb"] or g["hm"], bool(g["hd"] or g["pd"]), (f"Mgr: {g['hm']}" if g["hm"] else "")),
+             ("📌", "PO Issued", g["pd"], g["pb"], g["n_po"] == g["n"], f"{g['n_po']}/{g['n']} lines" + (f" · {g['sup']}" if g["sup"] else "")),
+             ("📥", "Received (GRN)", g["rv"], "", g["n_full"] == g["n"], f"{g['n_full']}/{g['n']} lines fully received")]
+    seg = [g["d_appr"], g["d_hand"], g["d_po"], g["d_recv"]]
+    cur_idx = {"appr": 1, "hand": 2, "po": 3, "recv": 4, "done": -1}[g["cur"]]
+    html = ["<div class='rqt-steps'>"]
+    for i, (ic, t, d, by, ok, sub) in enumerate(nodes):
+        cls = "done" if ok else ("cur" + (" late" if g["over"] else "") if i == cur_idx else "")
+        wait = f"<div class='w'>{'⚠ ' if g['over'] else '⏳ '}{g['stuck']} din apekkhay</div>" if i == cur_idx else ""
+        html.append(f"<div class='rqt-n {cls}' style='--c:{RQT_COLOR.get(g['cur'], '#16A34A')}'><div class='dot'>{'✓' if ok else ic}</div>"
+                    f"<div class='t'>{e(t)}</div><div class='d'>{_rqt_dt(d) if d else ('—' if not ok else 'date nei')}</div>"
+                    f"<div class='b'>{e(by) if by else ''}</div><div class='b'>{e(sub)}</div>{wait}</div>")
+        if i < 4:
+            lab = f"+{seg[i]}d" if seg[i] is not None else ""
+            html.append(f"<div class='rqt-c {'done' if nodes[i + 1][4] else ''}'><span>{lab}</span></div>")
+    html.append("</div>")
+    return "".join(html)
+
+
+def req_timeline_view():
+    st.markdown(_SCX_CSS + _RQT_CSS, unsafe_allow_html=True)
+    st.markdown(_scx_band("⏱", "Requisition Approval Timeline", "Ke kokhon approve korlo, kon dhape koto din legechhe, ekhon kothay atke ache"), unsafe_allow_html=True)
+    with st.expander("⚙ Koto din-er beshi hole 'Overdue' dhora hobe (SLA)"):
+        c = st.columns(4)
+        sla = {"appr": c[0].number_input("Audit approval (din)", 1, 60, 3, key="rqt_sla_appr"),
+               "hand": c[1].number_input("Handover (din)", 1, 60, 2, key="rqt_sla_hand"),
+               "po": c[2].number_input("PO issue (din)", 1, 90, int(PO_ALERT_DAYS), key="rqt_sla_po"),
+               "recv": c[3].number_input("Delivery / GRN (din)", 1, 120, 15, key="rqt_sla_recv")}
+    lines = _rqt_build(sla)
+    if not lines:
+        st.info("Requisition nei.")
+        return
+    d1, d2, _lbl = report_period("rqt", label="📅 Req Date somoykal")
+    if d1 is not None:
+        lines = [x for x in lines if x["rd"] and d1 <= x["rd"] <= d2]
+    f = st.columns([1.5, 1.7, 1.3, 2])
+    dept = f[0].selectbox("Department", ["All"] + sorted({x["dept"] for x in lines if x["dept"]}), key="rqt_dept")
+    stg = f[1].selectbox("Ekhon kon dhape", ["All"] + [RQT_LABEL[k] for k in RQT_ORDER + ["done"]], key="rqt_stage")
+    sts = f[2].selectbox("Obostha", ["All", "Overdue", "Open (not completed)", "Completed"], key="rqt_state")
+    term = f[3].text_input("🔍 Req No / Item", key="rqt_term").strip().lower()
+    if dept != "All":
+        lines = [x for x in lines if x["dept"] == dept]
+    if stg != "All":
+        lines = [x for x in lines if RQT_LABEL[x["cur"]] == stg]
+    if sts == "Overdue":
+        lines = [x for x in lines if x["over"]]
+    elif sts.startswith("Open"):
+        lines = [x for x in lines if x["cur"] != "done"]
+    elif sts == "Completed":
+        lines = [x for x in lines if x["cur"] == "done"]
+    if term:
+        lines = [x for x in lines if term in x["req_no"].lower() or term in str(x["item"]).lower()]
+    grp = _rqt_group(lines)
+    if not grp:
+        st.info("Ei filter-e kono requisition nei.")
+        return
+    avg = lambda k: (lambda v: f"{sum(v) / len(v):.1f}" if v else "-")([x[k] for x in lines if x[k] is not None])
+    open_n = sum(1 for g in grp if g["cur"] != "done")
+    cards = [("📑", "Requisition", f"{len(grp):,}", f"{len(lines):,} item line", "#DBEAFE", "#0B2447"), ("⏳", "Khola (open)", f"{open_n:,}", "Ekhono complete hoy ni", "#FEF3C7", "#92400E"),
+             ("⚠️", "Overdue", f"{sum(1 for g in grp if g['over']):,}", "SLA-r cheye beshi din", "#FEE2E2", "#DC2626"),
+             ("✔️", "Gor approval din", avg("d_appr"), "Req date → Audit approve", "#DCFCE7", "#0B2447"),
+             ("📌", "Gor PO din", avg("d_po"), "Handover/approve → PO", "#EDE9FE", "#0B2447"),
+             ("🚚", "Gor delivery din", avg("d_recv"), "PO → Received", "#E0F2FE", "#0B2447")]
+    st.markdown("<div class='scx-kpis'>" + "".join(
+        f"<div class='scx-k' style='--bg:{bg};--vc:{vc}'><div class='ic'>{i}</div><div><div class='l'>{l}</div><div class='v'>{v}</div><div class='d'>{s}</div></div></div>"
+        for i, l, v, s, bg, vc in cards) + "</div>", unsafe_allow_html=True)
+    cnt = {k: sum(1 for g in grp if g["cur"] == k) for k in RQT_ORDER + ["done"]}
+    ovr = {k: sum(1 for g in grp if g["cur"] == k and g["over"]) for k in RQT_ORDER}
+    st.markdown("<div class='rqt-pipe'>" + "".join(
+        f"<div class='rqt-st' style='--c:{RQT_COLOR[k]}'><div class='l'>{RQT_LABEL[k]}</div><div class='v'>{cnt[k]:,}</div>"
+        f"<div class='d'>{('⚠ ' + str(ovr[k]) + ' overdue') if ovr.get(k) else ('SLA ' + str(sla[k]) + ' din' if k in sla else 'shob step shesh')}</div></div>"
+        for k in RQT_ORDER + ["done"]) + "</div>", unsafe_allow_html=True)
+    view = lazy_tab_select(["📋 Requisition-wise", "📦 Item-wise (line)", "🐢 Bottlenecks"], "lz_rqt_tl")
+    if view == 0:
+        rows = [{"f": short_fac(g["fac"]), "r": g["req_no"], "d": g["dept"], "n": g["n"], "rd": _rqt_dt(g["rd"]), "ad": _rqt_dt(g["ad"]) if g["n_appr"] else "-",
+                 "da": g["d_appr"], "hd": _rqt_dt(g["hd"]), "dh": g["d_hand"], "pd": _rqt_dt(g["pd"]), "dp": g["d_po"], "rv": _rqt_dt(g["rv"]), "dr": g["d_recv"],
+                 "tt": g["total"], "pq": g["pending"], "st": _rqt_stage_pill(g["cur"], g["over"], g["stuck"])} for g in grp[:300]]
+        cols = [("SL", "r", "sl"), ("Unit", "f", "t"), ("Req No", "r", "t"), ("Department", "d", "t"), ("Lines", "n", "n"), ("Req Date", "rd", "t"),
+                ("Audit Approved", "ad", "t"), ("Days", "da", "n"), ("Handover", "hd", "t"), ("Days", "dh", "n"), ("PO Date", "pd", "t"), ("Days", "dp", "n"),
+                ("Received", "rv", "t"), ("Days", "dr", "n"), ("Total Days", "tt", "n"), ("Pending Qty", "pq", "n"), ("Ekhon kothay", "st", "raw")]
+        st.markdown(_scx_table(cols, rows), unsafe_allow_html=True)
+        if len(grp) > 300:
+            st.caption(f"Prothom 300-ti requisition dekhano holo (mot {len(grp):,}) - filter diye choto korun.")
+        lab = {f"{g['req_no']} · {short_fac(g['fac'])} · {g['dept']} · {g['n']} line": g for g in grp[:600]}
+        pick = _scx_search_select("🔎 Requisition bachun - full timeline dekhun", list(lab), "rqt_pick")
+        if pick:
+            g = lab[pick]
+            st.markdown(_rqt_stepper(g), unsafe_allow_html=True)
+            ls = [x for x in lines if x["req_no"] == g["req_no"] and x["fac"] == g["fac"]]
+            rows = [{"i": x["item"], "z": x["size"], "rq": x["req_qty"], "aq": x["aud_qty"], "rc": x["rec_qty"], "pq": x["pending"], "ad": _rqt_dt(x["ad"]) if x["approved"] else "-",
+                     "ab": x["ab"], "pd": _rqt_dt(x["pd"]), "rv": _rqt_dt(x["rv"]), "st": _rqt_stage_pill(x["cur"], x["over"], x["stuck"])} for x in ls]
+            st.markdown(_scx_table([("Item", "i", "t"), ("Size", "z", "t"), ("Req Qty", "rq", "n"), ("Approved Qty", "aq", "n"), ("Received", "rc", "n"), ("Pending", "pq", "n"),
+                                    ("Approved On", "ad", "t"), ("Approved By", "ab", "t"), ("PO Date", "pd", "t"), ("Received On", "rv", "t"), ("Ekhon kothay", "st", "raw")], rows),
+                        unsafe_allow_html=True)
+            ev = qdf("SELECT timestamp, username, action_type, details FROM audit_logs WHERE details LIKE %s ORDER BY id DESC LIMIT 80", (f"%Req {g['req_no']}%",))
+            keep = {"EDIT_AUDIT_APPROVED": "Audit Approved Qty", "UPDATE_REQ_TRACKING": "PO / Receiving update", "REQ_HANDOVER_ORDER": "Handover / Order",
+                    "EDIT_REQUISITION": "Requisition edited", "EDIT_REQ_STATUS": "Status changed", "REQ_SIZE_FIX": "Size corrected"}
+            ev = ev[ev["action_type"].isin(keep)] if not ev.empty else ev
+            with st.expander(f"🕘 Audit trail - Req {g['req_no']} ({len(ev)} ghotona)"):
+                if ev.empty:
+                    st.caption("Kono log nei.")
+                else:
+                    st.markdown(_scx_table([("When", "t", "t"), ("By", "u", "t"), ("Action", "a", "t"), ("Details", "d", "t")],
+                                           [{"t": str(r.timestamp)[:16], "u": r.username, "a": keep.get(r.action_type, r.action_type), "d": str(r.details)[:140]} for r in ev.itertuples()]),
+                                unsafe_allow_html=True)
+        exp = pd.DataFrame([{"Unit": g["fac"], "Req No": g["req_no"], "Department": g["dept"], "Lines": g["n"], "Req Date": _rqt_dt(g["rd"]),
+                             "Audit Approved On": _rqt_dt(g["ad"]) if g["n_appr"] else "", "Approved By": g["ab"], "Approval Days": g["d_appr"], "Handover": _rqt_dt(g["hd"]),
+                             "Handover Days": g["d_hand"], "PO Date": _rqt_dt(g["pd"]), "PO Days": g["d_po"], "Received": _rqt_dt(g["rv"]), "Delivery Days": g["d_recv"],
+                             "Total Days": g["total"], "Pending Qty": g["pending"], "Stage": RQT_LABEL[g["cur"]], "Days Waiting": g["stuck"], "Overdue": "Yes" if g["over"] else ""} for g in grp])
+        export_buttons(exp, "requisition_timeline", "Requisition Approval Timeline")
+    elif view == 1:
+        rows = [{"f": short_fac(x["fac"]), "r": x["req_no"], "d": x["dept"], "i": x["item"], "z": x["size"], "rq": x["req_qty"], "aq": x["aud_qty"], "rc": x["rec_qty"],
+                 "rd": _rqt_dt(x["rd"]), "ad": _rqt_dt(x["ad"]) if x["approved"] else "-", "da": x["d_appr"], "ab": x["ab"], "pd": _rqt_dt(x["pd"]), "dp": x["d_po"],
+                 "rv": _rqt_dt(x["rv"]), "tt": x["total"], "st": _rqt_stage_pill(x["cur"], x["over"], x["stuck"])} for x in sorted(lines, key=lambda x: (x["cur"] == "done", -x["stuck"]))[:400]]
+        cols = [("SL", "r", "sl"), ("Unit", "f", "t"), ("Req No", "r", "t"), ("Department", "d", "t"), ("Item", "i", "t"), ("Size", "z", "t"), ("Req Qty", "rq", "n"),
+                ("Approved Qty", "aq", "n"), ("Received", "rc", "n"), ("Req Date", "rd", "t"), ("Approved On", "ad", "t"), ("Days", "da", "n"), ("Approved By", "ab", "t"),
+                ("PO Date", "pd", "t"), ("Days", "dp", "n"), ("Received On", "rv", "t"), ("Total Days", "tt", "n"), ("Ekhon kothay", "st", "raw")]
+        st.markdown(_scx_table(cols, rows), unsafe_allow_html=True)
+        if len(lines) > 400:
+            st.caption(f"Prothom 400-ti line dekhano holo (mot {len(lines):,}).")
+        export_buttons(pd.DataFrame([{"Unit": x["fac"], "Req No": x["req_no"], "Department": x["dept"], "Item": x["item"], "Size": x["size"], "Req Qty": x["req_qty"],
+                                      "Approved Qty": x["aud_qty"], "Received": x["rec_qty"], "Req Date": _rqt_dt(x["rd"]), "Approved On": _rqt_dt(x["ad"]) if x["approved"] else "",
+                                      "Approved By": x["ab"], "PO Date": _rqt_dt(x["pd"]), "Received On": _rqt_dt(x["rv"]), "Total Days": x["total"],
+                                      "Stage": RQT_LABEL[x["cur"]], "Days Waiting": x["stuck"]} for x in lines]), "requisition_timeline_items", "Requisition Timeline (item-wise)")
+    else:
+        st.caption("Kon dhape shobcheye beshi shomoy jacche - department-wise gor din (jegulo complete hoyeche segulor hishab).")
+        deps = {}
+        for g in grp:
+            deps.setdefault(g["dept"] or "(No department)", []).append(g)
+        rows = []
+        for dn, gs in sorted(deps.items()):
+            m = lambda k: (lambda v: sum(v) / len(v) if v else None)([g[k] for g in gs if g[k] is not None])
+            rows.append({"d": dn, "n": len(gs), "a": m("d_appr"), "h": m("d_hand"), "p": m("d_po"), "r": m("d_recv"), "t": m("total"),
+                         "o": sum(1 for g in gs if g["over"])})
+        fmt = lambda r: {**r, **{k: (None if r[k] is None else round(r[k], 1)) for k in ("a", "h", "p", "r", "t")}}
+        rows = [fmt(r) for r in rows]
+        st.markdown(_scx_table([("Department", "d", "t"), ("Requisition", "n", "n"), ("Gor Approval din", "a", "m"), ("Gor Handover din", "h", "m"), ("Gor PO din", "p", "m"),
+                                ("Gor Delivery din", "r", "m"), ("Gor Total din", "t", "m"), ("Ekhon Overdue", "o", "n")], rows), unsafe_allow_html=True)
+        try:
+            import altair as alt
+            tot = [("Audit approval", [x["d_appr"] for x in lines if x["d_appr"] is not None]), ("Handover", [x["d_hand"] for x in lines if x["d_hand"] is not None]),
+                   ("PO issue", [x["d_po"] for x in lines if x["d_po"] is not None]), ("Delivery / GRN", [x["d_recv"] for x in lines if x["d_recv"] is not None])]
+            cd = pd.DataFrame([{"Step": n, "Avg days": (sum(v) / len(v)) if v else 0} for n, v in tot])
+            st.altair_chart(alt.Chart(cd).mark_bar(cornerRadiusTopLeft=7, cornerRadiusTopRight=7, color="#1D4ED8").encode(
+                x=alt.X("Step:N", sort=None, title=None), y=alt.Y("Avg days:Q", title="Gor din"),
+                tooltip=["Step", alt.Tooltip("Avg days:Q", format=".1f")]).properties(height=230), use_container_width=True)
+        except Exception:
+            pass
+        slow = sorted([g for g in grp if g["cur"] != "done"], key=lambda g: -g["stuck"])[:10]
+        if slow:
+            st.markdown(_scx_band("🐢", "Shobcheye beshi din atke thaka 10-ti requisition"), unsafe_allow_html=True)
+            st.markdown(_scx_table([("SL", "r", "sl"), ("Unit", "f", "t"), ("Req No", "r", "t"), ("Department", "d", "t"), ("Req Date", "rd", "t"), ("Pending Qty", "pq", "n"),
+                                    ("Ekhon kothay", "st", "raw")],
+                                   [{"f": short_fac(g["fac"]), "r": g["req_no"], "d": g["dept"], "rd": _rqt_dt(g["rd"]), "pq": g["pending"],
+                                     "st": _rqt_stage_pill(g["cur"], g["over"], g["stuck"])} for g in slow]), unsafe_allow_html=True)
+    st.caption("Approval-er tarikh/ke - Audit Approved Qty save korar log theke; je requisition import-er shomoy-i approved chilo tar approval date jana jay na ('-' dekhabe). "
+               "PO ar handover-er tarikh requisition record theke.")
+
+
 def tab_requisition():
-    _lbls = ["📋 Requisition list", "🎯 Req Tracker (Premium)", "🧾 Audit Reconciliation (item search)", "🏷 Department Report"]
+    _lbls = ["📋 Requisition list", "🎯 Req Tracker (Premium)", "🧾 Audit Reconciliation (item search)", "🏷 Department Report", "⏱ Approval Timeline"]
     _top = _lbls[lazy_tab_select(_lbls, "lz_reqtop")]
+    if _top == _lbls[4]:
+        try:
+            req_timeline_view()
+        except Exception as e:
+            st.error(f"Approval Timeline load kora jayni: {e}")
+        return
     if _top == _lbls[2]:
         try:
             audit_manual_view()
@@ -23960,7 +24279,7 @@ def rp_audit_stock(P):
 
 def rp_subcon(P):
     """SUB-CONTRACT CHEMICAL REPORT for the Reports page (read-only) - same numbers as the module dashboard"""
-    run_once_per_process("subcon_tables", ensure_subcon_tables)
+    run_once_per_process(f"subcon_tables_v{SCX_SCHEMA_V}", ensure_subcon_tables)
     df = _scx_load()
     if not df.empty:
         df = df[df["factory_name"].isin(list(P["units"]))]
@@ -24180,7 +24499,7 @@ def _tab_reports_body():
             lines.append(("Grouped by", P["group"]))
         elif f == "subcon":
             try:
-                run_once_per_process("subcon_tables", ensure_subcon_tables)
+                run_once_per_process(f"subcon_tables_v{SCX_SCHEMA_V}", ensure_subcon_tables)
                 _sn = _scx_subcons()
             except Exception:
                 _sn = []
@@ -33586,6 +33905,7 @@ if NAV_ASSET not in TAB_NAMES:
 NAV_SUBCON = "🧪 Sub-Contract Chemicals"
 if NAV_SUBCON not in TAB_NAMES:
     TAB_NAMES.append(NAV_SUBCON)
+SCX_SCHEMA_V = 3          # bump when ensure_subcon_tables gets new columns / tables, so a server that is still running keeps up
 SCX_PAY_MODES = ["Bank Transfer", "Cheque", "Cash", "bKash / Mobile", "Adjustment"]
 
 
@@ -33938,16 +34258,18 @@ _SCX_CSS = """<style>
 .scx-empty .e{font-size:46px}.scx-empty b{display:block;font-size:18px;color:#0B2447;margin:6px 0 3px}.scx-empty span{color:#64748B;font-size:13.5px}
 .st-key-scxp_root div[data-testid="stVerticalBlockBorderWrapper"]{border-radius:16px;box-shadow:0 2px 12px rgba(11,36,71,.05);border-color:#E2E8F0;background:#fff}
 .st-key-scxp_root div[data-testid="stDataFrame"],.st-key-scxp_root div[data-testid="stDataEditor"]{border-radius:14px;overflow:hidden;border:1px solid #E2E8F0;box-shadow:0 2px 12px rgba(11,36,71,.06)}
-.st-key-scxp_root button[kind="primary"]{border-radius:11px;font-weight:700;color:#fff;border:0;background:linear-gradient(135deg,#0B2447,#1D4ED8);
-  box-shadow:0 6px 16px rgba(29,78,216,.30);transition:transform .15s ease,filter .15s ease}
-.st-key-scxp_root button[kind="primary"]:hover{filter:brightness(1.12);transform:translateY(-1px)}
-.st-key-scxp_root button[kind="primary"]:disabled{background:#CBD5E1;box-shadow:none;color:#fff}
+.st-key-scxp_root button[kind="primary"],.st-key-scxp_root button[data-testid="stBaseButton-primary"]{border-radius:11px!important;font-weight:700;color:#fff!important;border:0!important;
+  background:linear-gradient(135deg,#0B2447,#1D4ED8)!important;box-shadow:0 6px 16px rgba(29,78,216,.30)!important;transition:transform .15s ease,filter .15s ease}
+.st-key-scxp_root button[kind="primary"] p,.st-key-scxp_root button[data-testid="stBaseButton-primary"] p{color:#fff!important}
+.st-key-scxp_root button[kind="primary"]:hover,.st-key-scxp_root button[data-testid="stBaseButton-primary"]:hover{filter:brightness(1.15);transform:translateY(-1px)}
+.st-key-scxp_root button[kind="primary"]:disabled,.st-key-scxp_root button[data-testid="stBaseButton-primary"]:disabled{background:#CBD5E1!important;box-shadow:none!important}
 .st-key-scxp_root div[data-testid="stRadio"] div[role="radiogroup"]{gap:6px;flex-wrap:wrap;background:#fff;padding:6px;border-radius:14px;border:1px solid #E2E8F0;box-shadow:0 2px 10px rgba(11,36,71,.05)}
 .st-key-scxp_root div[data-testid="stRadio"] div[role="radiogroup"] label{background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:6px 14px;margin:0;cursor:pointer;transition:all .15s ease}
 .st-key-scxp_root div[data-testid="stRadio"] div[role="radiogroup"] label:hover{background:#EAF1FF;border-color:#BFD3FF}
 .st-key-scxp_root div[data-testid="stRadio"] div[role="radiogroup"] label:has(input:checked){background:linear-gradient(135deg,#1D4ED8,#2563EB);border-color:#1D4ED8;box-shadow:0 5px 14px rgba(29,78,216,.30)}
 .st-key-scxp_root div[data-testid="stRadio"] div[role="radiogroup"] label:has(input:checked) p{color:#fff!important;font-weight:700}
-.st-key-scxp_root div[data-testid="stRadio"] div[role="radiogroup"] label>div:first-child{display:none}
+.st-key-scxp_root label[data-baseweb="radio"] > div:not(:has(p)),.st-key-scxp_root label[data-baseweb="radio"] > span{display:none!important}
+.st-key-scxp_root label[data-baseweb="radio"]{display:flex;align-items:center}
 .st-key-scx_qa_new button,.st-key-scx_qa_pay button,.st-key-scx_qa_rep button,.st-key-scx_qa_prt button,.st-key-scx_qa_rate button{height:78px;border:0;border-radius:14px;color:#fff;font-weight:700;
   box-shadow:0 8px 18px rgba(11,36,71,.18);transition:transform .15s ease}
 .st-key-scx_qa_new button{background:linear-gradient(135deg,#1D4ED8,#2563EB)}.st-key-scx_qa_pay button{background:linear-gradient(135deg,#15803D,#22C55E)}
@@ -34040,6 +34362,8 @@ def _scx_table(cols, rows, foot=None):
                 txt = "" if blank else _inrq(v)
             elif k in ("m", "neg"):
                 txt = "-" if blank else _inr(v, 2)
+            elif k == "raw":
+                txt = "" if blank else str(v)
             elif k == "pill":
                 txt = _scx_pill(v)
             else:
@@ -34076,13 +34400,27 @@ def _scx_suppliers():
     return sorted(names, key=str.lower)
 
 
+def _scx_empty():
+    """no entries yet: an empty table with the right column types, so the whole dashboard can still be drawn (all zeros)"""
+    txt = ["factory_name", "subcon_name", "gate_pass_no", "issue_date", "item_name", "unit", "rate_status", "pay_status", "month", "supplier", "ref", "bill_no",
+           "remarks", "entered_by", "created_at", "updated_by", "updated_at", "rate_by", "rate_date", "challan_no", "supplier_name"]
+    num = ["id", "qty", "rate", "total", "paid", "pending", "bill_id", "tx_id"]
+    cols = {c: pd.Series(dtype="object") for c in txt}
+    cols.update({c: pd.Series(dtype="float64") for c in num})
+    cols["id"] = pd.Series(dtype="int64")
+    cols["d"] = pd.Series(dtype="datetime64[ns]")
+    cols["overpaid"] = pd.Series(dtype="bool")
+    cols["last_pay"] = pd.Series(dtype="object")
+    return pd.DataFrame(cols)
+
+
 def _scx_load():
     """One enriched row per transaction (= one chemical line on a gate pass).
     total = qty x rate (only when a rate is given - otherwise the line is UNPRICED, never zero-cost)
     paid  = its own payments + its share of any old bill-level payments;  pending = total - paid (never shown negative)."""
     iss = qdf("SELECT * FROM subcon_issues")
     if iss.empty:
-        return iss
+        return _scx_empty()
     iss = iss.copy()
     for c in ("supplier_name", "challan_no", "updated_by", "updated_at", "rate_by", "remarks", "unit", "entered_by", "created_at", "gate_pass_no", "item_name"):
         iss[c] = iss[c].fillna("").astype(str) if c in iss.columns else ""
@@ -34274,6 +34612,8 @@ def _scx_tx_table(d, limit=150):
     st.markdown(_scx_table(_SCX_TX_COLS, rows, foot), unsafe_allow_html=True)
     if len(d) > limit:
         st.caption(f"Prothom {limit}-ti dekhano holo (mot {len(d):,}) - filter diye choto korun ba Excel-e shob pawa jabe.")
+    elif d.empty:
+        st.caption("Ei filter-e ekhono kono transaction nei.")
 
 
 def _scx_summ(d, key, label):
@@ -35083,12 +35423,10 @@ def _scx_pay_ui(df):
 def _scx_dashboard():
     df = _scx_load()
     if df.empty:
-        st.markdown("<div class='scx-empty'><div class='e'>🧪</div><b>Ekhono kono Chemical Transfer nei</b>"
-                    "<span>Prothome '🧴 Chemical List'-e chemical add korun, tarpor '➕ New Transfer (Store)' diye prothom entry likhun.</span></div>", unsafe_allow_html=True)
-        c = st.columns(2)
-        c[0].button("➕ New Transfer", key="scx_qa_new", on_click=_scx_go, args=(SCX_SECS[1],), use_container_width=True)
-        c[1].button("🧴 Chemical List", key="scx_qa_rep", on_click=_scx_go, args=(SCX_SECS[4],), use_container_width=True)
-        return
+        st.markdown("<div class='scx-empty' style='padding:12px 18px;margin-bottom:10px;text-align:left'><span style='font-size:22px'>🧪</span> "
+                    "<b style='display:inline;font-size:15px'>Ekhono kono Chemical Transfer entry nei.</b> "
+                    "<span>Prothome '🧴 Chemical List'-e chemical add korun, tarpor '➕ New Transfer (Store)' diye prothom entry likhun - tarpor ei dashboard-e KPI, chart ar report ashbe.</span></div>",
+                    unsafe_allow_html=True)
     d, fl = _scx_filter_ui(df)
     if d.empty and len(df):
         st.info("Ei filter-e kono transaction nei. 'All dates' tick korun ba '↺ Reset' chapun.")
@@ -35305,7 +35643,7 @@ def _scx_xlsx(d, fl):
 def tab_subcon():
     st.markdown(_SCX_CSS, unsafe_allow_html=True)
     try:
-        run_once_per_process("subcon_tables", ensure_subcon_tables)
+        run_once_per_process(f"subcon_tables_v{SCX_SCHEMA_V}", ensure_subcon_tables)
     except Exception as e:
         st.error(f"Sub-Contract table setup failed: {e}")
         return
